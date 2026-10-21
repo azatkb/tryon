@@ -1,18 +1,77 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useFaceLandmarker } from './useFaceLandmarker.js';
-import { renderLips } from './lipRenderer.js';
-import { PRODUCTS } from './products.js';
+import { renderMakeup, drawLandmarks, drawSegMask } from './lipRenderer.js';
+import { renderMakeupGL, glAvailable } from './webglLips.js';
+import { initSegmenter, segmentLips, segmentHair, segmenterReady, resetSegmenter } from './lipSegmenter.js';
+import { PRODUCTS, EYE_SHADES, FOUNDATION_SHADES, BLUSH_SHADES, HAIR_SHADES } from './products.js';
 
 const FINISHES = ['matte', 'satin', 'gloss'];
+const MOVE_THRESH = 0.0015; // per-frame face motion above this = "moving": drop the ONNX edge, follow landmarks
+const PREDICT = 1.0;        // landmark extrapolation (frames) to cancel detection latency; 0 = off
+
+// Extrapolate landmarks along their velocity so the mask keeps up with motion
+// instead of trailing one detection behind. prev/cur are landmark arrays.
+function predictLandmarks(cur, prev, k) {
+  if (!prev || k <= 0 || prev.length !== cur.length) return cur;
+  const out = new Array(cur.length);
+  for (let i = 0; i < cur.length; i++) {
+    const c = cur[i], p = prev[i];
+    out[i] = { x: c.x + (c.x - p.x) * k, y: c.y + (c.y - p.y) * k, z: c.z };
+  }
+  return out;
+}
+
+// Tight-ish face box from all landmarks (normalised) -> pixel rect, with padding.
+function faceBBox(lms, w, h, pad = 0.12) {
+  let minx = 1, miny = 1, maxx = 0, maxy = 0;
+  for (const p of lms) {
+    if (p.x < minx) minx = p.x; if (p.x > maxx) maxx = p.x;
+    if (p.y < miny) miny = p.y; if (p.y > maxy) maxy = p.y;
+  }
+  const pw = (maxx - minx) * pad, ph = (maxy - miny) * pad;
+  const x = Math.max(0, minx - pw) * w, y = Math.max(0, miny - ph) * h;
+  const x1 = Math.min(1, maxx + pw) * w, y1 = Math.min(1, maxy + ph) * h;
+  return { x, y, w: x1 - x, h: y1 - y };
+}
 
 export default function App() {
   const { landmarkerRef, ready, error } = useFaceLandmarker();
 
   const [mode, setMode] = useState('camera'); // 'camera' | 'photo'
-  const [sel, setSel] = useState(0); // selected product index
+  const [target, setTarget] = useState('lips'); // which region the controls edit
+  // lips
+  const [sel, setSel] = useState(0);
   const [intensity, setIntensity] = useState(0.7);
   const [finish, setFinish] = useState('satin');
+  // eyeshadow
+  const [eyeSel, setEyeSel] = useState(0);
+  const [eyeOn, setEyeOn] = useState(false);
+  const [eyeIntensity, setEyeIntensity] = useState(0.5);
+  // lashes
+  const [lashOn, setLashOn] = useState(false);
+  const [lashIntensity, setLashIntensity] = useState(0.8);
+  // foundation
+  const [fndSel, setFndSel] = useState(2);
+  const [fndOn, setFndOn] = useState(false);
+  const [fndIntensity, setFndIntensity] = useState(0.3);
+  // blush
+  const [blushSel, setBlushSel] = useState(0);
+  const [blushOn, setBlushOn] = useState(false);
+  const [blushIntensity, setBlushIntensity] = useState(0.4);
+  // hair (needs segmentation)
+  const [hairSel, setHairSel] = useState(1);
+  const [hairOn, setHairOn] = useState(false);
+  const [hairIntensity, setHairIntensity] = useState(0.7);
+
+  const [lightResponse, setLightResponse] = useState(0.5);
   const [compare, setCompare] = useState(false);
+  const [showPoints, setShowPoints] = useState(false);
+  const [useGL, setUseGL] = useState(glAvailable());
+  const [useSeg, setUseSeg] = useState(false); // ONNX lip-edge refine — off by default (heavier)
+  const [segReady, setSegReady] = useState(false);
+  const [segErr, setSegErr] = useState(null);
+  const [segDebug, setSegDebug] = useState(false);
+  const [segHasMask, setSegHasMask] = useState(false);
   const [faceSeen, setFaceSeen] = useState(false);
   const [camError, setCamError] = useState(null);
 
@@ -22,17 +81,112 @@ export default function App() {
   const rafRef = useRef(0);
   const streamRef = useRef(null);
   const lastResRef = useRef(null);
+  const segMaskRef = useRef(null);
+  const faceBoxRef = useRef(null);
+  const srcRef = useRef(null); // current frame source (video/image) for the WebGL path
+  const procRef = useRef(null); // offscreen processed canvas (feeds the PiP)
+  const pipRef = useRef(null);  // small processed preview (top-right)
+  const cropRef = useRef(null); // smoothed portrait crop rect on the face
+  const hairMaskRef = useRef(null); // latest hair segmentation mask (full frame)
+  const motionRef = useRef(0); // per-frame face motion (normalised), EMA-smoothed
+  const prevLmRef = useRef(null);   // previous few points, for the motion metric
+  const prevFullRef = useRef(null); // previous full landmark array, for extrapolation
 
   // live option values for the render loop (avoid stale closures)
   const optsRef = useRef({});
-  optsRef.current = { color: PRODUCTS[sel].hex, intensity, finish, compare };
+  optsRef.current = {
+    lips: { color: PRODUCTS[sel].hex, intensity, finish, lightResponse },
+    eyes: eyeOn ? { color: EYE_SHADES[eyeSel].hex, intensity: eyeIntensity, lightResponse } : null,
+    lashes: lashOn ? { intensity: lashIntensity } : null,
+    foundation: fndOn ? { color: FOUNDATION_SHADES[fndSel].hex, intensity: fndIntensity } : null,
+    blush: blushOn ? { color: BLUSH_SHADES[blushSel].hex, intensity: blushIntensity, lightResponse } : null,
+    hair: hairOn ? { color: HAIR_SHADES[hairSel].hex, intensity: hairIntensity } : null,
+    compare, showPoints, useGL, useSeg, segDebug,
+  };
 
   const selectProduct = useCallback((i) => { setSel(i); setFinish(PRODUCTS[i].finish); }, []);
 
-  const draw = useCallback((ctx, w, h, lms) => {
+  // Apply makeup onto `ctx` (which already holds the frame). source = the frame
+  // element for the WebGL path.
+  const applyMakeup = useCallback((ctx, w, h, lms, source) => {
     const o = optsRef.current;
-    if (lms && !o.compare) renderLips(ctx, w, h, lms, o);
+    if (!lms || o.compare) return;
+    const still = motionRef.current <= MOVE_THRESH;
+    const lips = { ...o.lips };
+    if (o.useSeg && still && segMaskRef.current) lips.overrideMask = segMaskRef.current;
+    const hair = o.hair && hairMaskRef.current ? { ...o.hair, mask: hairMaskRef.current } : null;
+    const layers = { foundation: o.foundation, blush: o.blush, hair, eyes: o.eyes, lashes: o.lashes, lips };
+    if (o.useGL && source) {
+      const glc = renderMakeupGL(source, w, h, lms, layers);
+      if (glc) { ctx.drawImage(glc, 0, 0, w, h); return; }
+    }
+    renderMakeup(ctx, w, h, lms, layers); // Canvas fallback
   }, []);
+
+  // Portrait crop centred on the face (face fills the frame), smoothed over time.
+  const computeCrop = useCallback((lms, w, h, aspect) => {
+    let want;
+    if (lms) {
+      let minx = 1, miny = 1, maxx = 0, maxy = 0;
+      for (const p of lms) {
+        if (p.x < minx) minx = p.x; if (p.x > maxx) maxx = p.x;
+        if (p.y < miny) miny = p.y; if (p.y > maxy) maxy = p.y;
+      }
+      const fh = (maxy - miny) * h;
+      const cx = ((minx + maxx) / 2) * w, cy = ((miny + maxy) / 2) * h - fh * 0.05;
+      let sh = Math.min(h, fh * 1.9);     // face ~53% of the crop height
+      let sw = sh * aspect;
+      if (sw > w) { sw = w; sh = sw / aspect; }
+      want = { sw, sh, cx, cy };
+    } else {
+      want = { sw: Math.min(w, h * aspect), sh: h, cx: w / 2, cy: h / 2 };
+    }
+    const prev = cropRef.current;
+    const k = prev ? 0.2 : 1; // EMA smoothing
+    const s = prev ? {
+      sw: prev.sw + (want.sw - prev.sw) * k,
+      sh: prev.sh + (want.sh - prev.sh) * k,
+      cx: prev.cx + (want.cx - prev.cx) * k,
+      cy: prev.cy + (want.cy - prev.cy) * k,
+    } : want;
+    cropRef.current = s;
+    let sx = s.cx - s.sw / 2, sy = s.cy - s.sh / 2;
+    sx = Math.max(0, Math.min(w - s.sw, sx));
+    sy = Math.max(0, Math.min(h - s.sh, sy));
+    return { sx, sy, sw: s.sw, sh: s.sh };
+  }, []);
+
+  // Big view = original (portrait-cropped on the face). Small PiP = processed, same crop.
+  const renderViews = useCallback((source, w, h, lms) => {
+    const main = canvasRef.current;
+    if (!main) return;
+    const o = optsRef.current;
+
+    // processed into an offscreen canvas (full frame)
+    let proc = procRef.current;
+    if (!proc) { proc = document.createElement('canvas'); procRef.current = proc; }
+    if (proc.width !== w || proc.height !== h) { proc.width = w; proc.height = h; }
+    const pctx = proc.getContext('2d');
+    pctx.drawImage(source, 0, 0, w, h);
+    applyMakeup(pctx, w, h, lms, source);
+
+    // portrait output size (3:4) cropped on the face
+    const outH = h, outW = Math.round(h * 0.75);
+    if (main.width !== outW || main.height !== outH) { main.width = outW; main.height = outH; }
+    const { sx, sy, sw, sh } = computeCrop(lms, w, h, outW / outH);
+
+    // big = original crop
+    const ctx = main.getContext('2d');
+    ctx.drawImage(source, sx, sy, sw, sh, 0, 0, outW, outH);
+
+    // small PiP = processed, same crop
+    const pip = pipRef.current;
+    if (pip) {
+      const pw = Math.max(2, Math.round(outW * 0.42)), ph = Math.max(2, Math.round(outH * 0.42));
+      if (pip.width !== pw || pip.height !== ph) { pip.width = pw; pip.height = ph; }
+      pip.getContext('2d').drawImage(proc, sx, sy, sw, sh, 0, 0, pw, ph);
+    }
+  }, [applyMakeup, computeCrop]);
 
   // ---------- CAMERA ----------
   const startCamera = useCallback(async () => {
@@ -41,7 +195,7 @@ export default function App() {
     try {
       await fl.setOptions({ runningMode: 'VIDEO' });
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
+        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
         audio: false,
       });
       streamRef.current = stream;
@@ -61,11 +215,34 @@ export default function App() {
           lastTime = v.currentTime;
           try { lastResRef.current = fl.detectForVideo(v, performance.now()); } catch (_) {}
         }
-        const ctx = cv.getContext('2d');
-        ctx.drawImage(v, 0, 0, cv.width, cv.height);
-        const lms = lastResRef.current?.faceLandmarks?.[0];
-        setFaceSeen(!!lms);
-        draw(ctx, cv.width, cv.height, lms);
+        srcRef.current = v;
+        const raw = lastResRef.current?.faceLandmarks?.[0];
+        let lms = raw;
+        if (raw) {
+          // motion estimate from a few stable points (normalised coords)
+          const idxs = [1, 13, 14, 61, 291, 199];
+          const prev = prevLmRef.current;
+          if (prev) {
+            let d = 0;
+            for (const i of idxs) d += Math.hypot(raw[i].x - prev[i].x, raw[i].y - prev[i].y);
+            motionRef.current = motionRef.current * 0.35 + (d / idxs.length) * 0.65;
+          }
+          const snap = {};
+          for (const i of idxs) snap[i] = { x: raw[i].x, y: raw[i].y };
+          prevLmRef.current = snap;
+
+          // extrapolate along velocity to cancel detection latency (mask keeps up with motion)
+          lms = predictLandmarks(raw, prevFullRef.current, PREDICT);
+          prevFullRef.current = raw;
+
+          faceBoxRef.current = faceBBox(lms, cv.width, cv.height);
+          // drop the ONNX mask the instant we move; segmentation resumes when still
+          if (motionRef.current > MOVE_THRESH && segMaskRef.current) {
+            segMaskRef.current = null; setSegHasMask(false);
+          }
+        }
+        setFaceSeen(!!raw);
+        renderViews(v, cv.width, cv.height, lms);
       };
       cancelAnimationFrame(rafRef.current);
       tick();
@@ -73,7 +250,7 @@ export default function App() {
       console.error(e);
       setCamError(e?.message || String(e));
     }
-  }, [landmarkerRef, draw]);
+  }, [landmarkerRef, renderViews]);
 
   const stopCamera = useCallback(() => {
     cancelAnimationFrame(rafRef.current);
@@ -91,22 +268,38 @@ export default function App() {
     await fl.setOptions({ runningMode: 'IMAGE' });
     cv.width = img.naturalWidth;
     cv.height = img.naturalHeight;
-    const ctx = cv.getContext('2d');
-    ctx.drawImage(img, 0, 0, cv.width, cv.height);
+    srcRef.current = img;
     let lms = null;
     try { lms = fl.detect(img)?.faceLandmarks?.[0]; } catch (e) { console.error(e); }
     lastResRef.current = { faceLandmarks: lms ? [lms] : [] };
     setFaceSeen(!!lms);
-    draw(ctx, cv.width, cv.height, lms);
-  }, [landmarkerRef, draw]);
+    // segmentation for the still (if enabled and loaded)
+    if (optsRef.current.useSeg && segmenterReady() && lms) {
+      resetSegmenter();
+      const bbox = faceBBox(lms, cv.width, cv.height);
+      try { segMaskRef.current = await segmentLips(img, bbox, cv.width, cv.height); }
+      catch (e) { console.error('[seg] inference failed:', e); segMaskRef.current = null; }
+      setSegHasMask(!!segMaskRef.current);
+    } else {
+      segMaskRef.current = null;
+      setSegHasMask(false);
+    }
+    // hair segmentation for the still
+    if (hairOn && segmenterReady()) {
+      try { hairMaskRef.current = await segmentHair(img, cv.width, cv.height); }
+      catch (e) { console.error('[hair-seg] failed:', e); hairMaskRef.current = null; }
+    } else {
+      hairMaskRef.current = null;
+    }
+    renderViews(img, cv.width, cv.height, lms);
+  }, [landmarkerRef, renderViews, hairOn]);
 
   const redrawPhoto = useCallback(() => {
     const img = imgRef.current, cv = canvasRef.current;
     if (!img || !cv || !img.naturalWidth) return;
-    const ctx = cv.getContext('2d');
-    ctx.drawImage(img, 0, 0, cv.width, cv.height);
-    draw(ctx, cv.width, cv.height, lastResRef.current?.faceLandmarks?.[0]);
-  }, [draw]);
+    srcRef.current = img;
+    renderViews(img, cv.width, cv.height, lastResRef.current?.faceLandmarks?.[0]);
+  }, [renderViews]);
 
   const onFile = useCallback((e) => {
     const f = e.target.files?.[0];
@@ -127,9 +320,97 @@ export default function App() {
   // re-render the still when controls change (camera repaints itself each frame)
   useEffect(() => {
     if (mode === 'photo') redrawPhoto();
-  }, [sel, intensity, finish, compare, mode, redrawPhoto]);
+  }, [sel, eyeSel, eyeOn, intensity, eyeIntensity, lashOn, lashIntensity, fndSel, fndOn, fndIntensity,
+      blushSel, blushOn, blushIntensity, hairSel, hairOn, hairIntensity, lightResponse, finish, compare,
+      showPoints, useGL, segDebug, mode, redrawPhoto]);
+
+  // the segmentation model is needed for the ONNX lip-edge refine AND for hair
+  const needSeg = useSeg || hairOn;
+
+  // lazy-load the segmentation model the first time anything needs it
+  useEffect(() => {
+    if (!needSeg || segReady || segErr) return;
+    let alive = true;
+    initSegmenter()
+      .then(() => { if (alive) setSegReady(true); })
+      .catch((e) => { if (alive) setSegErr(e?.message || String(e)); });
+    return () => { alive = false; };
+  }, [needSeg, segReady, segErr]);
+
+  // camera: hair segmentation on the full frame (slower cadence — it's heavy)
+  useEffect(() => {
+    if (!hairOn || !segReady || mode !== 'camera') { hairMaskRef.current = null; return; }
+    let busy = false, stop = false;
+    const id = setInterval(async () => {
+      if (busy || stop) return;
+      const v = videoRef.current, cv = canvasRef.current;
+      if (!v || v.videoWidth === 0 || !cv) return;
+      busy = true;
+      try {
+        const mask = await segmentHair(v, cv.width, cv.height);
+        if (!stop && mask) hairMaskRef.current = mask;
+      } catch (e) { console.error('[hair-seg] failed:', e); }
+      busy = false;
+    }, 250);
+    return () => { stop = true; clearInterval(id); hairMaskRef.current = null; };
+  }, [hairOn, segReady, mode]);
+
+  // camera: run segmentation asynchronously (throttled), independent of the draw loop
+  useEffect(() => {
+    if (!useSeg || !segReady || mode !== 'camera') { segMaskRef.current = null; return; }
+    resetSegmenter();
+    let busy = false, stop = false;
+    const id = setInterval(async () => {
+      if (busy || stop) return;
+      const v = videoRef.current, cv = canvasRef.current;
+      if (!v || v.videoWidth === 0 || !cv) return;
+      // moving → release the ONNX mask immediately so the edge tracks landmarks, no lag/smear
+      if (motionRef.current > MOVE_THRESH) {
+        if (segMaskRef.current) { segMaskRef.current = null; setSegHasMask(false); resetSegmenter(); }
+        return;
+      }
+      // still → refine the edge with segmentation
+      busy = true;
+      try {
+        const mask = await segmentLips(v, faceBoxRef.current, cv.width, cv.height);
+        if (!stop && motionRef.current <= MOVE_THRESH && mask) { segMaskRef.current = mask; setSegHasMask(true); }
+      } catch (e) { console.error('[seg] inference failed:', e); /* keep landmark fallback */ }
+      busy = false;
+    }, 150);
+    return () => { stop = true; clearInterval(id); segMaskRef.current = null; setSegHasMask(false); };
+  }, [useSeg, segReady, mode]);
+
+  // photo: re-run detection+segmentation when seg/hair is toggled or the model becomes ready
+  useEffect(() => {
+    if (mode === 'photo' && imgRef.current?.src) detectPhoto();
+  }, [useSeg, hairOn, segReady, mode, detectPhoto]);
 
   const mirrored = mode === 'camera';
+
+  // region tabs + per-region palette wiring
+  const REGIONS = [
+    { key: 'lips', label: 'Lips' },
+    { key: 'eyes', label: 'Eyes' },
+    { key: 'lashes', label: 'Lashes' },
+    { key: 'foundation', label: 'Face' },
+    { key: 'blush', label: 'Blush' },
+    // { key: 'hair', label: 'Hair' }, // hidden for now (needs segmentation, heavier)
+  ];
+  const palettes = { lips: PRODUCTS, eyes: EYE_SHADES, foundation: FOUNDATION_SHADES, blush: BLUSH_SHADES, hair: HAIR_SHADES };
+  const palSel = { lips: sel, eyes: eyeSel, foundation: fndSel, blush: blushSel, hair: hairSel };
+  const palPick = {
+    lips: (i) => selectProduct(i),
+    eyes: (i) => { setEyeSel(i); setEyeOn(true); },
+    foundation: (i) => { setFndSel(i); setFndOn(true); },
+    blush: (i) => { setBlushSel(i); setBlushOn(true); },
+    hair: (i) => { setHairSel(i); setHairOn(true); },
+  };
+  const regionOn = { lips: true, eyes: eyeOn, lashes: lashOn, foundation: fndOn, blush: blushOn, hair: hairOn };
+  const regionSetOn = { eyes: setEyeOn, lashes: setLashOn, foundation: setFndOn, blush: setBlushOn, hair: setHairOn };
+  const regionInt = { lips: intensity, eyes: eyeIntensity, lashes: lashIntensity, foundation: fndIntensity, blush: blushIntensity, hair: hairIntensity };
+  const regionSetInt = { lips: setIntensity, eyes: setEyeIntensity, lashes: setLashIntensity, foundation: setFndIntensity, blush: setBlushIntensity, hair: setHairIntensity };
+  const activePal = palettes[target];
+  const activeShade = activePal ? activePal[palSel[target]].shade : 'lashes';
 
   return (
     <div className="app">
@@ -143,6 +424,10 @@ export default function App() {
           <video ref={videoRef} playsInline muted style={{ display: 'none' }} />
           <img ref={imgRef} alt="" style={{ display: 'none' }} />
           <canvas ref={canvasRef} />
+          <div className="pip">
+            <canvas ref={pipRef} />
+            <span className="pip-label">with makeup</span>
+          </div>
           {!ready && !error && <div className="overlay">Loading face model…</div>}
           {error && <div className="overlay err">Model failed to load.<br /><small>{error}</small></div>}
           {ready && mode === 'camera' && camError && (
@@ -155,7 +440,17 @@ export default function App() {
           {ready && !faceSeen && ((mode === 'camera' && !camError) || (mode === 'photo' && imgRef.current?.src)) && (
             <div className="badge warn">no face detected</div>
           )}
-          {ready && faceSeen && <div className="badge ok">tracking · {compare ? 'original' : PRODUCTS[sel].shade}</div>}
+          {ready && faceSeen && <div className="badge ok">{target} · {activeShade}</div>}
+
+          {activePal && (
+            <div className="swatches" role="radiogroup" aria-label="Shade">
+              {activePal.map((p, i) => (
+                <button key={p.id} className={`sw${i === palSel[target] ? ' on' : ''}`} title={p.shade}
+                  role="radio" aria-checked={i === palSel[target]} style={{ background: p.hex }}
+                  onClick={() => palPick[target](i)} />
+              ))}
+            </div>
+          )}
         </div>
       </div>
 
@@ -171,35 +466,57 @@ export default function App() {
         </div>
 
         <div className="field">
-          <label>Products · {PRODUCTS.length}</label>
-          <div className="palette">
-            {PRODUCTS.map((p, i) => (
-              <button key={p.id} className={`product${i === sel ? ' on' : ''}`}
-                onClick={() => selectProduct(i)}>
-                <span className="dot" style={{ background: p.hex }} />
-                <span className="pinfo">
-                  <span className="pbrand">{p.brand} · {p.line}</span>
-                  <span className="pshade">{p.shade}</span>
-                </span>
-                <span className="pfin">{p.finish}</span>
+          <label>Makeup</label>
+          <div className="seg tabs">
+            {REGIONS.map((r) => (
+              <button key={r.key} className={target === r.key ? 'on' : ''} onClick={() => setTarget(r.key)}>
+                {r.label}{r.key !== 'lips' && regionOn[r.key] ? ' •' : ''}
               </button>
             ))}
           </div>
         </div>
 
         <div className="field row">
-          <div>
-            <label>Finish</label>
-            <div className="seg">
-              {FINISHES.map((f) => (
-                <button key={f} className={finish === f ? 'on' : ''} onClick={() => setFinish(f)}>{f}</button>
-              ))}
+          {target !== 'lips' && (
+            <div>
+              <label>{target === 'hair' ? 'Hair colour' : target === 'foundation' ? 'Foundation' : target === 'blush' ? 'Blush' : target === 'lashes' ? 'Lashes' : 'Eyeshadow'}</label>
+              <div className="seg">
+                <button className={regionOn[target] ? 'on' : ''} onClick={() => regionSetOn[target](true)}>on</button>
+                <button className={!regionOn[target] ? 'on' : ''} onClick={() => regionSetOn[target](false)}>off</button>
+              </div>
             </div>
-          </div>
+          )}
+          {target === 'lips' && (
+            <div>
+              <label>Finish</label>
+              <div className="seg">
+                {FINISHES.map((f) => (
+                  <button key={f} className={finish === f ? 'on' : ''} onClick={() => setFinish(f)}>{f}</button>
+                ))}
+              </div>
+            </div>
+          )}
           <div className="grow">
-            <label>Intensity · {Math.round(intensity * 100)}%</label>
-            <input type="range" min="0.1" max="1" step="0.01" value={intensity}
-              onChange={(e) => setIntensity(parseFloat(e.target.value))} />
+            <label>Intensity · {Math.round(regionInt[target] * 100)}%</label>
+            <input type="range" min="0.05" max="1" step="0.01" value={regionInt[target]}
+              onChange={(e) => regionSetInt[target](parseFloat(e.target.value))} />
+          </div>
+        </div>
+
+        {target === 'hair' && (
+          <p className="note" style={{ marginTop: 0 }}>
+            Hair recolour uses the segmentation model (hair is outside the face mesh), so it's heavier.
+            {hairOn && !segReady && !segErr ? ' Loading model…' : ''}
+            {hairOn && segReady ? ' Model ready.' : ''}
+            {segErr ? ` Model error: ${segErr}` : ''}
+          </p>
+        )}
+
+        <div className="field row">
+          <div className="grow">
+            <label>Light response · {Math.round(lightResponse * 100)}%</label>
+            <input type="range" min="0" max="1" step="0.01" value={lightResponse}
+              onChange={(e) => setLightResponse(parseFloat(e.target.value))} />
           </div>
         </div>
 
@@ -207,11 +524,45 @@ export default function App() {
           <input type="checkbox" checked={compare} onChange={(e) => setCompare(e.target.checked)} />
           Show original (no makeup)
         </label>
+        <label className="compare">
+          <input type="checkbox" checked={useGL} disabled={!glAvailable()}
+            onChange={(e) => setUseGL(e.target.checked)} />
+          GPU render — WebGL shader {glAvailable() ? '' : '· unavailable'}
+        </label>
+        <label className="compare">
+          <input type="checkbox" checked={showPoints} onChange={(e) => setShowPoints(e.target.checked)} />
+          Show MediaPipe mesh (debug)
+        </label>
+        <label className="compare">
+          <input type="checkbox" checked={useSeg} onChange={(e) => setUseSeg(e.target.checked)} />
+          Precise lips — segmentation (ONNX)
+          {useSeg && !segReady && !segErr ? ' · loading…' : ''}
+          {segReady ? ' · on' : ''}
+        </label>
+        {useSeg && (
+          <label className="compare">
+            <input type="checkbox" checked={segDebug} onChange={(e) => setSegDebug(e.target.checked)} />
+            Show ONNX lip mask (debug, green)
+            {segReady ? (segHasMask ? ' · mask: active' : ' · mask: none') : ' · model not loaded'}
+          </label>
+        )}
+        {segDebug && segReady && !segHasMask && (
+          <p className="note" style={{ color: '#d79a5c' }}>
+            No mask yet — model loaded but produced nothing for this frame. Make sure a face is detected
+            (the badge says “tracking”), good light, and the shade/finish aside, check the console for ort errors.
+          </p>
+        )}
+        {segErr && (
+          <p className="note" style={{ color: '#f0a0a0' }}>
+            Segmentation model not loaded ({segErr}). Put <code>face_parse.onnx</code> in <code>public/models/</code> —
+            see SEGMENTATION.md. Using the landmark mask for now.
+          </p>
+        )}
 
         <p className="note">
-          Real MediaPipe Face Landmarker (478 points) drives a lip mask; the shade is composited with the
-          <code> color </code> blend so the lips keep their own texture and shine. Production moves this to
-          WebGL shaders + a BiSeNet segmentation mask for cleaner edges and 60&nbsp;fps on mid-range phones.
+          Real MediaPipe Face Landmarker (478 points) builds the lip mask. <b>GPU render</b> does the recolour in a
+          WebGL shader — luminance-preserving colour transfer plus matte / satin / gloss finishes, one GPU pass per
+          frame. <b>Segmentation</b> (BiSeNet via onnxruntime-web, on-device) refines the lip edge. All in the browser.
         </p>
       </div>
     </div>

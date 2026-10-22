@@ -264,8 +264,8 @@ export function buildBlushMask(w, h, landmarks) {
 // Contour: a thin cool streak that FOLLOWS the cheekbone — a feathered stroke
 // along a curve through real landmarks (ear → cheekbone → mouth corner), not a
 // blob. Bends with the face and head pose. Tune CTR_* below.
-const CTR_WIDTH = 0.01;  // stroke thickness (× face width)
-const CTR_DROP = 0.15;   // push the control point down into the hollow (× face height-ish)
+const CTR_WIDTH = 0.03;  // stroke thickness (× face width)
+const CTR_DROP = 0.25;   // push the control point down into the hollow (× face height-ish)
 export function buildContourMask(w, h, landmarks) {
   ensure(w, h);
   const m = contourMaskCv.getContext('2d');
@@ -273,7 +273,7 @@ export function buildContourMask(w, h, landmarks) {
   m.clearRect(0, 0, MW, MH);
   m.lineCap = 'round';
   m.strokeStyle = '#fff';
-  m.filter = `blur(${Math.max(3, MW * 0.024)}px)`; // soft, diffused edges
+  m.filter = `blur(${Math.max(4, MW * 0.04)}px)`; // very soft, diffused edges
   const faceW = Math.abs(landmarks[FACE_SIDE_R].x - landmarks[FACE_SIDE_L].x) * MW;
   const drop = faceW * CTR_DROP;
   m.lineWidth = faceW * CTR_WIDTH;

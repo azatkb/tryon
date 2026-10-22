@@ -59,7 +59,7 @@ function tracePath(ctx, landmarks, indices, w, h) {
  */
 export function buildLipMask(w, h, landmarks, opts = {}) {
   ensure(w, h);
-  const blur = Math.max(1, MW * 0.0035);
+  const blur = Math.max(1.2, MW * 0.006); // softer edge → gives room for the ombre liner
   const m = maskCv.getContext('2d');
   m.setTransform(1, 0, 0, 1, 0, 0);
   m.clearRect(0, 0, MW, MH);
@@ -161,7 +161,7 @@ export function buildLashMask(w, h, landmarks) {
 
     // 2. individual lash flicks along the outer half, up-and-out
     m.lineWidth = Math.max(0.7, thin * 0.9);
-    const len = eyeH * 0.35;
+    const len = eyeH * 0.55;
     for (let k = 0; k < pts.length; k++) {
       const t = k / (pts.length - 1);
       if (t > 0.55) continue; // only outer ~half gets visible lashes
@@ -177,25 +177,43 @@ export function buildLashMask(w, h, landmarks) {
   return lashMaskCv;
 }
 
-// Blush mask: two soft radial blobs on the cheek apples.
+// Blush mask: a diffused flush swept from high on the cheekbone up toward the
+// temple (not a round patch), symmetric on both sides. The sweep is an elongated,
+// feathered ellipse oriented along cheek-apple -> outer-eye corner.
 export function buildBlushMask(w, h, landmarks) {
   ensure(w, h);
   const m = blushMaskCv.getContext('2d');
   m.setTransform(1, 0, 0, 1, 0, 0);
   m.clearRect(0, 0, MW, MH);
+  m.filter = `blur(${Math.max(2, MW * 0.012)}px)`; // diffuse edges
   const faceW = Math.abs(landmarks[FACE_SIDE_R].x - landmarks[FACE_SIDE_L].x) * MW;
-  const r = faceW * 0.17;
-  for (const ci of [CHEEK_R, CHEEK_L]) {
+  const half = Math.max(1, faceW * 0.16);   // sweep length (semi-major)
+  const width = Math.max(1, faceW * 0.075); // sweep width  (semi-minor)
+
+  // right eye outer 33, left eye outer 263 → direction "up and out" toward the temple
+  for (const [ci, outer] of [[CHEEK_R, 33], [CHEEK_L, 263]]) {
     const cx = landmarks[ci].x * MW, cy = landmarks[ci].y * MH;
-    const g = m.createRadialGradient(cx, cy, 0, cx, cy, r);
-    g.addColorStop(0, 'rgba(255,255,255,1)');
-    g.addColorStop(0.6, 'rgba(255,255,255,0.5)');
+    const ox = landmarks[outer].x * MW, oy = landmarks[outer].y * MH;
+    const ang = Math.atan2(oy - cy, ox - cx);
+    // start a little up the cheekbone, then push the centre toward the temple
+    const bx = cx + Math.cos(ang) * half * 0.35;
+    const by = cy + Math.sin(ang) * half * 0.35 - width * 0.15;
+
+    m.save();
+    m.translate(bx, by);
+    m.rotate(ang);
+    m.scale(half / width, 1); // stretch the circular gradient into a sweep
+    const g = m.createRadialGradient(0, 0, 0, 0, 0, width);
+    g.addColorStop(0, 'rgba(255,255,255,0.95)');
+    g.addColorStop(0.55, 'rgba(255,255,255,0.45)');
     g.addColorStop(1, 'rgba(255,255,255,0)');
     m.fillStyle = g;
     m.beginPath();
-    m.arc(cx, cy, r, 0, Math.PI * 2);
+    m.arc(0, 0, width, 0, Math.PI * 2);
     m.fill();
+    m.restore();
   }
+  m.filter = 'none';
   return blushMaskCv;
 }
 

@@ -22,6 +22,27 @@ function predictLandmarks(cur, prev, k) {
   return out;
 }
 
+// Estimate the user's skin depth from cheek luminance -> a word depthLevel() reads.
+function estimateDepth(source, lms, w, h, scratch) {
+  const x = scratch.getContext('2d', { willReadFrequently: true });
+  const faceW = Math.abs(lms[454].x - lms[234].x) * w;
+  const box = Math.max(4, faceW * 0.05);
+  let lum = 0, nn = 0;
+  for (const ci of [205, 425]) {
+    const px = lms[ci].x * w, py = lms[ci].y * h;
+    try {
+      x.drawImage(source, px - box / 2, py - box / 2, box, box, 0, 0, 1, 1);
+      const d = x.getImageData(0, 0, 1, 1).data;
+      lum += 0.299 * d[0] + 0.587 * d[1] + 0.114 * d[2]; nn++;
+    } catch (_) { /* ignore */ }
+  }
+  if (!nn) return null;
+  lum /= nn;
+  return lum > 210 ? 'fair' : lum > 185 ? 'light' : lum > 160 ? 'light medium'
+    : lum > 135 ? 'medium' : lum > 110 ? 'medium tan' : lum > 85 ? 'tan'
+    : lum > 60 ? 'deep' : 'rich';
+}
+
 // Tight-ish face box from all landmarks (normalised) -> pixel rect, with padding.
 function faceBBox(lms, w, h, pad = 0.12) {
   let minx = 1, miny = 1, maxx = 0, maxy = 0;
@@ -67,6 +88,7 @@ export default function App() {
   // lesson mode (single 5-step guided look) — this is the whole app
   const [lessonOn] = useState(true);
   const [step, setStep] = useState(0);
+  const [skinDepth, setSkinDepth] = useState(''); // auto-estimated for deep-skin-aware shades
 
   const [lightResponse, setLightResponse] = useState(0.5);
   const [compare, setCompare] = useState(false);
@@ -92,6 +114,8 @@ export default function App() {
   const procRef = useRef(null); // offscreen processed canvas (feeds the PiP)
   const pipRef = useRef(null);  // small processed preview (top-right)
   const cropRef = useRef(null); // smoothed portrait crop rect on the face
+  const sampleRef = useRef(null); // 1px scratch canvas for skin-depth sampling
+  const skinDepthRef = useRef(''); const frameCountRef = useRef(0);
   const hairMaskRef = useRef(null); // latest hair segmentation mask (full frame)
   const motionRef = useRef(0); // per-frame face motion (normalised), EMA-smoothed
   const prevLmRef = useRef(null);   // previous few points, for the motion metric
@@ -99,10 +123,11 @@ export default function App() {
 
   // live option values for the render loop (avoid stale closures)
   // makeup layers: driven by the lesson when running (cumulative, colours from
-  // their shade data), else by the manual controls.
+  // their shade data + auto skin depth), else by the manual controls.
+  const profile = { undertone: null, depth: skinDepth || null };
   let L;
   if (lessonOn) {
-    const m = lessonLayers(step);
+    const m = lessonLayers(step, profile);
     L = {
       lips: m.lips ? { ...m.lips, lightResponse } : null,
       eyes: m.eyes ? { ...m.eyes, lightResponse } : null,
@@ -261,6 +286,13 @@ export default function App() {
           lms = predictLandmarks(raw, prevFullRef.current, PREDICT);
           prevFullRef.current = raw;
 
+          // periodically re-estimate skin depth (deep-skin-aware shades)
+          if ((frameCountRef.current++ % 20) === 0) {
+            if (!sampleRef.current) { sampleRef.current = document.createElement('canvas'); sampleRef.current.width = sampleRef.current.height = 1; }
+            const d = estimateDepth(v, raw, cv.width, cv.height, sampleRef.current);
+            if (d && d !== skinDepthRef.current) { skinDepthRef.current = d; setSkinDepth(d); }
+          }
+
           faceBoxRef.current = faceBBox(lms, cv.width, cv.height);
           // drop the ONNX mask the instant we move; segmentation resumes when still
           if (motionRef.current > MOVE_THRESH && segMaskRef.current) {
@@ -299,6 +331,11 @@ export default function App() {
     try { lms = fl.detect(img)?.faceLandmarks?.[0]; } catch (e) { console.error(e); }
     lastResRef.current = { faceLandmarks: lms ? [lms] : [] };
     setFaceSeen(!!lms);
+    if (lms) {
+      if (!sampleRef.current) { sampleRef.current = document.createElement('canvas'); sampleRef.current.width = sampleRef.current.height = 1; }
+      const d = estimateDepth(img, lms, cv.width, cv.height, sampleRef.current);
+      if (d && d !== skinDepthRef.current) { skinDepthRef.current = d; setSkinDepth(d); }
+    }
     // segmentation for the still (if enabled and loaded)
     if (optsRef.current.useSeg && segmenterReady() && lms) {
       resetSegmenter();
@@ -348,7 +385,7 @@ export default function App() {
     if (mode === 'photo') redrawPhoto();
   }, [sel, eyeSel, eyeOn, intensity, eyeIntensity, lashOn, lashIntensity, fndSel, fndOn, fndIntensity,
       blushSel, blushOn, blushIntensity, hairSel, hairOn, hairIntensity, lightResponse, finish, compare,
-      showPoints, useGL, segDebug, lessonOn, step, mode, redrawPhoto]);
+      showPoints, useGL, segDebug, lessonOn, step, skinDepth, mode, redrawPhoto]);
 
   // the segmentation model is needed for the ONNX lip-edge refine AND for hair
   const needSeg = useSeg || hairOn;
@@ -440,7 +477,7 @@ export default function App() {
 
   const lessonStep = LESSON.steps[step];
   const isFinal = step === LESSON.steps.length - 1;
-  const stepProduct = resolveStep(step).product;
+  const stepProduct = resolveStep(step, profile).product;
 
   return (
     <div className={`app${lessonOn ? ' lesson' : ''}`}>

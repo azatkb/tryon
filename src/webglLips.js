@@ -46,7 +46,12 @@ void main(){
   if (mf > 0.001) outc = mix(outc, setLum(uFndShade, lumv(outc)), mf); // foundation evens tone
 
   float mb = texture2D(uBlush, vUv).a * uBlushInt;
-  if (mb > 0.001) outc = mix(outc, recolour(outc, uBlushShade), mb); // blush on the cheeks
+  if (mb > 0.001) {
+    // fade blush where the cheek is already flushed, so it doesn't stack into a patch
+    float redness = clamp((outc.r - (outc.g + outc.b) * 0.5) * 2.2, 0.0, 1.0);
+    mb *= 1.0 - redness * 0.6;
+    outc = mix(outc, recolour(outc, uBlushShade), mb);
+  }
 
   float mh = texture2D(uHair, vUv).a * uHairInt;
   if (mh > 0.001) outc = mix(outc, recolour(outc, uHairShade), mh);
@@ -57,13 +62,17 @@ void main(){
   float ml2 = texture2D(uLash, vUv).a * uLashInt;
   if (ml2 > 0.001) outc = mix(outc, vec3(0.0), ml2); // eyeliner — pure black
 
-  float ml = texture2D(uLip, vUv).a * uLipInt;
+  float lipA = texture2D(uLip, vUv).a;
+  float ml = lipA * uLipInt;
   if (ml > 0.001) {
     float lum = lumv(outc);
     vec3 mk = recolour(outc, uLipShade);
+    // ombre: darker liner at the rim, lighter toward the centre
+    float edge = 1.0 - smoothstep(0.12, 0.7, lipA);
+    mk *= 1.0 - edge * 0.3;
     if (uFinish < 0.5) mk = setLum(mk, clamp(0.5 + (lum - 0.5) * 0.75, 0.0, 1.0));
     else if (uFinish < 1.5) mk += smoothstep(0.55, 0.9, lum) * 0.25;
-    else { float s = smoothstep(0.6, 0.97, lum); mk += s * s * 0.7; }
+    else { float s = smoothstep(0.6, 0.97, lum); mk += s * s * 0.7; } // gloss keeps lip highlights
     outc = mix(outc, mk, ml);
   }
   gl_FragColor = vec4(clamp(outc, 0.0, 1.0), 1.0);

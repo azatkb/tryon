@@ -68,4 +68,31 @@ export const CATALOG = {
       { name: 'Berry Pinch', hex: '#B5476B', undertone: 'cool' },
     ],
   },
+  concealer: {
+    id: 'maybelline-eraser',
+    brand: 'Maybelline',
+    name: 'Instant Age Rewind Concealer',
+    category: 'concealer',
+    format: 'liquid',
+    shades: [{ name: 'Brightener', hex: '#F2E2D2', undertone: 'neutral' }],
+  },
+  contour: {
+    id: 'fenty-matchstix',
+    brand: 'Fenty Beauty',
+    name: 'Match Stix Contour Skinstick',
+    category: 'contour',
+    format: 'cream',
+    shades: [
+      { name: 'Amber (cool taupe)', hex: '#6B5548', undertone: 'cool' },
+      { name: 'Mocha', hex: '#52403A', undertone: 'cool' },
+    ],
+  },
+  highlight: {
+    id: 'ct-hollywood-glow',
+    brand: 'Charlotte Tilbury',
+    name: 'Hollywood Glow Glide Highlighter',
+    category: 'highlighter',
+    format: 'cream',
+    shades: [{ name: 'Champagne', hex: '#F5ECD6', undertone: 'warm' }],
+  },
 };

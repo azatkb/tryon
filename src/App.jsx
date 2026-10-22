@@ -43,6 +43,19 @@ function estimateDepth(source, lms, w, h, scratch) {
     : lum > 60 ? 'deep' : 'rich';
 }
 
+// Conservative gray-world white balance from the whole frame — neutralises a warm
+// or cool light cast so the look stays consistent (clamped so it never over-corrects).
+function estimateWB(source, w, h, scratch) {
+  const x = scratch.getContext('2d', { willReadFrequently: true });
+  try {
+    x.drawImage(source, 0, 0, w, h, 0, 0, 1, 1);
+    const d = x.getImageData(0, 0, 1, 1).data;
+    const r = d[0] || 1, g = d[1] || 1, b = d[2] || 1, gray = (r + g + b) / 3;
+    const cl = (v) => Math.max(0.9, Math.min(1.12, v));
+    return [cl(gray / r), cl(gray / g), cl(gray / b)];
+  } catch (_) { return [1, 1, 1]; }
+}
+
 // Tight-ish face box from all landmarks (normalised) -> pixel rect, with padding.
 function faceBBox(lms, w, h, pad = 0.12) {
   let minx = 1, miny = 1, maxx = 0, maxy = 0;
@@ -116,6 +129,7 @@ export default function App() {
   const cropRef = useRef(null); // smoothed portrait crop rect on the face
   const sampleRef = useRef(null); // 1px scratch canvas for skin-depth sampling
   const skinDepthRef = useRef(''); const frameCountRef = useRef(0);
+  const wbRef = useRef([1, 1, 1]); // auto white-balance gain (lighting consistency)
   const hairMaskRef = useRef(null); // latest hair segmentation mask (full frame)
   const motionRef = useRef(0); // per-frame face motion (normalised), EMA-smoothed
   const prevLmRef = useRef(null);   // previous few points, for the motion metric
@@ -129,11 +143,14 @@ export default function App() {
   if (lessonOn) {
     const m = lessonLayers(step, profile);
     L = {
-      lips: m.lips ? { ...m.lips, lightResponse } : null,
-      eyes: m.eyes ? { ...m.eyes, lightResponse } : null,
-      lashes: m.lashes ? { ...m.lashes } : null,
-      foundation: m.foundation ? { ...m.foundation } : null,
+      foundation: m.foundation || null,
+      underEye: m.underEye || null,
+      contour: m.contour || null,
       blush: m.blush ? { ...m.blush, lightResponse } : null,
+      highlight: m.highlight || null,
+      eyes: m.eyes ? { ...m.eyes, lightResponse } : null,
+      lashes: m.lashes || null,
+      lips: m.lips ? { ...m.lips, lightResponse } : null,
     };
   } else {
     L = {
@@ -142,6 +159,7 @@ export default function App() {
       lashes: lashOn ? { intensity: lashIntensity } : null,
       foundation: fndOn ? { color: FOUNDATION_SHADES[fndSel].hex, intensity: fndIntensity } : null,
       blush: blushOn ? { color: BLUSH_SHADES[blushSel].hex, intensity: blushIntensity, lightResponse } : null,
+      underEye: null, contour: null, highlight: null,
     };
   }
 
@@ -164,7 +182,11 @@ export default function App() {
     const lips = o.lips ? { ...o.lips } : null;
     if (lips && o.useSeg && still && segMaskRef.current) lips.overrideMask = segMaskRef.current;
     const hair = o.hair && hairMaskRef.current ? { ...o.hair, mask: hairMaskRef.current } : null;
-    const layers = { foundation: o.foundation, blush: o.blush, hair, eyes: o.eyes, lashes: o.lashes, lips };
+    const layers = {
+      foundation: o.foundation, underEye: o.underEye, contour: o.contour,
+      blush: o.blush, highlight: o.highlight, hair, eyes: o.eyes, lashes: o.lashes, lips,
+      wb: wbRef.current,
+    };
     if (o.useGL && source) {
       const glc = renderMakeupGL(source, w, h, lms, layers);
       if (glc) { ctx.drawImage(glc, 0, 0, w, h); return; }
@@ -286,11 +308,13 @@ export default function App() {
           lms = predictLandmarks(raw, prevFullRef.current, PREDICT);
           prevFullRef.current = raw;
 
-          // periodically re-estimate skin depth (deep-skin-aware shades)
+          // periodically re-estimate skin depth + white balance (slow signals)
           if ((frameCountRef.current++ % 20) === 0) {
             if (!sampleRef.current) { sampleRef.current = document.createElement('canvas'); sampleRef.current.width = sampleRef.current.height = 1; }
             const d = estimateDepth(v, raw, cv.width, cv.height, sampleRef.current);
             if (d && d !== skinDepthRef.current) { skinDepthRef.current = d; setSkinDepth(d); }
+            // auto white-balance disabled for now (was over-tinting the preview)
+            // wbRef.current = estimateWB(v, cv.width, cv.height, sampleRef.current);
           }
 
           faceBoxRef.current = faceBBox(lms, cv.width, cv.height);

@@ -10,19 +10,63 @@ const MASK_SCALE = 0.5;
 let MW = 0, MH = 0;
 
 // Reused offscreen canvases (avoid per-frame allocation).
-let maskCv, eyeMaskCv, faceMaskCv, lashMaskCv, blushMaskCv, colorCv, specCv, refineCv, lumaCv;
+let maskCv, eyeMaskCv, faceMaskCv, lashMaskCv, blushMaskCv, contourMaskCv, highlightMaskCv, underEyeMaskCv, packCv, colorCv, specCv, refineCv, lumaCv;
 function ensure(w, h) {
   if (!maskCv) {
     maskCv = document.createElement('canvas'); eyeMaskCv = document.createElement('canvas');
     faceMaskCv = document.createElement('canvas'); lashMaskCv = document.createElement('canvas');
-    blushMaskCv = document.createElement('canvas');
+    blushMaskCv = document.createElement('canvas'); contourMaskCv = document.createElement('canvas');
+    highlightMaskCv = document.createElement('canvas'); underEyeMaskCv = document.createElement('canvas');
+    packCv = document.createElement('canvas');
     colorCv = document.createElement('canvas'); specCv = document.createElement('canvas');
     refineCv = document.createElement('canvas'); lumaCv = document.createElement('canvas');
   }
   MW = Math.max(2, Math.round(w * MASK_SCALE));
   MH = Math.max(2, Math.round(h * MASK_SCALE));
-  for (const c of [maskCv, eyeMaskCv, faceMaskCv, lashMaskCv, blushMaskCv, refineCv]) { if (c.width !== MW || c.height !== MH) { c.width = MW; c.height = MH; } }
+  for (const c of [maskCv, eyeMaskCv, faceMaskCv, lashMaskCv, blushMaskCv, contourMaskCv, highlightMaskCv, underEyeMaskCv, packCv, refineCv]) { if (c.width !== MW || c.height !== MH) { c.width = MW; c.height = MH; } }
   for (const c of [colorCv, specCv, lumaCv]) { if (c.width !== w || c.height !== h) { c.width = w; c.height = h; } }
+}
+
+// Pack contour / highlight / under-eye masks into one RGB texture (R / G / B)
+// so the shader samples one texture instead of three (stays within GL limits).
+export function buildSculptPack(w, h, landmarks, want) {
+  ensure(w, h);
+  const m = packCv.getContext('2d');
+  m.setTransform(1, 0, 0, 1, 0, 0);
+  m.globalCompositeOperation = 'source-over';
+  m.clearRect(0, 0, MW, MH);
+  const put = (src, tint) => {
+    const r = refineCv.getContext('2d');
+    r.setTransform(1, 0, 0, 1, 0, 0);
+    r.globalCompositeOperation = 'source-over';
+    r.clearRect(0, 0, MW, MH);
+    r.drawImage(src, 0, 0);
+    r.globalCompositeOperation = 'source-in';
+    r.fillStyle = tint; r.fillRect(0, 0, MW, MH);
+    r.globalCompositeOperation = 'source-over';
+    m.globalCompositeOperation = 'lighter';
+    m.drawImage(refineCv, 0, 0);
+  };
+  if (want.contour) put(buildContourMask(w, h, landmarks), '#ff0000');
+  if (want.highlight) put(buildHighlightMask(w, h, landmarks), '#00ff00');
+  if (want.underEye) put(buildUnderEyeMask(w, h, landmarks), '#0000ff');
+  m.globalCompositeOperation = 'source-over';
+  return packCv;
+}
+
+// a soft, rotated, elongated blob — shared shape for sculpt/glow sweeps
+function sweep(m, cx, cy, ang, half, width, a0) {
+  m.save();
+  m.translate(cx, cy);
+  m.rotate(ang);
+  m.scale(half / width, 1);
+  const g = m.createRadialGradient(0, 0, 0, 0, 0, width);
+  g.addColorStop(0, `rgba(255,255,255,${a0})`);
+  g.addColorStop(0.55, `rgba(255,255,255,${a0 * 0.45})`);
+  g.addColorStop(1, 'rgba(255,255,255,0)');
+  m.fillStyle = g;
+  m.beginPath(); m.arc(0, 0, width, 0, Math.PI * 2); m.fill();
+  m.restore();
 }
 
 function fillPoly(ctx, landmarks, indices, w, h) {
@@ -161,7 +205,7 @@ export function buildLashMask(w, h, landmarks) {
 
     // 2. individual lash flicks along the outer half, up-and-out
     m.lineWidth = Math.max(0.7, thin * 0.9);
-    const len = eyeH * 0.55;
+    const len = eyeH * 0.35;
     for (let k = 0; k < pts.length; k++) {
       const t = k / (pts.length - 1);
       if (t > 0.55) continue; // only outer ~half gets visible lashes
@@ -215,6 +259,82 @@ export function buildBlushMask(w, h, landmarks) {
   }
   m.filter = 'none';
   return blushMaskCv;
+}
+
+// Contour: a thin cool streak that FOLLOWS the cheekbone — a feathered stroke
+// along a curve through real landmarks (ear → cheekbone → mouth corner), not a
+// blob. Bends with the face and head pose. Tune CTR_* below.
+const CTR_WIDTH = 0.01;  // stroke thickness (× face width)
+const CTR_DROP = 0.15;   // push the control point down into the hollow (× face height-ish)
+export function buildContourMask(w, h, landmarks) {
+  ensure(w, h);
+  const m = contourMaskCv.getContext('2d');
+  m.setTransform(1, 0, 0, 1, 0, 0);
+  m.clearRect(0, 0, MW, MH);
+  m.lineCap = 'round';
+  m.strokeStyle = '#fff';
+  m.filter = `blur(${Math.max(3, MW * 0.024)}px)`; // soft, diffused edges
+  const faceW = Math.abs(landmarks[FACE_SIDE_R].x - landmarks[FACE_SIDE_L].x) * MW;
+  const drop = faceW * CTR_DROP;
+  m.lineWidth = faceW * CTR_WIDTH;
+  const P = (i) => [landmarks[i].x * MW, landmarks[i].y * MH];
+  // subject-right: ear 234, cheekbone 205, mouth corner 61; left: 454, 425, 291
+  for (const [ear, cheek, mouth] of [[FACE_SIDE_L, CHEEK_R, 61], [FACE_SIDE_R, CHEEK_L, 291]]) {
+    const e = P(ear), c = P(cheek), mo = P(mouth);
+    // start high near the ear, end above the mouth corner, both pulled toward the cheekbone;
+    // control = cheekbone pushed down so the streak sits in the hollow under the bone.
+    const S = [e[0] * 0.55 + c[0] * 0.45, e[1] * 0.55 + c[1] * 0.45];
+    const E = [mo[0] * 0.45 + c[0] * 0.55, mo[1] * 0.4 + c[1] * 0.6];
+    const C = [c[0], c[1] + drop];
+    m.beginPath();
+    m.moveTo(S[0], S[1]);
+    m.quadraticCurveTo(C[0], C[1], E[0], E[1]);
+    m.stroke();
+  }
+  m.filter = 'none';
+  return contourMaskCv;
+}
+
+// Highlight (glow): a small blob high on the cheekbone — not under the eye.
+export function buildHighlightMask(w, h, landmarks) {
+  ensure(w, h);
+  const m = highlightMaskCv.getContext('2d');
+  m.setTransform(1, 0, 0, 1, 0, 0);
+  m.clearRect(0, 0, MW, MH);
+  m.filter = `blur(${Math.max(2, MW * 0.01)}px)`;
+  const faceW = Math.abs(landmarks[FACE_SIDE_R].x - landmarks[FACE_SIDE_L].x) * MW;
+  const half = faceW * 0.1, width = faceW * 0.05;
+  for (const [ci, outer] of [[CHEEK_R, 33], [CHEEK_L, 263]]) {
+    const cx = landmarks[ci].x * MW, cy = landmarks[ci].y * MH;
+    const ox = landmarks[outer].x * MW, oy = landmarks[outer].y * MH;
+    const ang = Math.atan2(oy - cy, ox - cx);
+    // sit on the top of the cheekbone (toward the eye), not on the apple
+    const hx = cx * 0.45 + ox * 0.55, hy = cy * 0.45 + oy * 0.55 + width * 0.2;
+    sweep(m, hx, hy, ang, half, width, 0.95);
+  }
+  m.filter = 'none';
+  return highlightMaskCv;
+}
+
+// Under-eye: a soft band just below each eye for brightening.
+export function buildUnderEyeMask(w, h, landmarks) {
+  ensure(w, h);
+  const m = underEyeMaskCv.getContext('2d');
+  m.setTransform(1, 0, 0, 1, 0, 0);
+  m.clearRect(0, 0, MW, MH);
+  m.filter = `blur(${Math.max(2, MW * 0.011)}px)`;
+  const faceW = Math.abs(landmarks[FACE_SIDE_R].x - landmarks[FACE_SIDE_L].x) * MW;
+  const half = faceW * 0.09, width = faceW * 0.035;
+  // lower-lid centres: 145 (right), 374 (left); inner/outer corners frame the angle
+  for (const [low, inner, outer] of [[145, 133, 33], [374, 362, 263]]) {
+    const cx = landmarks[low].x * MW, cy = landmarks[low].y * MH + width * 1.3; // below the lid
+    const ix = landmarks[inner].x * MW, iy = landmarks[inner].y * MH;
+    const ox = landmarks[outer].x * MW, oy = landmarks[outer].y * MH;
+    const ang = Math.atan2(oy - iy, ox - ix);
+    sweep(m, cx, cy, ang, half, width, 0.9);
+  }
+  m.filter = 'none';
+  return underEyeMaskCv;
 }
 
 // Shared compositor: recolour whatever `maskSrc` covers, preserving the region's
@@ -331,11 +451,26 @@ function compositeDark(ctx, w, h, maskSrc, color, intensity) {
   ctx.restore();
 }
 
+// Lightening composite (highlight / under-eye brighten) — 'screen' with a warm white.
+function compositeLight(ctx, w, h, maskSrc, color, intensity) {
+  const c = colorCv.getContext('2d');
+  c.globalCompositeOperation = 'source-over';
+  c.clearRect(0, 0, w, h);
+  c.fillStyle = color;
+  c.fillRect(0, 0, w, h);
+  c.globalCompositeOperation = 'destination-in';
+  c.drawImage(maskSrc, 0, 0, w, h);
+  c.globalCompositeOperation = 'source-over';
+  ctx.save();
+  ctx.globalAlpha = intensity;
+  ctx.globalCompositeOperation = 'screen';
+  ctx.drawImage(colorCv, 0, 0);
+  ctx.restore();
+}
+
 /**
- * Full makeup pass (Canvas). Layer order: foundation, hair, eyeshadow, lashes, lips.
- * opts: { foundation, hair, eyes, lashes, lips } — each region optional.
- *   hair: { color, intensity, mask } (mask = segmentation canvas, full frame)
- *   lashes: { intensity } (colour fixed dark)
+ * Full makeup pass (Canvas). MUA order: foundation, under-eye, contour, blush,
+ * highlight, hair, eyeshadow, lashes, lips. Each region optional.
  */
 export function renderMakeup(ctx, w, h, landmarks, opts) {
   if (!landmarks || landmarks.length < 468) return;
@@ -343,9 +478,21 @@ export function renderMakeup(ctx, w, h, landmarks, opts) {
     buildFaceMask(w, h, landmarks);
     compositeRegion(ctx, w, h, faceMaskCv, { ...opts.foundation, finish: 'none', pigment: 0.1, lightResponse: 0 });
   }
+  if (opts.underEye) {
+    buildUnderEyeMask(w, h, landmarks);
+    compositeLight(ctx, w, h, underEyeMaskCv, '#F2E2D2', opts.underEye.intensity ?? 0.4);
+  }
+  if (opts.contour) {
+    buildContourMask(w, h, landmarks);
+    compositeDark(ctx, w, h, contourMaskCv, '#6B5548', opts.contour.intensity ?? 0.35);
+  }
   if (opts.blush) {
     buildBlushMask(w, h, landmarks);
     compositeRegion(ctx, w, h, blushMaskCv, { ...opts.blush, finish: 'none', pigment: 0.15 });
+  }
+  if (opts.highlight) {
+    buildHighlightMask(w, h, landmarks);
+    compositeLight(ctx, w, h, highlightMaskCv, '#F5ECD6', opts.highlight.intensity ?? 0.5);
   }
   if (opts.hair && opts.hair.mask) {
     compositeRegion(ctx, w, h, opts.hair.mask, { ...opts.hair, finish: 'none', pigment: 0.15 });

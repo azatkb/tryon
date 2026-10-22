@@ -1,9 +1,9 @@
-// WebGL makeup renderer — the production path.
-// One fragment-shader pass recolours, bottom to top: foundation, hair, eyeshadow,
-// lashes, lips. Luminance-preserving colour transfer (W3C "color" blend) keeps each
-// region's texture and shine; lips also get matte/satin/gloss. One GPU draw per frame.
+// WebGL makeup renderer — the production path. One fragment-shader pass, MUA order:
+// foundation, under-eye brighten, contour, blush, highlight, hair, eyeshadow,
+// lashes, lips. Luminance-preserving colour transfer keeps each region's texture;
+// an auto white-balance keeps the look consistent across warm / side lighting.
 
-import { buildLipMask, buildEyeMask, buildFaceMask, buildLashMask, buildBlushMask } from './lipRenderer.js';
+import { buildLipMask, buildEyeMask, buildFaceMask, buildLashMask, buildBlushMask, buildSculptPack } from './lipRenderer.js';
 
 let gl = null, canvas = null, prog = null, quadBuf = null;
 let tex = {}, loc = {};
@@ -17,9 +17,10 @@ void main(){ vUv = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }`;
 const FRAG = `
 precision highp float;
 varying vec2 vUv;
-uniform sampler2D uFrame, uFnd, uBlush, uHair, uEye, uLash, uLip;
-uniform vec3 uFndShade, uBlushShade, uHairShade, uEyeShade, uLipShade;
+uniform sampler2D uFrame, uFnd, uBlush, uHair, uEye, uLash, uLip, uSculpt;
+uniform vec3 uFndShade, uBlushShade, uHairShade, uEyeShade, uLipShade, uWB;
 uniform float uFndInt, uBlushInt, uHairInt, uEyeInt, uLashInt, uLipInt;
+uniform float uContourInt, uHighlightInt, uUnderEyeInt;
 uniform float uLight, uFinish;
 
 float lumv(vec3 c){ return dot(c, vec3(0.3, 0.59, 0.11)); }
@@ -40,18 +41,27 @@ vec3 recolour(vec3 base, vec3 shade){
 }
 
 void main(){
-  vec3 outc = texture2D(uFrame, vUv).rgb;
+  vec3 outc = clamp(texture2D(uFrame, vUv).rgb * uWB, 0.0, 1.0); // auto white-balance
+  vec3 sc = texture2D(uSculpt, vUv).rgb; // r=contour, g=highlight, b=under-eye
 
   float mf = texture2D(uFnd, vUv).a * uFndInt;
-  if (mf > 0.001) outc = mix(outc, setLum(uFndShade, lumv(outc)), mf); // foundation evens tone
+  if (mf > 0.001) outc = mix(outc, setLum(uFndShade, lumv(outc)), mf);
+
+  float mu = sc.b * uUnderEyeInt;         // under-eye: lift darkness, keep texture
+  if (mu > 0.001) outc = mix(outc, outc + (1.0 - outc) * 0.28, mu);
+
+  float mc = sc.r * uContourInt;          // contour: soft neutral cool shadow (no bruise/cast)
+  if (mc > 0.001) { vec3 sh = mix(outc * 0.82, vec3(lumv(outc) * 0.82), 0.25); outc = mix(outc, sh, mc); }
 
   float mb = texture2D(uBlush, vUv).a * uBlushInt;
   if (mb > 0.001) {
-    // fade blush where the cheek is already flushed, so it doesn't stack into a patch
     float redness = clamp((outc.r - (outc.g + outc.b) * 0.5) * 2.2, 0.0, 1.0);
     mb *= 1.0 - redness * 0.6;
     outc = mix(outc, recolour(outc, uBlushShade), mb);
   }
+
+  float mhi = sc.g * uHighlightInt;       // highlight: champagne glow on the bone
+  if (mhi > 0.001) outc = clamp(outc + mhi * vec3(0.95, 0.9, 0.76) * 0.5, 0.0, 1.0);
 
   float mh = texture2D(uHair, vUv).a * uHairInt;
   if (mh > 0.001) outc = mix(outc, recolour(outc, uHairShade), mh);
@@ -60,19 +70,18 @@ void main(){
   if (me > 0.001) outc = mix(outc, recolour(outc, uEyeShade), me);
 
   float ml2 = texture2D(uLash, vUv).a * uLashInt;
-  if (ml2 > 0.001) outc = mix(outc, vec3(0.0), ml2); // eyeliner — pure black
+  if (ml2 > 0.001) outc = mix(outc, vec3(0.0), ml2);
 
   float lipA = texture2D(uLip, vUv).a;
   float ml = lipA * uLipInt;
   if (ml > 0.001) {
     float lum = lumv(outc);
     vec3 mk = recolour(outc, uLipShade);
-    // ombre: darker liner at the rim, lighter toward the centre
-    float edge = 1.0 - smoothstep(0.12, 0.7, lipA);
+    float edge = 1.0 - smoothstep(0.12, 0.7, lipA);  // ombre liner
     mk *= 1.0 - edge * 0.3;
     if (uFinish < 0.5) mk = setLum(mk, clamp(0.5 + (lum - 0.5) * 0.75, 0.0, 1.0));
     else if (uFinish < 1.5) mk += smoothstep(0.55, 0.9, lum) * 0.25;
-    else { float s = smoothstep(0.6, 0.97, lum); mk += s * s * 0.7; } // gloss keeps lip highlights
+    else { float s = smoothstep(0.6, 0.97, lum); mk += s * s * 0.7; }
     outc = mix(outc, mk, ml);
   }
   gl_FragColor = vec4(clamp(outc, 0.0, 1.0), 1.0);
@@ -124,12 +133,13 @@ function initGL() {
   gl.enableVertexAttribArray(ap);
   gl.vertexAttribPointer(ap, 2, gl.FLOAT, false, 0, 0);
 
-  for (const u of ['uFrame','uFnd','uBlush','uHair','uEye','uLash','uLip',
-                   'uFndShade','uBlushShade','uHairShade','uEyeShade','uLipShade',
-                   'uFndInt','uBlushInt','uHairInt','uEyeInt','uLashInt','uLipInt','uLight','uFinish']) {
+  for (const u of ['uFrame','uFnd','uBlush','uHair','uEye','uLash','uLip','uSculpt',
+                   'uFndShade','uBlushShade','uHairShade','uEyeShade','uLipShade','uWB',
+                   'uFndInt','uBlushInt','uHairInt','uEyeInt','uLashInt','uLipInt',
+                   'uContourInt','uHighlightInt','uUnderEyeInt','uLight','uFinish']) {
     loc[u] = gl.getUniformLocation(prog, u);
   }
-  tex = { frame: makeTex(), fnd: makeTex(), blush: makeTex(), hair: makeTex(), eye: makeTex(), lash: makeTex(), lip: makeTex() };
+  tex = { frame: makeTex(), fnd: makeTex(), blush: makeTex(), hair: makeTex(), eye: makeTex(), lash: makeTex(), lip: makeTex(), sculpt: makeTex() };
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
   return true;
 }
@@ -152,13 +162,13 @@ function upload(unit, t, src) {
 }
 
 /**
- * Render frame + makeup on the GPU; returns the WebGL canvas (blit to a 2D ctx) or null.
- * opts: { foundation, hair, eyes, lashes, lips } — each optional.
+ * Render frame + makeup. opts: { foundation, underEye, contour, blush, highlight,
+ * hair, eyes, lashes, lips, wb:[r,g,b] } — each region optional.
  */
 export function renderMakeupGL(source, w, h, landmarks, opts) {
   if (!glAvailable() || !initGL()) return null;
   if (!landmarks || landmarks.length < 468) return null;
-  const { foundation, blush, hair, eyes, lashes, lips } = opts;
+  const { foundation, underEye, contour, blush, highlight, hair, eyes, lashes, lips, wb } = opts;
 
   const fndMask = foundation ? buildFaceMask(w, h, landmarks) : blank();
   const blushMask = blush ? buildBlushMask(w, h, landmarks) : blank();
@@ -166,6 +176,8 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
   const lashMask = lashes ? buildLashMask(w, h, landmarks) : blank();
   const lipMask = lips ? buildLipMask(w, h, landmarks, lips) : blank();
   const hairMask = (hair && hair.mask) ? hair.mask : blank();
+  const sculptOn = !!(contour || highlight || underEye);
+  const sculptMask = sculptOn ? buildSculptPack(w, h, landmarks, { contour: !!contour, highlight: !!highlight, underEye: !!underEye }) : blank();
 
   if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
   gl.viewport(0, 0, w, h);
@@ -178,15 +190,18 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
   upload(4, tex.eye, eyeMask);
   upload(5, tex.lash, lashMask);
   upload(6, tex.lip, lipMask);
+  upload(7, tex.sculpt, sculptMask);
 
   gl.uniform1i(loc.uFrame, 0); gl.uniform1i(loc.uFnd, 1); gl.uniform1i(loc.uBlush, 2);
-  gl.uniform1i(loc.uHair, 3); gl.uniform1i(loc.uEye, 4); gl.uniform1i(loc.uLash, 5); gl.uniform1i(loc.uLip, 6);
+  gl.uniform1i(loc.uHair, 3); gl.uniform1i(loc.uEye, 4); gl.uniform1i(loc.uLash, 5);
+  gl.uniform1i(loc.uLip, 6); gl.uniform1i(loc.uSculpt, 7);
 
   gl.uniform3fv(loc.uFndShade, hexToRgb(foundation ? foundation.color : '#000000'));
   gl.uniform3fv(loc.uBlushShade, hexToRgb(blush ? blush.color : '#000000'));
   gl.uniform3fv(loc.uHairShade, hexToRgb(hair ? hair.color : '#000000'));
   gl.uniform3fv(loc.uEyeShade, hexToRgb(eyes ? eyes.color : '#000000'));
   gl.uniform3fv(loc.uLipShade, hexToRgb(lips ? lips.color : '#000000'));
+  gl.uniform3fv(loc.uWB, wb && wb.length === 3 ? wb : [1, 1, 1]);
 
   gl.uniform1f(loc.uFndInt, foundation ? (foundation.intensity ?? 0.25) : 0);
   gl.uniform1f(loc.uBlushInt, blush ? (blush.intensity ?? 0.4) : 0);
@@ -194,6 +209,9 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
   gl.uniform1f(loc.uEyeInt, eyes ? (eyes.intensity ?? 0.5) : 0);
   gl.uniform1f(loc.uLashInt, lashes ? (lashes.intensity ?? 0.8) : 0);
   gl.uniform1f(loc.uLipInt, lips ? (lips.intensity ?? 0.7) : 0);
+  gl.uniform1f(loc.uContourInt, contour ? (contour.intensity ?? 0.35) : 0);
+  gl.uniform1f(loc.uHighlightInt, highlight ? (highlight.intensity ?? 0.5) : 0);
+  gl.uniform1f(loc.uUnderEyeInt, underEye ? (underEye.intensity ?? 0.4) : 0);
 
   gl.uniform1f(loc.uLight, (lips?.lightResponse ?? eyes?.lightResponse ?? 0.5));
   gl.uniform1f(loc.uFinish, FINISH_CODE[lips?.finish] ?? 1);

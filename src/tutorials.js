@@ -16,8 +16,6 @@ export const LESSON = {
       title: 'Sculpt lightly', text: 'A thin cool shadow along the hollow under the cheekbone — shadow, not a stripe.' },
     { key: 'blush',  region: 'blush',      product: 'blush',  family: 'rosy',      intensity: 0.38,
       title: 'Add a flush', text: 'Blush high on the cheekbone, swept up toward the temple for a lifted, even glow.' },
-    { key: 'glow',   region: 'highlight',  product: 'highlight', family: 'champagne', intensity: 0.22,
-      title: 'Place the glow', text: 'A touch of highlight along the top of the cheekbone — on the bone, not under the eye.' },
     { key: 'eyes',   region: 'eyes',       product: 'eyes',   family: 'neutral',   intensity: 0.45,
       title: 'Define the eyes', text: 'A neutral taupe wash across the lid, blended into the crease for soft depth.' },
     { key: 'lashes', region: 'lashes',     product: 'lashes', family: null,        intensity: 0.8,

@@ -161,7 +161,7 @@ export function buildLashMask(w, h, landmarks) {
 
     // 2. individual lash flicks along the outer half, up-and-out
     m.lineWidth = Math.max(0.7, thin * 0.9);
-    const len = eyeH * 0.55;
+    const len = eyeH * 0.35;
     for (let k = 0; k < pts.length; k++) {
       const t = k / (pts.length - 1);
       if (t > 0.55) continue; // only outer ~half gets visible lashes

@@ -4,6 +4,7 @@ import { renderMakeup, drawLandmarks, drawSegMask } from './lipRenderer.js';
 import { renderMakeupGL, glAvailable } from './webglLips.js';
 import { initSegmenter, segmentLips, segmentHair, segmenterReady, resetSegmenter } from './lipSegmenter.js';
 import { PRODUCTS, EYE_SHADES, FOUNDATION_SHADES, BLUSH_SHADES, HAIR_SHADES } from './products.js';
+import { LESSON, lessonLayers, resolveStep } from './tutorials.js';
 
 const FINISHES = ['matte', 'satin', 'gloss'];
 const MOVE_THRESH = 0.0015; // per-frame face motion above this = "moving": drop the ONNX edge, follow landmarks
@@ -63,6 +64,10 @@ export default function App() {
   const [hairOn, setHairOn] = useState(false);
   const [hairIntensity, setHairIntensity] = useState(0.7);
 
+  // lesson mode (single 5-step guided look) — this is the whole app
+  const [lessonOn] = useState(true);
+  const [step, setStep] = useState(0);
+
   const [lightResponse, setLightResponse] = useState(0.5);
   const [compare, setCompare] = useState(false);
   const [showPoints, setShowPoints] = useState(false);
@@ -93,15 +98,34 @@ export default function App() {
   const prevFullRef = useRef(null); // previous full landmark array, for extrapolation
 
   // live option values for the render loop (avoid stale closures)
+  // makeup layers: driven by the lesson when running (cumulative, colours from
+  // their shade data), else by the manual controls.
+  let L;
+  if (lessonOn) {
+    const m = lessonLayers(step);
+    L = {
+      lips: m.lips ? { ...m.lips, lightResponse } : null,
+      eyes: m.eyes ? { ...m.eyes, lightResponse } : null,
+      lashes: m.lashes ? { ...m.lashes } : null,
+      foundation: m.foundation ? { ...m.foundation } : null,
+      blush: m.blush ? { ...m.blush, lightResponse } : null,
+    };
+  } else {
+    L = {
+      lips: { color: PRODUCTS[sel].hex, intensity, finish, lightResponse },
+      eyes: eyeOn ? { color: EYE_SHADES[eyeSel].hex, intensity: eyeIntensity, lightResponse } : null,
+      lashes: lashOn ? { intensity: lashIntensity } : null,
+      foundation: fndOn ? { color: FOUNDATION_SHADES[fndSel].hex, intensity: fndIntensity } : null,
+      blush: blushOn ? { color: BLUSH_SHADES[blushSel].hex, intensity: blushIntensity, lightResponse } : null,
+    };
+  }
+
   const optsRef = useRef({});
   optsRef.current = {
-    lips: { color: PRODUCTS[sel].hex, intensity, finish, lightResponse },
-    eyes: eyeOn ? { color: EYE_SHADES[eyeSel].hex, intensity: eyeIntensity, lightResponse } : null,
-    lashes: lashOn ? { intensity: lashIntensity } : null,
-    foundation: fndOn ? { color: FOUNDATION_SHADES[fndSel].hex, intensity: fndIntensity } : null,
-    blush: blushOn ? { color: BLUSH_SHADES[blushSel].hex, intensity: blushIntensity, lightResponse } : null,
-    hair: hairOn ? { color: HAIR_SHADES[hairSel].hex, intensity: hairIntensity } : null,
+    ...L,
+    hair: hairOn && !lessonOn ? { color: HAIR_SHADES[hairSel].hex, intensity: hairIntensity } : null,
     compare, showPoints, useGL, useSeg, segDebug,
+    tut: lessonOn, // in lesson mode the big view shows the makeup
   };
 
   const selectProduct = useCallback((i) => { setSel(i); setFinish(PRODUCTS[i].finish); }, []);
@@ -112,8 +136,8 @@ export default function App() {
     const o = optsRef.current;
     if (!lms || o.compare) return;
     const still = motionRef.current <= MOVE_THRESH;
-    const lips = { ...o.lips };
-    if (o.useSeg && still && segMaskRef.current) lips.overrideMask = segMaskRef.current;
+    const lips = o.lips ? { ...o.lips } : null;
+    if (lips && o.useSeg && still && segMaskRef.current) lips.overrideMask = segMaskRef.current;
     const hair = o.hair && hairMaskRef.current ? { ...o.hair, mask: hairMaskRef.current } : null;
     const layers = { foundation: o.foundation, blush: o.blush, hair, eyes: o.eyes, lashes: o.lashes, lips };
     if (o.useGL && source) {
@@ -175,16 +199,18 @@ export default function App() {
     if (main.width !== outW || main.height !== outH) { main.width = outW; main.height = outH; }
     const { sx, sy, sw, sh } = computeCrop(lms, w, h, outW / outH);
 
-    // big = original crop
-    const ctx = main.getContext('2d');
-    ctx.drawImage(source, sx, sy, sw, sh, 0, 0, outW, outH);
+    // big = your live camera (original), small PiP = the look (builds up on Next)
+    const bigSrc = source;
+    const pipSrc = proc;
 
-    // small PiP = processed, same crop
+    const ctx = main.getContext('2d');
+    ctx.drawImage(bigSrc, sx, sy, sw, sh, 0, 0, outW, outH);
+
     const pip = pipRef.current;
     if (pip) {
       const pw = Math.max(2, Math.round(outW * 0.42)), ph = Math.max(2, Math.round(outH * 0.42));
       if (pip.width !== pw || pip.height !== ph) { pip.width = pw; pip.height = ph; }
-      pip.getContext('2d').drawImage(proc, sx, sy, sw, sh, 0, 0, pw, ph);
+      pip.getContext('2d').drawImage(pipSrc, sx, sy, sw, sh, 0, 0, pw, ph);
     }
   }, [applyMakeup, computeCrop]);
 
@@ -322,7 +348,7 @@ export default function App() {
     if (mode === 'photo') redrawPhoto();
   }, [sel, eyeSel, eyeOn, intensity, eyeIntensity, lashOn, lashIntensity, fndSel, fndOn, fndIntensity,
       blushSel, blushOn, blushIntensity, hairSel, hairOn, hairIntensity, lightResponse, finish, compare,
-      showPoints, useGL, segDebug, mode, redrawPhoto]);
+      showPoints, useGL, segDebug, lessonOn, step, mode, redrawPhoto]);
 
   // the segmentation model is needed for the ONNX lip-edge refine AND for hair
   const needSeg = useSeg || hairOn;
@@ -412,22 +438,42 @@ export default function App() {
   const activePal = palettes[target];
   const activeShade = activePal ? activePal[palSel[target]].shade : 'lashes';
 
+  const lessonStep = LESSON.steps[step];
+  const isFinal = step === LESSON.steps.length - 1;
+  const stepProduct = resolveStep(step).product;
+
   return (
-    <div className="app">
-      <header>
-        <div className="brand">REESOLVE<span>.</span></div>
-        <div className="tag">lip try-on · prototype</div>
-      </header>
+    <div className={`app${lessonOn ? ' lesson' : ''}`}>
+      {lessonOn ? (
+        <div className="lesson-head">
+          <p className="lesson-eyebrow">{isFinal ? 'Final step' : `Step ${step + 1} of ${LESSON.steps.length}`}</p>
+          <div className="lesson-progress">
+            {LESSON.steps.map((_, i) => <span key={i} className={`seg${i <= step ? ' on' : ''}`} />)}
+          </div>
+          <h1 className="lesson-title">{lessonStep.title}</h1>
+          <p className="lesson-desc">{lessonStep.text}</p>
+        </div>
+      ) : (
+        <header>
+          <div className="brand-wrap">
+            <p className="brand-eyebrow">Beauty Studio</p>
+            <div className="brand">REESOLVE<span>.</span></div>
+          </div>
+          <div className="tag">try-on · tutorials</div>
+        </header>
+      )}
 
       <div className="stage">
         <div className={`viewport${mirrored ? ' mir' : ''}`}>
           <video ref={videoRef} playsInline muted style={{ display: 'none' }} />
           <img ref={imgRef} alt="" style={{ display: 'none' }} />
           <canvas ref={canvasRef} />
-          <div className="pip">
+          <div className={`pip${lessonOn ? ' live' : ''}`}>
+            {lessonOn && <span className="pip-top">Live</span>}
             <canvas ref={pipRef} />
-            <span className="pip-label">with makeup</span>
+            <span className="pip-label">{lessonOn ? '✦ Live preview' : 'with makeup'}</span>
           </div>
+          {lessonOn && <span className="cam-label">Your live camera</span>}
           {!ready && !error && <div className="overlay">Loading face model…</div>}
           {error && <div className="overlay err">Model failed to load.<br /><small>{error}</small></div>}
           {ready && mode === 'camera' && camError && (
@@ -440,9 +486,13 @@ export default function App() {
           {ready && !faceSeen && ((mode === 'camera' && !camError) || (mode === 'photo' && imgRef.current?.src)) && (
             <div className="badge warn">no face detected</div>
           )}
-          {ready && faceSeen && <div className="badge ok">{target} · {activeShade}</div>}
+          {ready && faceSeen && !lessonOn && <div className="badge ok">{target} · {activeShade}</div>}
 
-          {activePal && (
+          {lessonOn && stepProduct && (
+            <div className="prod-chip"><span className="pc-ico" /> {stepProduct}</div>
+          )}
+
+          {!lessonOn && activePal && (
             <div className="swatches" role="radiogroup" aria-label="Shade">
               {activePal.map((p, i) => (
                 <button key={p.id} className={`sw${i === palSel[target] ? ' on' : ''}`} title={p.shade}
@@ -454,116 +504,13 @@ export default function App() {
         </div>
       </div>
 
-      <div className="panel">
-        <div className="seg modes">
-          <button className={mode === 'camera' ? 'on' : ''} onClick={() => setMode('camera')}>Live camera</button>
-          <button className={mode === 'photo' ? 'on' : ''} onClick={() => setMode('photo')}>Photo</button>
-          {mode === 'photo' && (
-            <label className="upload">
-              Upload<input type="file" accept="image/*" onChange={onFile} hidden />
-            </label>
-          )}
+      <div className="lesson-foot">
+        <div className="lesson-nav">
+          <button className="round" disabled={step === 0} onClick={() => setStep((s) => Math.max(0, s - 1))}>‹</button>
+          {isFinal
+            ? <button className="primary" onClick={() => setStep(0)}>↺ Start over</button>
+            : <button className="primary" onClick={() => setStep((s) => s + 1)}>Next step ›</button>}
         </div>
-
-        <div className="field">
-          <label>Makeup</label>
-          <div className="seg tabs">
-            {REGIONS.map((r) => (
-              <button key={r.key} className={target === r.key ? 'on' : ''} onClick={() => setTarget(r.key)}>
-                {r.label}{r.key !== 'lips' && regionOn[r.key] ? ' •' : ''}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="field row">
-          {target !== 'lips' && (
-            <div>
-              <label>{target === 'hair' ? 'Hair colour' : target === 'foundation' ? 'Foundation' : target === 'blush' ? 'Blush' : target === 'lashes' ? 'Lashes' : 'Eyeshadow'}</label>
-              <div className="seg">
-                <button className={regionOn[target] ? 'on' : ''} onClick={() => regionSetOn[target](true)}>on</button>
-                <button className={!regionOn[target] ? 'on' : ''} onClick={() => regionSetOn[target](false)}>off</button>
-              </div>
-            </div>
-          )}
-          {target === 'lips' && (
-            <div>
-              <label>Finish</label>
-              <div className="seg">
-                {FINISHES.map((f) => (
-                  <button key={f} className={finish === f ? 'on' : ''} onClick={() => setFinish(f)}>{f}</button>
-                ))}
-              </div>
-            </div>
-          )}
-          <div className="grow">
-            <label>Intensity · {Math.round(regionInt[target] * 100)}%</label>
-            <input type="range" min="0.05" max="1" step="0.01" value={regionInt[target]}
-              onChange={(e) => regionSetInt[target](parseFloat(e.target.value))} />
-          </div>
-        </div>
-
-        {target === 'hair' && (
-          <p className="note" style={{ marginTop: 0 }}>
-            Hair recolour uses the segmentation model (hair is outside the face mesh), so it's heavier.
-            {hairOn && !segReady && !segErr ? ' Loading model…' : ''}
-            {hairOn && segReady ? ' Model ready.' : ''}
-            {segErr ? ` Model error: ${segErr}` : ''}
-          </p>
-        )}
-
-        <div className="field row">
-          <div className="grow">
-            <label>Light response · {Math.round(lightResponse * 100)}%</label>
-            <input type="range" min="0" max="1" step="0.01" value={lightResponse}
-              onChange={(e) => setLightResponse(parseFloat(e.target.value))} />
-          </div>
-        </div>
-
-        <label className="compare">
-          <input type="checkbox" checked={compare} onChange={(e) => setCompare(e.target.checked)} />
-          Show original (no makeup)
-        </label>
-        <label className="compare">
-          <input type="checkbox" checked={useGL} disabled={!glAvailable()}
-            onChange={(e) => setUseGL(e.target.checked)} />
-          GPU render — WebGL shader {glAvailable() ? '' : '· unavailable'}
-        </label>
-        <label className="compare">
-          <input type="checkbox" checked={showPoints} onChange={(e) => setShowPoints(e.target.checked)} />
-          Show MediaPipe mesh (debug)
-        </label>
-        <label className="compare">
-          <input type="checkbox" checked={useSeg} onChange={(e) => setUseSeg(e.target.checked)} />
-          Precise lips — segmentation (ONNX)
-          {useSeg && !segReady && !segErr ? ' · loading…' : ''}
-          {segReady ? ' · on' : ''}
-        </label>
-        {useSeg && (
-          <label className="compare">
-            <input type="checkbox" checked={segDebug} onChange={(e) => setSegDebug(e.target.checked)} />
-            Show ONNX lip mask (debug, green)
-            {segReady ? (segHasMask ? ' · mask: active' : ' · mask: none') : ' · model not loaded'}
-          </label>
-        )}
-        {segDebug && segReady && !segHasMask && (
-          <p className="note" style={{ color: '#d79a5c' }}>
-            No mask yet — model loaded but produced nothing for this frame. Make sure a face is detected
-            (the badge says “tracking”), good light, and the shade/finish aside, check the console for ort errors.
-          </p>
-        )}
-        {segErr && (
-          <p className="note" style={{ color: '#f0a0a0' }}>
-            Segmentation model not loaded ({segErr}). Put <code>face_parse.onnx</code> in <code>public/models/</code> —
-            see SEGMENTATION.md. Using the landmark mask for now.
-          </p>
-        )}
-
-        <p className="note">
-          Real MediaPipe Face Landmarker (478 points) builds the lip mask. <b>GPU render</b> does the recolour in a
-          WebGL shader — luminance-preserving colour transfer plus matte / satin / gloss finishes, one GPU pass per
-          frame. <b>Segmentation</b> (BiSeNet via onnxruntime-web, on-device) refines the lip edge. All in the browser.
-        </p>
       </div>
     </div>
   );

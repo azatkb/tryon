@@ -61,7 +61,7 @@ void main(){
   }
 
   float mhi = sc.g * uHighlightInt;       // highlight: champagne glow on the bone
-  if (mhi > 0.001) outc = clamp(outc + mhi * vec3(0.95, 0.9, 0.76) * 0.5, 0.0, 1.0);
+  if (mhi > 0.001) outc = clamp(outc + mhi * vec3(0.95, 0.9, 0.76) * 0.32, 0.0, 1.0);
 
   float mh = texture2D(uHair, vUv).a * uHairInt;
   if (mh > 0.001) outc = mix(outc, recolour(outc, uHairShade), mh);

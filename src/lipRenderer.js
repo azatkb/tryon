@@ -3,10 +3,45 @@ import { EYE_R_LASH, EYE_L_LASH, EYE_R_V, EYE_L_V, EYE_LIFT,
          EYE_R_FULL, EYE_L_FULL, FACE_OVAL,
          CHEEK_R, CHEEK_L, FACE_SIDE_L, FACE_SIDE_R } from './regions.js';
 
-// Masks are built at reduced resolution (cheap blur/fill) and scaled up when drawn
-// — the GPU and Canvas both upsample smoothly, so the edge quality is unaffected
-// but per-frame cost drops ~4×.
-const MASK_SCALE = 0.5;
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  TUNING — all mask shape/softness settings in one place.                   ║
+// ║  Sizes are fractions of FACE WIDTH (faceW) unless noted; blur is fraction  ║
+// ║  of mask width (MW). Per-step STRENGTH lives in tutorials.js (intensity),  ║
+// ║  and shader colour math (contour darkness, highlight colour) in webglLips.js. ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+const CFG = {
+  maskScale: 0.5,          // internal mask resolution (× frame). Lower = faster, softer.
+
+  lips:  { blur: 0.006 },  // lip edge softness (ombre needs a little)
+
+  eyes:  { blur: 0.009 },  // eyeshadow diffusion (EYE_LIFT lives in regions.js)
+
+  lashes: { width: 0.004,  // lash line / hair thickness (× face HEIGHT, MH)
+            len: 0.35,     // flick length (× eye height)
+            reachT: 0.55,  // how far from the outer corner lashes go (0..1)
+            blur: 0.0006 },
+
+  face:  { blur: 0.012 },  // foundation edge softness
+
+  blush: { half: 0.16,     // sweep length (cheek apple → temple)
+           width: 0.075,   // sweep thickness
+           blur: 0.012 },
+
+  contour: { width: 0.03,  // stroke thickness along the cheekbone curve
+             drop: 0.25,   // push the curve down into the hollow
+             blur: 0.04 }, // edge softness (bigger = softer)
+
+  highlight: { width: 0.022, // stroke thickness along the top of the cheekbone
+               reach: 0.3,   // how far from the apple toward the eye (shorter = smaller)
+               blur: 0.016 },
+
+  underEye: { half: 0.09,  // brighten-band length
+              width: 0.035,
+              blur: 0.011 },
+};
+
+// Masks are built at reduced resolution (cheap blur/fill) and scaled up when drawn.
+const MASK_SCALE = CFG.maskScale;
 let MW = 0, MH = 0;
 
 // Reused offscreen canvases (avoid per-frame allocation).
@@ -103,7 +138,7 @@ function tracePath(ctx, landmarks, indices, w, h) {
  */
 export function buildLipMask(w, h, landmarks, opts = {}) {
   ensure(w, h);
-  const blur = Math.max(1.2, MW * 0.006); // softer edge → gives room for the ombre liner
+  const blur = Math.max(1.2, MW * CFG.lips.blur); // softer edge → room for the ombre liner
   const m = maskCv.getContext('2d');
   m.setTransform(1, 0, 0, 1, 0, 0);
   m.clearRect(0, 0, MW, MH);
@@ -142,7 +177,7 @@ export function buildEyeMask(w, h, landmarks) {
   m.setTransform(1, 0, 0, 1, 0, 0);
   m.clearRect(0, 0, MW, MH);
   m.fillStyle = '#fff';
-  m.filter = `blur(${Math.max(2, MW * 0.009)}px)`; // eyeshadow is diffuse
+  m.filter = `blur(${Math.max(2, MW * CFG.eyes.blur)}px)`; // eyeshadow is diffuse
   for (const [lash, vref] of [[EYE_R_LASH, EYE_R_V], [EYE_L_LASH, EYE_L_V]]) {
     const eyeH = Math.abs(landmarks[vref[0]].y - landmarks[vref[1]].y) * MH;
     const lift = eyeH * EYE_LIFT;
@@ -167,7 +202,7 @@ export function buildFaceMask(w, h, landmarks) {
   m.clearRect(0, 0, MW, MH);
   m.globalCompositeOperation = 'source-over';
   m.fillStyle = '#fff';
-  m.filter = `blur(${Math.max(2, MW * 0.012)}px)`;
+  m.filter = `blur(${Math.max(2, MW * CFG.face.blur)}px)`;
   fillPoly(m, landmarks, FACE_OVAL, MW, MH);
   m.filter = 'none';
   m.globalCompositeOperation = 'destination-out';
@@ -188,8 +223,8 @@ export function buildLashMask(w, h, landmarks) {
   m.strokeStyle = '#fff';
   m.lineCap = 'round';
   m.lineJoin = 'round';
-  m.filter = `blur(${Math.max(0.3, MW * 0.0006)}px)`;
-  const thin = Math.max(0.8, MH * 0.004);
+  m.filter = `blur(${Math.max(0.3, MW * CFG.lashes.blur)}px)`;
+  const thin = Math.max(0.8, MH * CFG.lashes.width);
 
   for (const [lash, vref] of [[EYE_R_LASH, EYE_R_V], [EYE_L_LASH, EYE_L_V]]) {
     const pts = lash.map((i) => [landmarks[i].x * MW, landmarks[i].y * MH]);
@@ -205,11 +240,11 @@ export function buildLashMask(w, h, landmarks) {
 
     // 2. individual lash flicks along the outer half, up-and-out
     m.lineWidth = Math.max(0.7, thin * 0.9);
-    const len = eyeH * 0.35;
+    const len = eyeH * CFG.lashes.len;
     for (let k = 0; k < pts.length; k++) {
       const t = k / (pts.length - 1);
-      if (t > 0.55) continue; // only outer ~half gets visible lashes
-      const grow = 1 - t / 0.55;          // longest at the outer corner
+      if (t > CFG.lashes.reachT) continue; // only outer part gets visible lashes
+      const grow = 1 - t / CFG.lashes.reachT;  // longest at the outer corner
       const [x, y] = pts[k];
       m.beginPath();
       m.moveTo(x, y);
@@ -229,10 +264,10 @@ export function buildBlushMask(w, h, landmarks) {
   const m = blushMaskCv.getContext('2d');
   m.setTransform(1, 0, 0, 1, 0, 0);
   m.clearRect(0, 0, MW, MH);
-  m.filter = `blur(${Math.max(2, MW * 0.012)}px)`; // diffuse edges
+  m.filter = `blur(${Math.max(2, MW * CFG.blush.blur)}px)`; // diffuse edges
   const faceW = Math.abs(landmarks[FACE_SIDE_R].x - landmarks[FACE_SIDE_L].x) * MW;
-  const half = Math.max(1, faceW * 0.16);   // sweep length (semi-major)
-  const width = Math.max(1, faceW * 0.075); // sweep width  (semi-minor)
+  const half = Math.max(1, faceW * CFG.blush.half);   // sweep length (semi-major)
+  const width = Math.max(1, faceW * CFG.blush.width); // sweep width  (semi-minor)
 
   // right eye outer 33, left eye outer 263 → direction "up and out" toward the temple
   for (const [ci, outer] of [[CHEEK_R, 33], [CHEEK_L, 263]]) {
@@ -263,9 +298,7 @@ export function buildBlushMask(w, h, landmarks) {
 
 // Contour: a thin cool streak that FOLLOWS the cheekbone — a feathered stroke
 // along a curve through real landmarks (ear → cheekbone → mouth corner), not a
-// blob. Bends with the face and head pose. Tune CTR_* below.
-const CTR_WIDTH = 0.03;  // stroke thickness (× face width)
-const CTR_DROP = 0.25;   // push the control point down into the hollow (× face height-ish)
+// blob. Bends with the face and head pose. Tune via CFG.contour.
 export function buildContourMask(w, h, landmarks) {
   ensure(w, h);
   const m = contourMaskCv.getContext('2d');
@@ -273,10 +306,10 @@ export function buildContourMask(w, h, landmarks) {
   m.clearRect(0, 0, MW, MH);
   m.lineCap = 'round';
   m.strokeStyle = '#fff';
-  m.filter = `blur(${Math.max(4, MW * 0.04)}px)`; // very soft, diffused edges
+  m.filter = `blur(${Math.max(4, MW * CFG.contour.blur)}px)`;
   const faceW = Math.abs(landmarks[FACE_SIDE_R].x - landmarks[FACE_SIDE_L].x) * MW;
-  const drop = faceW * CTR_DROP;
-  m.lineWidth = faceW * CTR_WIDTH;
+  const drop = faceW * CFG.contour.drop;
+  m.lineWidth = faceW * CFG.contour.width;
   const P = (i) => [landmarks[i].x * MW, landmarks[i].y * MH];
   // subject-right: ear 234, cheekbone 205, mouth corner 61; left: 454, 425, 291
   for (const [ear, cheek, mouth] of [[FACE_SIDE_L, CHEEK_R, 61], [FACE_SIDE_R, CHEEK_L, 291]]) {
@@ -295,22 +328,30 @@ export function buildContourMask(w, h, landmarks) {
   return contourMaskCv;
 }
 
-// Highlight (glow): a small blob high on the cheekbone — not under the eye.
+// Highlight (glow): a short feathered stroke along the TOP of the cheekbone
+// (cheek apple → toward the outer eye / temple), following landmarks. Tune via CFG.highlight.
 export function buildHighlightMask(w, h, landmarks) {
   ensure(w, h);
   const m = highlightMaskCv.getContext('2d');
   m.setTransform(1, 0, 0, 1, 0, 0);
   m.clearRect(0, 0, MW, MH);
-  m.filter = `blur(${Math.max(2, MW * 0.01)}px)`;
+  m.lineCap = 'round';
+  m.strokeStyle = '#fff';
+  m.filter = `blur(${Math.max(3, MW * CFG.highlight.blur)}px)`;
   const faceW = Math.abs(landmarks[FACE_SIDE_R].x - landmarks[FACE_SIDE_L].x) * MW;
-  const half = faceW * 0.1, width = faceW * 0.05;
-  for (const [ci, outer] of [[CHEEK_R, 33], [CHEEK_L, 263]]) {
-    const cx = landmarks[ci].x * MW, cy = landmarks[ci].y * MH;
-    const ox = landmarks[outer].x * MW, oy = landmarks[outer].y * MH;
-    const ang = Math.atan2(oy - cy, ox - cx);
-    // sit on the top of the cheekbone (toward the eye), not on the apple
-    const hx = cx * 0.45 + ox * 0.55, hy = cy * 0.45 + oy * 0.55 + width * 0.2;
-    sweep(m, hx, hy, ang, half, width, 0.95);
+  const lift = faceW * 0.02;
+  m.lineWidth = faceW * CFG.highlight.width;
+  const P = (i) => [landmarks[i].x * MW, landmarks[i].y * MH];
+  for (const [cheek, outer] of [[CHEEK_R, 33], [CHEEK_L, 263]]) {
+    const c = P(cheek), o = P(outer);
+    const k = CFG.highlight.reach;
+    const S = c;                                    // cheek apple
+    const E = [c[0] * (1 - k) + o[0] * k, c[1] * (1 - k) + o[1] * k]; // short, up the bone
+    const C = [(S[0] + E[0]) / 2, (S[1] + E[1]) / 2 - lift];      // lift onto the ridge
+    m.beginPath();
+    m.moveTo(S[0], S[1]);
+    m.quadraticCurveTo(C[0], C[1], E[0], E[1]);
+    m.stroke();
   }
   m.filter = 'none';
   return highlightMaskCv;
@@ -322,9 +363,9 @@ export function buildUnderEyeMask(w, h, landmarks) {
   const m = underEyeMaskCv.getContext('2d');
   m.setTransform(1, 0, 0, 1, 0, 0);
   m.clearRect(0, 0, MW, MH);
-  m.filter = `blur(${Math.max(2, MW * 0.011)}px)`;
+  m.filter = `blur(${Math.max(2, MW * CFG.underEye.blur)}px)`;
   const faceW = Math.abs(landmarks[FACE_SIDE_R].x - landmarks[FACE_SIDE_L].x) * MW;
-  const half = faceW * 0.09, width = faceW * 0.035;
+  const half = faceW * CFG.underEye.half, width = faceW * CFG.underEye.width;
   // lower-lid centres: 145 (right), 374 (left); inner/outer corners frame the angle
   for (const [low, inner, outer] of [[145, 133, 33], [374, 362, 263]]) {
     const cx = landmarks[low].x * MW, cy = landmarks[low].y * MH + width * 1.3; // below the lid

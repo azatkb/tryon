@@ -38,22 +38,10 @@ function estimateDepth(source, lms, w, h, scratch) {
   }
   if (!nn) return null;
   lum /= nn;
-  return lum > 210 ? 'fair' : lum > 185 ? 'light' : lum > 160 ? 'light medium'
+  const depth = lum > 210 ? 'fair' : lum > 185 ? 'light' : lum > 160 ? 'light medium'
     : lum > 135 ? 'medium' : lum > 110 ? 'medium tan' : lum > 85 ? 'tan'
     : lum > 60 ? 'deep' : 'rich';
-}
-
-// Conservative gray-world white balance from the whole frame — neutralises a warm
-// or cool light cast so the look stays consistent (clamped so it never over-corrects).
-function estimateWB(source, w, h, scratch) {
-  const x = scratch.getContext('2d', { willReadFrequently: true });
-  try {
-    x.drawImage(source, 0, 0, w, h, 0, 0, 1, 1);
-    const d = x.getImageData(0, 0, 1, 1).data;
-    const r = d[0] || 1, g = d[1] || 1, b = d[2] || 1, gray = (r + g + b) / 3;
-    const cl = (v) => Math.max(0.9, Math.min(1.12, v));
-    return [cl(gray / r), cl(gray / g), cl(gray / b)];
-  } catch (_) { return [1, 1, 1]; }
+  return { depth, lum: lum / 255 }; // lum 0..1 for lighting normalisation
 }
 
 // Tight-ish face box from all landmarks (normalised) -> pixel rect, with padding.
@@ -129,7 +117,7 @@ export default function App() {
   const cropRef = useRef(null); // smoothed portrait crop rect on the face
   const sampleRef = useRef(null); // 1px scratch canvas for skin-depth sampling
   const skinDepthRef = useRef(''); const frameCountRef = useRef(0);
-  const wbRef = useRef([1, 1, 1]); // auto white-balance gain (lighting consistency)
+  const faceLumRef = useRef(0.5); // average face luminance (lighting normalisation)
   const hairMaskRef = useRef(null); // latest hair segmentation mask (full frame)
   const motionRef = useRef(0); // per-frame face motion (normalised), EMA-smoothed
   const prevLmRef = useRef(null);   // previous few points, for the motion metric
@@ -185,7 +173,7 @@ export default function App() {
     const layers = {
       foundation: o.foundation, underEye: o.underEye, contour: o.contour,
       blush: o.blush, highlight: o.highlight, hair, eyes: o.eyes, lashes: o.lashes, lips,
-      wb: wbRef.current,
+      faceLum: faceLumRef.current,
     };
     if (o.useGL && source) {
       const glc = renderMakeupGL(source, w, h, lms, layers);
@@ -311,10 +299,12 @@ export default function App() {
           // periodically re-estimate skin depth + white balance (slow signals)
           if ((frameCountRef.current++ % 20) === 0) {
             if (!sampleRef.current) { sampleRef.current = document.createElement('canvas'); sampleRef.current.width = sampleRef.current.height = 1; }
-            const d = estimateDepth(v, raw, cv.width, cv.height, sampleRef.current);
-            if (d && d !== skinDepthRef.current) { skinDepthRef.current = d; setSkinDepth(d); }
-            // auto white-balance disabled for now (was over-tinting the preview)
-            // wbRef.current = estimateWB(v, cv.width, cv.height, sampleRef.current);
+            const est = estimateDepth(v, raw, cv.width, cv.height, sampleRef.current);
+            if (est) {
+              if (est.depth !== skinDepthRef.current) { skinDepthRef.current = est.depth; setSkinDepth(est.depth); }
+              // smooth the luminance so lighting normalisation doesn't flicker
+              faceLumRef.current = faceLumRef.current * 0.7 + est.lum * 0.3;
+            }
           }
 
           faceBoxRef.current = faceBBox(lms, cv.width, cv.height);
@@ -357,8 +347,11 @@ export default function App() {
     setFaceSeen(!!lms);
     if (lms) {
       if (!sampleRef.current) { sampleRef.current = document.createElement('canvas'); sampleRef.current.width = sampleRef.current.height = 1; }
-      const d = estimateDepth(img, lms, cv.width, cv.height, sampleRef.current);
-      if (d && d !== skinDepthRef.current) { skinDepthRef.current = d; setSkinDepth(d); }
+      const est = estimateDepth(img, lms, cv.width, cv.height, sampleRef.current);
+      if (est) {
+        if (est.depth !== skinDepthRef.current) { skinDepthRef.current = est.depth; setSkinDepth(est.depth); }
+        faceLumRef.current = est.lum;
+      }
     }
     // segmentation for the still (if enabled and loaded)
     if (optsRef.current.useSeg && segmenterReady() && lms) {

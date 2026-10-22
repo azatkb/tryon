@@ -21,7 +21,7 @@ uniform sampler2D uFrame, uFnd, uBlush, uHair, uEye, uLash, uLip, uSculpt;
 uniform vec3 uFndShade, uBlushShade, uHairShade, uEyeShade, uLipShade, uWB;
 uniform float uFndInt, uBlushInt, uHairInt, uEyeInt, uLashInt, uLipInt;
 uniform float uContourInt, uHighlightInt, uUnderEyeInt;
-uniform float uLight, uFinish;
+uniform float uLight, uFinish, uFaceLum;
 
 float lumv(vec3 c){ return dot(c, vec3(0.3, 0.59, 0.11)); }
 vec3 clipColor(vec3 c){
@@ -34,7 +34,9 @@ vec3 clipColor(vec3 c){
 }
 vec3 setLum(vec3 c, float l){ return clipColor(c + (l - lumv(c))); }
 vec3 recolour(vec3 base, vec3 shade){
-  float lum = lumv(base);
+  // normalise the makeup's lightness by the face's exposure so the look stays
+  // consistent whether the face is bright, dim or warm-lit (0.4 = gentle).
+  float lum = clamp(lumv(base) + (0.5 - uFaceLum) * 0.4, 0.0, 1.0);
   vec3 mk = setLum(shade, lum);
   float boosted = clamp(0.5 + (lum - 0.5) * 1.6, 0.0, 1.0);
   return setLum(mk, mix(lum, boosted, uLight));
@@ -47,8 +49,8 @@ void main(){
   float mf = texture2D(uFnd, vUv).a * uFndInt;
   if (mf > 0.001) outc = mix(outc, setLum(uFndShade, lumv(outc)), mf);
 
-  float mu = sc.b * uUnderEyeInt;         // under-eye: lift darkness, keep texture
-  if (mu > 0.001) outc = mix(outc, outc + (1.0 - outc) * 0.28, mu);
+  float mu = sc.b * uUnderEyeInt;         // under-eye: lift darkness, keep texture (no white patch)
+  if (mu > 0.001) outc = mix(outc, outc + (1.0 - outc) * 0.2, mu);
 
   float mc = sc.r * uContourInt;          // contour: soft neutral cool shadow (no bruise/cast)
   if (mc > 0.001) { vec3 sh = mix(outc * 0.82, vec3(lumv(outc) * 0.82), 0.25); outc = mix(outc, sh, mc); }
@@ -136,7 +138,7 @@ function initGL() {
   for (const u of ['uFrame','uFnd','uBlush','uHair','uEye','uLash','uLip','uSculpt',
                    'uFndShade','uBlushShade','uHairShade','uEyeShade','uLipShade','uWB',
                    'uFndInt','uBlushInt','uHairInt','uEyeInt','uLashInt','uLipInt',
-                   'uContourInt','uHighlightInt','uUnderEyeInt','uLight','uFinish']) {
+                   'uContourInt','uHighlightInt','uUnderEyeInt','uLight','uFinish','uFaceLum']) {
     loc[u] = gl.getUniformLocation(prog, u);
   }
   tex = { frame: makeTex(), fnd: makeTex(), blush: makeTex(), hair: makeTex(), eye: makeTex(), lash: makeTex(), lip: makeTex(), sculpt: makeTex() };
@@ -215,6 +217,7 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
 
   gl.uniform1f(loc.uLight, (lips?.lightResponse ?? eyes?.lightResponse ?? 0.5));
   gl.uniform1f(loc.uFinish, FINISH_CODE[lips?.finish] ?? 1);
+  gl.uniform1f(loc.uFaceLum, typeof opts.faceLum === 'number' ? opts.faceLum : 0.5);
 
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   return canvas;

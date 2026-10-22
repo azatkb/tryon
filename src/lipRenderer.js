@@ -35,9 +35,9 @@ const CFG = {
                reach: 0.3,   // how far from the apple toward the eye (shorter = smaller)
                blur: 0.016 },
 
-  underEye: { half: 0.09,  // brighten-band length
-              width: 0.035,
-              blur: 0.011 },
+  underEye: { width: 0.026, // brighten band thickness (× face width)
+              drop: 0.04,   // how far below the lower lid to sit
+              blur: 0.012 }, // soft edges
 };
 
 // Masks are built at reduced resolution (cheap blur/fill) and scaled up when drawn.
@@ -357,22 +357,27 @@ export function buildHighlightMask(w, h, landmarks) {
   return highlightMaskCv;
 }
 
-// Under-eye: a soft band just below each eye for brightening.
+// Under-eye: a soft brighten band that FOLLOWS the lower lid (inner → centre →
+// outer), dropped slightly into the dark-circle area. Tune via CFG.underEye.
 export function buildUnderEyeMask(w, h, landmarks) {
   ensure(w, h);
   const m = underEyeMaskCv.getContext('2d');
   m.setTransform(1, 0, 0, 1, 0, 0);
   m.clearRect(0, 0, MW, MH);
-  m.filter = `blur(${Math.max(2, MW * CFG.underEye.blur)}px)`;
+  m.lineCap = 'round';
+  m.strokeStyle = '#fff';
+  m.filter = `blur(${Math.max(3, MW * CFG.underEye.blur)}px)`;
   const faceW = Math.abs(landmarks[FACE_SIDE_R].x - landmarks[FACE_SIDE_L].x) * MW;
-  const half = faceW * CFG.underEye.half, width = faceW * CFG.underEye.width;
-  // lower-lid centres: 145 (right), 374 (left); inner/outer corners frame the angle
-  for (const [low, inner, outer] of [[145, 133, 33], [374, 362, 263]]) {
-    const cx = landmarks[low].x * MW, cy = landmarks[low].y * MH + width * 1.3; // below the lid
-    const ix = landmarks[inner].x * MW, iy = landmarks[inner].y * MH;
-    const ox = landmarks[outer].x * MW, oy = landmarks[outer].y * MH;
-    const ang = Math.atan2(oy - iy, ox - ix);
-    sweep(m, cx, cy, ang, half, width, 0.9);
+  const drop = faceW * CFG.underEye.drop;
+  m.lineWidth = faceW * CFG.underEye.width;
+  const P = (i) => [landmarks[i].x * MW, landmarks[i].y * MH + drop]; // dropped under the lid
+  // lower-lid inner / centre / outer: right 133,145,33 ; left 362,374,263
+  for (const [inner, low, outer] of [[133, 145, 33], [362, 374, 263]]) {
+    const a = P(inner), b = P(low), c = P(outer);
+    m.beginPath();
+    m.moveTo(a[0], a[1]);
+    m.quadraticCurveTo(b[0], b[1], c[0], c[1]);
+    m.stroke();
   }
   m.filter = 'none';
   return underEyeMaskCv;

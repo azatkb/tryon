@@ -1,7 +1,28 @@
 import { LIPS_OUTER, LIPS_INNER, LOWER_LIP } from './lips.js';
 import { EYE_R_LASH, EYE_L_LASH, EYE_R_V, EYE_L_V, EYE_LIFT,
-         EYE_R_FULL, EYE_L_FULL, FACE_OVAL,
+         EYE_R_FULL, EYE_L_FULL, FACE_OVAL, BROW_R, BROW_L, NOSE,
          CHEEK_R, CHEEK_L, FACE_SIDE_L, FACE_SIDE_R } from './regions.js';
+
+// When on, face-area makeup (blush, contour, highlight, concealer, foundation)
+// is cut away where it overlaps protected features (eyes, nose, lips, brows).
+let PROTECT = true;
+export function setFeatureProtect(v) { PROTECT = !!v; }
+
+// Runtime override for a region's edge softness (blur fraction of mask width).
+// Lets the debug panel's "edge hardness" slider retune a layer live.
+export function setRegionBlur(region, frac) {
+  if (CFG[region]) CFG[region].blur = frac;
+}
+function cutFeatures(m, landmarks) {
+  if (!PROTECT) return;
+  m.save();
+  m.filter = 'none';
+  m.globalCompositeOperation = 'destination-out';
+  for (const poly of [NOSE, EYE_R_FULL, EYE_L_FULL, LIPS_OUTER, BROW_R, BROW_L]) {
+    fillPoly(m, landmarks, poly, MW, MH);
+  }
+  m.restore();
+}
 
 // ╔══════════════════════════════════════════════════════════════════════════╗
 // ║  TUNING — all mask shape/softness settings in one place.                   ║
@@ -14,9 +35,16 @@ const CFG = {
 
   lips:  { blur: 0.006 },  // lip edge softness (ombre needs a little)
 
+  lipLiner: { width: 0.003, blur: 0.0015 }, // liner ring thickness / softness (thin)
+
+  eyeliner: { width: 0.006, wing: 0.5, blur: 0.0015 }, // line thickness / wing length / softness
+
+  brows: { blur: 0.004 }, // brow fill edge softness
+
   eyes:  { blur: 0.009 },  // eyeshadow diffusion (EYE_LIFT lives in regions.js)
 
-  lashes: { width: 0.004,  // lash line / hair thickness (× face HEIGHT, MH)
+  lashes: { width: 0.0026, // lash line / flick thickness (× face HEIGHT, MH) — thinner
+            count: 24,     // number of individual flicks per eye (higher = denser)
             len: 0.35,     // flick length (× eye height)
             reachT: 0.55,  // how far from the outer corner lashes go (0..1)
             blur: 0.0006 },
@@ -27,17 +55,32 @@ const CFG = {
            width: 0.075,   // sweep thickness
            blur: 0.012 },
 
-  contour: { width: 0.03,  // stroke thickness along the cheekbone curve
+  contour: { width: 0.03,  // core stroke thickness along the cheekbone curve
              drop: 0.25,   // push the curve down into the hollow
-             blur: 0.04 }, // edge softness (bigger = softer)
+             blur: 0.022,  // edge softness (light — gradient does the feathering)
+             wide: 2.2,    // halo width = core × this
+             edge: 0.5,    // halo alpha
+             core: 1.0 },  // core alpha (defined centre)
 
-  highlight: { width: 0.022, // stroke thickness along the top of the cheekbone
+  // highlight & underEye use a feathered 2-pass stroke: a wide faint halo + a
+  // bright core. Like blush, softness comes from a gradient profile that PEAKS
+  // near 1.0 in the centre with light blur — not from a thin line over-blurred
+  // (that just fades to nothing).
+  highlight: { width: 0.03,  // core stroke thickness along the top of the cheekbone
                reach: 0.3,   // how far from the apple toward the eye (shorter = smaller)
-               blur: 0.016 },
+               blur: 0.016,  // edge softness (light — the gradient does the feathering)
+               wide: 2.2,    // halo width = core × this
+               edge: 0.5,    // halo alpha
+               core: 1.0 },  // core alpha (bright centre)
 
-  underEye: { width: 0.026, // brighten band thickness (× face width)
-              drop: 0.04,   // how far below the lower lid to sit
-              blur: 0.012 }, // soft edges
+  // Concealer: a soft down-pointing triangle under the eye (the classic make-up
+  // shape) — brightest just under the lid, fading as it reaches down the cheek.
+  underEye: { drop: 0.05,     // top edge sits this far below the lower lid
+              apexDrop: 0.22, // triangle height — how far down the cheek the tip reaches
+              apexIn: 0.0,    // tip lean toward the nose (0 = straight down)
+              spread: 0.5,    // extend both top corners outward (longer to the sides, ~1cm)
+              fade: 0.25,     // alpha at the tip (top is 1.0) — vertical falloff
+              blur: 0.016 },  // edge softness
 };
 
 // Masks are built at reduced resolution (cheap blur/fill) and scaled up when drawn.
@@ -45,20 +88,21 @@ const MASK_SCALE = CFG.maskScale;
 let MW = 0, MH = 0;
 
 // Reused offscreen canvases (avoid per-frame allocation).
-let maskCv, eyeMaskCv, faceMaskCv, lashMaskCv, blushMaskCv, contourMaskCv, highlightMaskCv, underEyeMaskCv, packCv, colorCv, specCv, refineCv, lumaCv;
+let maskCv, eyeMaskCv, faceMaskCv, lashMaskCv, blushMaskCv, contourMaskCv, highlightMaskCv, underEyeMaskCv, lipLinerMaskCv, eyelinerMaskCv, browMaskCv, packCv, colorCv, specCv, refineCv, lumaCv;
 function ensure(w, h) {
   if (!maskCv) {
     maskCv = document.createElement('canvas'); eyeMaskCv = document.createElement('canvas');
     faceMaskCv = document.createElement('canvas'); lashMaskCv = document.createElement('canvas');
     blushMaskCv = document.createElement('canvas'); contourMaskCv = document.createElement('canvas');
     highlightMaskCv = document.createElement('canvas'); underEyeMaskCv = document.createElement('canvas');
-    packCv = document.createElement('canvas');
+    lipLinerMaskCv = document.createElement('canvas'); eyelinerMaskCv = document.createElement('canvas');
+    browMaskCv = document.createElement('canvas'); packCv = document.createElement('canvas');
     colorCv = document.createElement('canvas'); specCv = document.createElement('canvas');
     refineCv = document.createElement('canvas'); lumaCv = document.createElement('canvas');
   }
   MW = Math.max(2, Math.round(w * MASK_SCALE));
   MH = Math.max(2, Math.round(h * MASK_SCALE));
-  for (const c of [maskCv, eyeMaskCv, faceMaskCv, lashMaskCv, blushMaskCv, contourMaskCv, highlightMaskCv, underEyeMaskCv, packCv, refineCv]) { if (c.width !== MW || c.height !== MH) { c.width = MW; c.height = MH; } }
+  for (const c of [maskCv, eyeMaskCv, faceMaskCv, lashMaskCv, blushMaskCv, contourMaskCv, highlightMaskCv, underEyeMaskCv, lipLinerMaskCv, eyelinerMaskCv, browMaskCv, packCv, refineCv]) { if (c.width !== MW || c.height !== MH) { c.width = MW; c.height = MH; } }
   for (const c of [colorCv, specCv, lumaCv]) { if (c.width !== w || c.height !== h) { c.width = w; c.height = h; } }
 }
 
@@ -70,6 +114,12 @@ export function buildSculptPack(w, h, landmarks, want) {
   m.setTransform(1, 0, 0, 1, 0, 0);
   m.globalCompositeOperation = 'source-over';
   m.clearRect(0, 0, MW, MH);
+  // Fill OPAQUE black first. The pack is read as .rgb in the shader; if the pack
+  // stayed transparent, WebGL's un-premultiply (rgb/alpha) would snap every
+  // feathered edge back to full intensity (hard edge). With alpha=1 everywhere,
+  // rgb/1 keeps the soft gradient the masks carry — so edges fade like blush.
+  m.fillStyle = '#000';
+  m.fillRect(0, 0, MW, MH);
   const put = (src, tint) => {
     const r = refineCv.getContext('2d');
     r.setTransform(1, 0, 0, 1, 0, 0);
@@ -210,6 +260,8 @@ export function buildFaceMask(w, h, landmarks) {
   fillPoly(m, landmarks, EYE_L_FULL, MW, MH);
   fillPoly(m, landmarks, LIPS_OUTER, MW, MH);
   m.globalCompositeOperation = 'source-over';
+  // Foundation is a base layer — it should cover the whole face (incl. nose &
+  // brows), so it is intentionally NOT subject to feature protection.
   return faceMaskCv;
 }
 
@@ -238,14 +290,29 @@ export function buildLashMask(w, h, landmarks) {
     pts.forEach(([x, y], k) => (k === 0 ? m.moveTo(x, y) : m.lineTo(x, y)));
     m.stroke();
 
-    // 2. individual lash flicks along the outer half, up-and-out
-    m.lineWidth = Math.max(0.7, thin * 0.9);
+    // 2. individual lash flicks — resampled densely along the lash line
+    //    (not just at the sparse landmarks), each thin, up-and-out.
+    m.lineWidth = Math.max(0.5, thin * 0.8);
     const len = eyeH * CFG.lashes.len;
-    for (let k = 0; k < pts.length; k++) {
-      const t = k / (pts.length - 1);
-      if (t > CFG.lashes.reachT) continue; // only outer part gets visible lashes
-      const grow = 1 - t / CFG.lashes.reachT;  // longest at the outer corner
-      const [x, y] = pts[k];
+    // arc-length sampler along the polyline (u: 0 = outer corner, 1 = inner)
+    const seg = []; let total = 0;
+    for (let k = 1; k < pts.length; k++) {
+      const d = Math.hypot(pts[k][0] - pts[k - 1][0], pts[k][1] - pts[k - 1][1]);
+      seg.push(d); total += d;
+    }
+    const at = (u) => {
+      let d = u * total, k = 0;
+      while (k < seg.length && d > seg[k]) { d -= seg[k]; k++; }
+      if (k >= seg.length) return pts[pts.length - 1];
+      const f = seg[k] ? d / seg[k] : 0;
+      return [pts[k][0] + (pts[k + 1][0] - pts[k][0]) * f, pts[k][1] + (pts[k + 1][1] - pts[k][1]) * f];
+    };
+    const N = CFG.lashes.count;
+    for (let i = 0; i < N; i++) {
+      const u = i / (N - 1);
+      if (u > CFG.lashes.reachT) continue; // only outer part gets visible lashes
+      const grow = 1 - u / CFG.lashes.reachT; // longest at the outer corner
+      const [x, y] = at(u);
       m.beginPath();
       m.moveTo(x, y);
       m.lineTo(x + outerDir * len * 0.5 * grow, y - len * grow);
@@ -293,6 +360,7 @@ export function buildBlushMask(w, h, landmarks) {
     m.restore();
   }
   m.filter = 'none';
+  cutFeatures(m, landmarks);
   return blushMaskCv;
 }
 
@@ -305,11 +373,11 @@ export function buildContourMask(w, h, landmarks) {
   m.setTransform(1, 0, 0, 1, 0, 0);
   m.clearRect(0, 0, MW, MH);
   m.lineCap = 'round';
-  m.strokeStyle = '#fff';
-  m.filter = `blur(${Math.max(4, MW * CFG.contour.blur)}px)`;
+  m.lineJoin = 'round';
+  m.filter = `blur(${Math.max(3, MW * CFG.contour.blur)}px)`;
   const faceW = Math.abs(landmarks[FACE_SIDE_R].x - landmarks[FACE_SIDE_L].x) * MW;
   const drop = faceW * CFG.contour.drop;
-  m.lineWidth = faceW * CFG.contour.width;
+  const base = faceW * CFG.contour.width;
   const P = (i) => [landmarks[i].x * MW, landmarks[i].y * MH];
   // subject-right: ear 234, cheekbone 205, mouth corner 61; left: 454, 425, 291
   for (const [ear, cheek, mouth] of [[FACE_SIDE_L, CHEEK_R, 61], [FACE_SIDE_R, CHEEK_L, 291]]) {
@@ -322,9 +390,16 @@ export function buildContourMask(w, h, landmarks) {
     m.beginPath();
     m.moveTo(S[0], S[1]);
     m.quadraticCurveTo(C[0], C[1], E[0], E[1]);
+    // wide faint halo, then the brighter core — feathered falloff
+    m.lineWidth = base * CFG.contour.wide;
+    m.strokeStyle = `rgba(255,255,255,${CFG.contour.edge})`;
+    m.stroke();
+    m.lineWidth = base;
+    m.strokeStyle = `rgba(255,255,255,${CFG.contour.core})`;
     m.stroke();
   }
   m.filter = 'none';
+  cutFeatures(m, landmarks);
   return contourMaskCv;
 }
 
@@ -336,11 +411,11 @@ export function buildHighlightMask(w, h, landmarks) {
   m.setTransform(1, 0, 0, 1, 0, 0);
   m.clearRect(0, 0, MW, MH);
   m.lineCap = 'round';
-  m.strokeStyle = '#fff';
+  m.lineJoin = 'round';
   m.filter = `blur(${Math.max(3, MW * CFG.highlight.blur)}px)`;
   const faceW = Math.abs(landmarks[FACE_SIDE_R].x - landmarks[FACE_SIDE_L].x) * MW;
   const lift = faceW * 0.02;
-  m.lineWidth = faceW * CFG.highlight.width;
+  const base = faceW * CFG.highlight.width;
   const P = (i) => [landmarks[i].x * MW, landmarks[i].y * MH];
   for (const [cheek, outer] of [[CHEEK_R, 33], [CHEEK_L, 263]]) {
     const c = P(cheek), o = P(outer);
@@ -351,9 +426,16 @@ export function buildHighlightMask(w, h, landmarks) {
     m.beginPath();
     m.moveTo(S[0], S[1]);
     m.quadraticCurveTo(C[0], C[1], E[0], E[1]);
+    // wide faint underlay (soft halo), then the brighter core — feathered falloff
+    m.lineWidth = base * CFG.highlight.wide;
+    m.strokeStyle = `rgba(255,255,255,${CFG.highlight.edge})`;
+    m.stroke();
+    m.lineWidth = base;
+    m.strokeStyle = `rgba(255,255,255,${CFG.highlight.core})`;
     m.stroke();
   }
   m.filter = 'none';
+  cutFeatures(m, landmarks);
   return highlightMaskCv;
 }
 
@@ -364,23 +446,98 @@ export function buildUnderEyeMask(w, h, landmarks) {
   const m = underEyeMaskCv.getContext('2d');
   m.setTransform(1, 0, 0, 1, 0, 0);
   m.clearRect(0, 0, MW, MH);
-  m.lineCap = 'round';
-  m.strokeStyle = '#fff';
+  m.lineJoin = 'round';
   m.filter = `blur(${Math.max(3, MW * CFG.underEye.blur)}px)`;
   const faceW = Math.abs(landmarks[FACE_SIDE_R].x - landmarks[FACE_SIDE_L].x) * MW;
-  const drop = faceW * CFG.underEye.drop;
-  m.lineWidth = faceW * CFG.underEye.width;
+  const cfg = CFG.underEye;
+  const drop = faceW * cfg.drop;
   const P = (i) => [landmarks[i].x * MW, landmarks[i].y * MH + drop]; // dropped under the lid
+  const sp = cfg.spread;
   // lower-lid inner / centre / outer: right 133,145,33 ; left 362,374,263
   for (const [inner, low, outer] of [[133, 145, 33], [362, 374, 263]]) {
-    const a = P(inner), b = P(low), c = P(outer);
+    const I = P(inner), L = P(low), O = P(outer);
+    // top corners extended OUTWARD from the lid centre → longer on both sides
+    const extend = (p) => [p[0] + (p[0] - L[0]) * sp, p[1] + (p[1] - L[1]) * sp];
+    const a = extend(I), c = extend(O);
+    // tip: down onto the cheek, nudged toward the nose (inner − outer direction)
+    const apex = [L[0] + (I[0] - O[0]) * cfg.apexIn, L[1] + faceW * cfg.apexDrop];
+    // vertical gradient: bright under the lid, fading toward the tip
+    const g = m.createLinearGradient(L[0], L[1], apex[0], apex[1]);
+    g.addColorStop(0, 'rgba(255,255,255,1)');
+    g.addColorStop(1, `rgba(255,255,255,${cfg.fade})`);
+    m.fillStyle = g;
+    // top edge curves along the lid (a→L→c), then down to the tip and back
     m.beginPath();
     m.moveTo(a[0], a[1]);
-    m.quadraticCurveTo(b[0], b[1], c[0], c[1]);
+    m.quadraticCurveTo(L[0], L[1], c[0], c[1]);
+    m.quadraticCurveTo((c[0] + apex[0]) / 2, (c[1] + apex[1]) / 2, apex[0], apex[1]);
+    m.quadraticCurveTo((a[0] + apex[0]) / 2, (a[1] + apex[1]) / 2, a[0], a[1]);
+    m.closePath();
+    m.fill();
+  }
+  m.filter = 'none';
+  cutFeatures(m, landmarks);
+  return underEyeMaskCv;
+}
+
+// Lip liner: a thin coloured ring on the lip outer contour (defines the edge).
+export function buildLipLinerMask(w, h, landmarks) {
+  ensure(w, h);
+  const m = lipLinerMaskCv.getContext('2d');
+  m.setTransform(1, 0, 0, 1, 0, 0);
+  m.clearRect(0, 0, MW, MH);
+  m.strokeStyle = '#fff';
+  m.lineJoin = 'round';
+  m.lineWidth = Math.max(1, MW * CFG.lipLiner.width);
+  m.filter = `blur(${Math.max(0.6, MW * CFG.lipLiner.blur)}px)`;
+  tracePath(m, landmarks, LIPS_OUTER, MW, MH);
+  m.stroke();
+  m.filter = 'none';
+  return lipLinerMaskCv;
+}
+
+// Eyeliner: a line along the upper lash line with a small outer wing.
+export function buildEyelinerMask(w, h, landmarks) {
+  ensure(w, h);
+  const m = eyelinerMaskCv.getContext('2d');
+  m.setTransform(1, 0, 0, 1, 0, 0);
+  m.clearRect(0, 0, MW, MH);
+  m.strokeStyle = '#fff';
+  m.lineCap = 'round';
+  m.lineJoin = 'round';
+  m.lineWidth = Math.max(1, MH * CFG.eyeliner.width);
+  m.filter = `blur(${Math.max(0.5, MW * CFG.eyeliner.blur)}px)`;
+  for (const [lash, vref] of [[EYE_R_LASH, EYE_R_V], [EYE_L_LASH, EYE_L_V]]) {
+    const pts = lash.map((i) => [landmarks[i].x * MW, landmarks[i].y * MH]);
+    const n = pts.length;
+    const eyeH = Math.abs(landmarks[vref[0]].y - landmarks[vref[1]].y) * MH;
+    const outerDir = Math.sign(pts[0][0] - pts[n - 1][0]) || 1; // pts[0]=outer corner
+    m.beginPath();
+    pts.forEach(([x, y], k) => (k === 0 ? m.moveTo(x, y) : m.lineTo(x, y)));
+    m.stroke();
+    // wing: short flick up-and-out from the outer corner
+    const wl = eyeH * CFG.eyeliner.wing;
+    m.beginPath();
+    m.moveTo(pts[0][0], pts[0][1]);
+    m.lineTo(pts[0][0] + outerDir * wl * 0.7, pts[0][1] - wl * 0.6);
     m.stroke();
   }
   m.filter = 'none';
-  return underEyeMaskCv;
+  return eyelinerMaskCv;
+}
+
+// Brows: filled brow shapes (tint / fill), feathered.
+export function buildBrowMask(w, h, landmarks) {
+  ensure(w, h);
+  const m = browMaskCv.getContext('2d');
+  m.setTransform(1, 0, 0, 1, 0, 0);
+  m.clearRect(0, 0, MW, MH);
+  m.fillStyle = '#fff';
+  m.filter = `blur(${Math.max(1, MW * CFG.brows.blur)}px)`;
+  fillPoly(m, landmarks, BROW_R, MW, MH);
+  fillPoly(m, landmarks, BROW_L, MW, MH);
+  m.filter = 'none';
+  return browMaskCv;
 }
 
 // Shared compositor: recolour whatever `maskSrc` covers, preserving the region's
@@ -543,12 +700,24 @@ export function renderMakeup(ctx, w, h, landmarks, opts) {
   if (opts.hair && opts.hair.mask) {
     compositeRegion(ctx, w, h, opts.hair.mask, { ...opts.hair, finish: 'none', pigment: 0.15 });
   }
+  if (opts.brows) {
+    buildBrowMask(w, h, landmarks);
+    compositeRegion(ctx, w, h, browMaskCv, { ...opts.brows, finish: 'none', pigment: 0.2, lightResponse: 0 });
+  }
   if (opts.eyes) renderEyes(ctx, w, h, landmarks, opts.eyes);
+  if (opts.eyeliner) {
+    buildEyelinerMask(w, h, landmarks);
+    compositeDark(ctx, w, h, eyelinerMaskCv, opts.eyeliner.color || '#0a0a0a', opts.eyeliner.intensity ?? 0.9);
+  }
   if (opts.lashes) {
     buildLashMask(w, h, landmarks);
     compositeDark(ctx, w, h, lashMaskCv, '#000000', opts.lashes.intensity ?? 0.8);
   }
   if (opts.lips) renderLips(ctx, w, h, landmarks, opts.lips);
+  if (opts.lipLiner) {
+    buildLipLinerMask(w, h, landmarks);
+    compositeRegion(ctx, w, h, lipLinerMaskCv, { ...opts.lipLiner, finish: 'none', pigment: 0.25 });
+  }
 }
 
 // ---- Debug overlay: tint the ONNX segmentation mask so you can see what it predicts ----

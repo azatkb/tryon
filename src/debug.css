@@ -1,0 +1,30 @@
+/* Debug workbench: full-screen preview + entity toggle panel. */
+.dbg { position: fixed; inset: 0; background: #0c0c0f; color: #eee;
+  font-family: system-ui, -apple-system, sans-serif; }
+.dbg-stage { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+.dbg-stage canvas { width: 100%; height: 100%; object-fit: cover; display: block; }
+.dbg-stage canvas.mir { transform: scaleX(-1); }
+.dbg-overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  color: #bbb; font-size: 1rem; text-align: center; padding: 24px; }
+.dbg-overlay.err { color: #ff9a9a; }
+
+.dbg-panel {
+  position: absolute; top: 12px; right: 12px; width: 230px; max-height: calc(100% - 24px); overflow-y: auto;
+  background: rgba(16,16,20,.86); backdrop-filter: blur(8px); border: 1px solid #333; border-radius: 12px;
+  padding: 12px; font-size: 13px; z-index: 5;
+}
+.dbg-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.dbg-mini button { background: #26262c; border: 1px solid #3a3a42; color: #ccc; border-radius: 6px;
+  font-size: 11px; padding: 3px 8px; margin-left: 4px; cursor: pointer; }
+.dbg-group { border-top: 1px solid #262630; padding: 8px 0 4px; }
+.dbg-area { font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: #8a8a96; margin-bottom: 5px; }
+.dbg-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; cursor: pointer; color: #e6e6ea; }
+.dbg-row.off { color: #6a6a74; }
+.dbg-row input { width: 15px; height: 15px; accent-color: #d77aa2; }
+.dbg-dot { width: 11px; height: 11px; border-radius: 3px; flex: 0 0 auto; }
+.dbg-tune { padding: 2px 0 6px 23px; display: flex; flex-direction: column; gap: 3px; }
+.dbg-slider { display: flex; align-items: center; gap: 6px; cursor: default; }
+.dbg-slider span { font-size: 10px; color: #9a9aa6; width: 48px; flex: 0 0 auto; }
+.dbg-slider input[type="range"] { flex: 1 1 auto; height: 3px; accent-color: #d77aa2; cursor: pointer; }
+.dbg-slider em { font-size: 10px; color: #c8c8d0; width: 20px; text-align: right; font-style: normal; flex: 0 0 auto; }
+.dbg-foot { border-top: 1px solid #262630; padding-top: 8px; margin-top: 4px; }

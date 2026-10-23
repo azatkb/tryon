@@ -10,24 +10,24 @@ export const USER_PROFILE = { undertone: null, depth: null };
 export const LESSON = {
   title: 'Everyday Look',
   steps: [
-    { key: 'face',   region: 'foundation', product: 'face',   family: null,        intensity: 0.26,
+    { key: 'face',   region: 'foundation', product: 'foundation', family: null,     intensity: 0.26,
       title: 'Even the skin', text: 'A light layer of skin tint from the centre of the face outward — thin layers read more like skin.' },
-    { key: 'contour', region: 'contour',   product: 'contour', family: 'contour',  intensity: 0.16,
+    { key: 'contour', region: 'contour',   product: null,        family: 'contour', intensity: 0.16,
       title: 'Sculpt lightly', text: 'A thin cool shadow along the hollow under the cheekbone — shadow, not a stripe.' },
-    { key: 'blush',  region: 'blush',      product: 'blush',  family: 'rosy',      intensity: 0.38,
+    { key: 'blush',  region: 'blush',      product: 'blush',     family: 'rosy',    intensity: 0.38,
       title: 'Add a flush', text: 'Blush high on the cheekbone, swept up toward the temple for a lifted, even glow.' },
-    { key: 'eyes',   region: 'eyes',       product: 'eyes',   family: 'neutral',   intensity: 0.45,
+    { key: 'eyes',   region: 'eyes',       product: 'eyeshadow', family: 'neutral', intensity: 0.45,
       title: 'Define the eyes', text: 'A neutral taupe wash across the lid, blended into the crease for soft depth.' },
-    { key: 'lashes', region: 'lashes',     product: 'lashes', family: null,        intensity: 0.8,
+    { key: 'lashes', region: 'lashes',     product: 'mascara',   family: null,      intensity: 0.8,
       title: 'Lift the lashes', text: 'Coat the lashes from the root upward, concentrating on the outer lashes to open the eye.' },
-    { key: 'lips',   region: 'lips',       product: 'lips',   family: 'pink-nude', finish: 'satin', intensity: 0.6,
+    { key: 'lips',   region: 'lips',       product: 'lipstick',  family: 'pink-nude', finish: 'satin', intensity: 0.6,
       title: 'Finish the lips', text: 'Line close to your natural lip colour, soft ombre from the liner into a satin centre.' },
   ],
 };
 
 export function resolveStep(stepIdx, profile = USER_PROFILE) {
   const s = LESSON.steps[stepIdx];
-  const row = CATALOG[s.product];
+  const row = s.product ? CATALOG[s.product] : null;
   const picked = lookShade(row, s.family, profile.undertone, null, profile.depth);
   const shade = picked.shade || (Array.isArray(row?.shades) && row.shades[0]) || null;
   const hex = shade?.hex || row?.hex || (s.family && FAMILY_HEX[s.family]) || '#000000';

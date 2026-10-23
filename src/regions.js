@@ -18,6 +18,13 @@ export const EYE_LIFT = 1.35;
 export const EYE_R_FULL = [33, 246, 161, 160, 159, 158, 157, 173, 133, 155, 154, 153, 145, 144, 163, 7];
 export const EYE_L_FULL = [263, 466, 388, 387, 386, 385, 384, 398, 362, 382, 381, 380, 374, 373, 390, 249];
 
+// Nose region (bridge → sides → alae → base) — used to keep makeup off the nose.
+export const NOSE = [6, 129, 98, 2, 327, 358];
+
+// Eyebrow outlines (closed loops: upper edge → lower edge) for brow fill/tint.
+export const BROW_R = [70, 63, 105, 66, 107, 55, 65, 52, 53, 46];
+export const BROW_L = [300, 293, 334, 296, 336, 285, 295, 282, 283, 276];
+
 // Cheek apples (blush centres) and face-width refs for the blush radius.
 export const CHEEK_R = 205;
 export const CHEEK_L = 425;

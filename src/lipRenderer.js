@@ -55,12 +55,12 @@ const CFG = {
            width: 0.075,   // sweep thickness
            blur: 0.012 },
 
-  contour: { width: 0.03,  // core stroke thickness along the cheekbone curve
+  contour: { width: 0.055, // core stroke thickness — wider band, more blendable
              drop: 0.25,   // push the curve down into the hollow
-             blur: 0.022,  // edge softness (light — gradient does the feathering)
-             wide: 2.2,    // halo width = core × this
-             edge: 0.5,    // halo alpha
-             core: 1.0 },  // core alpha (defined centre)
+             blur: 0.038,  // softer edges — gradient + more blur for powder-like fade
+             wide: 3.0,    // halo width = core × this (wider soft underlay)
+             edge: 0.4,    // halo alpha (lighter halo)
+             core: 0.85 }, // core alpha (not too sharp in the centre)
 
   // highlight & underEye use a feathered 2-pass stroke: a wide faint halo + a
   // bright core. Like blush, softness comes from a gradient profile that PEAKS

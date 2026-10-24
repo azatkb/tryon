@@ -10,6 +10,21 @@ const FINISHES = ['matte', 'satin', 'gloss'];
 const MOVE_THRESH = 0.0015; // per-frame face motion above this = "moving": drop the ONNX edge, follow landmarks
 const PREDICT = 1.0;        // landmark extrapolation (frames) to cancel detection latency; 0 = off
 
+// EMA landmark smoother — reduces jitter while tracking motion.
+// alpha: 0 = frozen, 1 = raw. Adaptive: faster when moving, slower when still.
+function smoothLandmarks(cur, smoothed, motion) {
+  if (!smoothed || smoothed.length !== cur.length) return cur;
+  // alpha rises with motion so the mask doesn't lag when the face turns fast
+  const alpha = Math.min(0.85, 0.18 + motion * 120);
+  const inv = 1 - alpha;
+  const out = new Array(cur.length);
+  for (let i = 0; i < cur.length; i++) {
+    const c = cur[i], s = smoothed[i];
+    out[i] = { x: c.x * alpha + s.x * inv, y: c.y * alpha + s.y * inv, z: (c.z || 0) * alpha + (s.z || 0) * inv };
+  }
+  return out;
+}
+
 // Extrapolate landmarks along their velocity so the mask keeps up with motion
 // instead of trailing one detection behind. prev/cur are landmark arrays.
 function predictLandmarks(cur, prev, k) {
@@ -122,6 +137,7 @@ export default function App() {
   const motionRef = useRef(0); // per-frame face motion (normalised), EMA-smoothed
   const prevLmRef = useRef(null);   // previous few points, for the motion metric
   const prevFullRef = useRef(null); // previous full landmark array, for extrapolation
+  const smoothedLmRef = useRef(null); // EMA-smoothed landmarks (jitter reduction)
 
   // live option values for the render loop (avoid stale closures)
   // makeup layers: driven by the lesson when running (cumulative, colours from
@@ -260,7 +276,7 @@ export default function App() {
     try {
       await fl.setOptions({ runningMode: 'VIDEO' });
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+        video: { facingMode: 'user', width: { ideal: 1920, min: 640 }, height: { ideal: 1080, min: 480 } },
         audio: false,
       });
       streamRef.current = stream;
@@ -296,9 +312,13 @@ export default function App() {
           for (const i of idxs) snap[i] = { x: raw[i].x, y: raw[i].y };
           prevLmRef.current = snap;
 
+          // smooth away per-frame jitter (adaptive EMA — tighter when still, looser when moving)
+          const smoothed = smoothLandmarks(raw, smoothedLmRef.current, motionRef.current);
+          smoothedLmRef.current = smoothed;
+
           // extrapolate along velocity to cancel detection latency (mask keeps up with motion)
-          lms = predictLandmarks(raw, prevFullRef.current, PREDICT);
-          prevFullRef.current = raw;
+          lms = predictLandmarks(smoothed, prevFullRef.current, PREDICT);
+          prevFullRef.current = smoothed;
 
           // periodically re-estimate skin depth + white balance (slow signals)
           if ((frameCountRef.current++ % 20) === 0) {

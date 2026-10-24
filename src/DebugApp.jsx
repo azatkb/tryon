@@ -142,7 +142,7 @@ export default function DebugApp() {
     if (!fl) return;
     try {
       await fl.setOptions({ runningMode: 'VIDEO' });
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 1920, min: 640 }, height: { ideal: 1080, min: 480 } }, audio: false });
       streamRef.current = stream;
       const v = videoRef.current; v.srcObject = stream; await v.play(); setCamError(null);
       let lastTime = -1;

@@ -71,8 +71,8 @@ void main(){
     // smoothstep gate: pixels below 0.35 lum get no highlight; above 0.65 get full.
     float lightGate = smoothstep(0.35, 0.65, localLum);
     mhi *= lightGate;
-    // champagne shimmer: add luminance + warm gold tint, stay in range
-    outc = clamp(outc + mhi * vec3(0.95, 0.90, 0.72) * 0.55, 0.0, 1.0);
+    // champagne shimmer: subtle warm glow — not a flash, just a lift
+    outc = clamp(outc + mhi * vec3(0.95, 0.90, 0.72) * 0.28, 0.0, 1.0);
   }
 
   float mh = texture2D(uHair, vUv).a * uHairInt;

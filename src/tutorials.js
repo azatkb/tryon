@@ -10,18 +10,29 @@ export const USER_PROFILE = { undertone: null, depth: null };
 export const LESSON = {
   title: 'Everyday Look',
   steps: [
-    { key: 'face',   region: 'foundation', product: 'foundation', family: null,     intensity: 0.26,
-      title: 'Even the skin', text: 'A light layer of skin tint from the centre of the face outward — thin layers read more like skin.' },
-    { key: 'contour', region: 'contour',   product: null,        family: 'contour', intensity: 0.16,
-      title: 'Sculpt lightly', text: 'A thin cool shadow along the hollow under the cheekbone — shadow, not a stripe.' },
-    { key: 'blush',  region: 'blush',      product: 'blush',     family: 'rosy',    intensity: 0.38,
-      title: 'Add a flush', text: 'Blush high on the cheekbone, swept up toward the temple for a lifted, even glow.' },
-    { key: 'eyes',   region: 'eyes',       product: 'eyeshadow', family: 'neutral', intensity: 0.45,
-      title: 'Define the eyes', text: 'A neutral taupe wash across the lid, blended into the crease for soft depth.' },
-    { key: 'lashes', region: 'lashes',     product: 'mascara',   family: null,      intensity: 0.8,
-      title: 'Lift the lashes', text: 'Coat the lashes from the root upward, concentrating on the outer lashes to open the eye.' },
-    { key: 'lips',   region: 'lips',       product: 'lipstick',  family: 'pink-nude', finish: 'satin', intensity: 0.6,
-      title: 'Finish the lips', text: 'Line close to your natural lip colour, soft ombre from the liner into a satin centre.' },
+    // MUA order: prep skin → sculpt → colour cheeks → eyes → lashes → lips
+    { key: 'foundation', region: 'foundation', product: 'foundation', family: null,        intensity: 0.26,
+      title: 'Even the skin',     text: 'A light layer of skin tint from the centre outward — thin layers read more like skin.' },
+    { key: 'underEye',  region: 'underEye',   product: 'concealer',  family: null,        intensity: 0.55,
+      title: 'Brighten under-eye', text: 'Tap a touch-lighter concealer under the eye in a triangle shape, blended down.' },
+    { key: 'contour',   region: 'contour',    product: null,         family: 'contour',   intensity: 0.38,
+      title: 'Sculpt the face',   text: 'A cool shadow along the hollow under the cheekbone — shadow, not a stripe. Blend well.' },
+    { key: 'highlight', region: 'highlight',  product: null,         family: 'highlight', intensity: 0.55,
+      title: 'Catch the light',   text: 'A champagne glow on the high points — wherever light naturally lands on your face.' },
+    { key: 'blush',     region: 'blush',      product: 'blush',      family: 'rosy',      intensity: 0.38,
+      title: 'Add a flush',       text: 'Blush high on the cheekbone, swept toward the temple for a natural, lifted glow.' },
+    { key: 'brows',     region: 'brows',      product: 'brows',      family: 'brow',      intensity: 0.55,
+      title: 'Frame the eyes',    text: 'Fill sparse spots with light feathery strokes, following the natural brow arch.' },
+    { key: 'eyes',      region: 'eyes',       product: 'eyeshadow',  family: 'neutral',   intensity: 0.45,
+      title: 'Define the lids',   text: 'A neutral taupe wash across the lid, blended up into the crease for soft depth.' },
+    { key: 'eyeliner',  region: 'eyeliner',   product: 'eyeliner',   family: null,        intensity: 0.85,
+      title: 'Line the eyes',     text: 'A thin line along the upper lash line — thicker at the outer corner for a subtle wing.' },
+    { key: 'lashes',    region: 'lashes',     product: 'mascara',    family: null,        intensity: 0.80,
+      title: 'Lift the lashes',   text: 'Coat from the root upward in a zigzag, concentrating on the outer lashes to open the eye.' },
+    { key: 'lipLiner',  region: 'lipLiner',   product: 'lip-liner',  family: 'pink-nude', intensity: 0.80,
+      title: 'Define the lips',   text: 'Line just inside your natural lip edge to keep the shape precise, then blend inward.' },
+    { key: 'lips',      region: 'lips',       product: 'lipstick',   family: 'pink-nude', finish: 'satin', intensity: 0.60,
+      title: 'Finish the lips',   text: 'Press a satin colour over the liner, blotting the centre for a soft ombre finish.' },
   ],
 };
 
@@ -35,17 +46,22 @@ export function resolveStep(stepIdx, profile = USER_PROFILE) {
   return { hex, shade, product: productLabel };
 }
 
-// Regions that are brighten/shadow effects (no colour): intensity only.
+// Regions that are pure effects (no tint colour needed, intensity only).
 const EFFECT_ONLY = new Set(['underEye', 'contour', 'highlight', 'lashes']);
 
 export function lessonLayers(stepIdx, profile = USER_PROFILE) {
   const out = {};
   for (let i = 0; i <= stepIdx && i < LESSON.steps.length; i++) {
     const s = LESSON.steps[i];
-    if (EFFECT_ONLY.has(s.region)) out[s.region] = { intensity: s.intensity };
-    else {
+    if (EFFECT_ONLY.has(s.region)) {
+      out[s.region] = { intensity: s.intensity };
+    } else {
       const { hex } = resolveStep(i, profile);
-      out[s.region] = { color: hex, intensity: s.intensity, ...(s.finish ? { finish: s.finish } : {}) };
+      out[s.region] = {
+        color: hex,
+        intensity: s.intensity,
+        ...(s.finish ? { finish: s.finish } : {}),
+      };
     }
   }
   return out;

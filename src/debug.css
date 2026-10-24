@@ -28,3 +28,4 @@
 .dbg-slider input[type="range"] { flex: 1 1 auto; height: 3px; accent-color: #d77aa2; cursor: pointer; }
 .dbg-slider em { font-size: 10px; color: #c8c8d0; width: 20px; text-align: right; font-style: normal; flex: 0 0 auto; }
 .dbg-foot { border-top: 1px solid #262630; padding-top: 8px; margin-top: 4px; }
+.dbg-panel--collapsed { width: auto; min-width: 160px; padding-bottom: 4px; overflow: hidden; }

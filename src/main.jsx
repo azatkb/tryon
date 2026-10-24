@@ -6,7 +6,7 @@ import './App.css';
 import './debug.css';
 
 // Debug workbench for now. Flip USE_DEBUG to false to go back to the lesson app.
-const USE_DEBUG = true;
+const USE_DEBUG = false;
 
 createRoot(document.getElementById('root')).render(
   <React.StrictMode>

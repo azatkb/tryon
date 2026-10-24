@@ -88,7 +88,9 @@ const MASK_SCALE = CFG.maskScale;
 let MW = 0, MH = 0;
 
 // Reused offscreen canvases (avoid per-frame allocation).
+// lashMaskCv is FULL-RES (no MASK_SCALE) so lash strokes stay crisp.
 let maskCv, eyeMaskCv, faceMaskCv, lashMaskCv, blushMaskCv, contourMaskCv, highlightMaskCv, underEyeMaskCv, lipLinerMaskCv, eyelinerMaskCv, browMaskCv, packCv, colorCv, specCv, refineCv, lumaCv;
+let LW = 0, LH = 0; // full-res dimensions for lash canvas
 function ensure(w, h) {
   if (!maskCv) {
     maskCv = document.createElement('canvas'); eyeMaskCv = document.createElement('canvas');
@@ -102,7 +104,9 @@ function ensure(w, h) {
   }
   MW = Math.max(2, Math.round(w * MASK_SCALE));
   MH = Math.max(2, Math.round(h * MASK_SCALE));
-  for (const c of [maskCv, eyeMaskCv, faceMaskCv, lashMaskCv, blushMaskCv, contourMaskCv, highlightMaskCv, underEyeMaskCv, lipLinerMaskCv, eyelinerMaskCv, browMaskCv, packCv, refineCv]) { if (c.width !== MW || c.height !== MH) { c.width = MW; c.height = MH; } }
+  LW = w; LH = h; // lash mask at full resolution — crisp lines
+  if (lashMaskCv.width !== LW || lashMaskCv.height !== LH) { lashMaskCv.width = LW; lashMaskCv.height = LH; }
+  for (const c of [maskCv, eyeMaskCv, faceMaskCv, blushMaskCv, contourMaskCv, highlightMaskCv, underEyeMaskCv, lipLinerMaskCv, eyelinerMaskCv, browMaskCv, packCv, refineCv]) { if (c.width !== MW || c.height !== MH) { c.width = MW; c.height = MH; } }
   for (const c of [colorCv, specCv, lumaCv]) { if (c.width !== w || c.height !== h) { c.width = w; c.height = h; } }
 }
 
@@ -267,20 +271,21 @@ export function buildFaceMask(w, h, landmarks) {
 
 // Lash mask: a thin line along the upper lash line plus a few fine flicks at the
 // outer corner — delicate, like real lashes (not a thick liner).
+// Built at FULL resolution (LW×LH, not MW×MH) so lines stay crisp.
 export function buildLashMask(w, h, landmarks) {
   ensure(w, h);
   const m = lashMaskCv.getContext('2d');
   m.setTransform(1, 0, 0, 1, 0, 0);
-  m.clearRect(0, 0, MW, MH);
+  m.clearRect(0, 0, LW, LH);
   m.strokeStyle = '#fff';
   m.lineCap = 'round';
   m.lineJoin = 'round';
-  m.filter = `blur(${Math.max(0.3, MW * CFG.lashes.blur)}px)`;
-  const thin = Math.max(0.8, MH * CFG.lashes.width);
+  m.filter = 'none'; // crisp — no blur ever on lashes
+  const thin = Math.max(1.0, LH * CFG.lashes.width);
 
   for (const [lash, vref] of [[EYE_R_LASH, EYE_R_V], [EYE_L_LASH, EYE_L_V]]) {
-    const pts = lash.map((i) => [landmarks[i].x * MW, landmarks[i].y * MH]);
-    const eyeH = Math.abs(landmarks[vref[0]].y - landmarks[vref[1]].y) * MH;
+    const pts = lash.map((i) => [landmarks[i].x * LW, landmarks[i].y * LH]);
+    const eyeH = Math.abs(landmarks[vref[0]].y - landmarks[vref[1]].y) * LH;
     // pts[0] = outer corner, pts[last] = inner corner
     const outerDir = Math.sign(pts[0][0] - pts[pts.length - 1][0]) || 1;
 
@@ -292,7 +297,7 @@ export function buildLashMask(w, h, landmarks) {
 
     // 2. individual lash flicks — resampled densely along the lash line
     //    (not just at the sparse landmarks), each thin, up-and-out.
-    m.lineWidth = Math.max(0.5, thin * 0.8);
+    m.lineWidth = Math.max(0.8, thin * 0.7);
     const len = eyeH * CFG.lashes.len;
     // arc-length sampler along the polyline (u: 0 = outer corner, 1 = inner)
     const seg = []; let total = 0;
@@ -319,7 +324,14 @@ export function buildLashMask(w, h, landmarks) {
       m.stroke();
     }
   }
-  m.filter = 'none';
+  // Protect: cut nose region so lashes don't bleed onto the bridge at profile angles
+  if (PROTECT) {
+    m.save();
+    m.filter = 'none';
+    m.globalCompositeOperation = 'destination-out';
+    fillPoly(m, landmarks, NOSE, LW, LH);
+    m.restore();
+  }
   return lashMaskCv;
 }
 
@@ -403,39 +415,57 @@ export function buildContourMask(w, h, landmarks) {
   return contourMaskCv;
 }
 
-// Highlight (glow): a short feathered stroke along the TOP of the cheekbone
-// (cheek apple → toward the outer eye / temple), following landmarks. Tune via CFG.highlight.
+// Highlight: a face-wide mask (same oval as foundation) stored in the Green channel
+// of the sculpt pack. The shader applies it only where the pixel is already bright
+// (per-pixel luminance gate) — so it automatically follows where light is hitting
+// the face. No landmark-based stroke needed; the light detector does the work.
 export function buildHighlightMask(w, h, landmarks) {
   ensure(w, h);
   const m = highlightMaskCv.getContext('2d');
   m.setTransform(1, 0, 0, 1, 0, 0);
   m.clearRect(0, 0, MW, MH);
-  m.lineCap = 'round';
-  m.lineJoin = 'round';
-  m.filter = `blur(${Math.max(3, MW * CFG.highlight.blur)}px)`;
+  // Fill the face oval with a radial gradient that's brightest in the centre
+  // and fades toward the hairline / jaw — gives a natural 3-D roundness to the glow.
+  const cx = landmarks[1].x * MW;  // nose tip ≈ face centre x
+  const cy = landmarks[1].y * MH;
   const faceW = Math.abs(landmarks[FACE_SIDE_R].x - landmarks[FACE_SIDE_L].x) * MW;
-  const lift = faceW * 0.02;
-  const base = faceW * CFG.highlight.width;
-  const P = (i) => [landmarks[i].x * MW, landmarks[i].y * MH];
-  for (const [cheek, outer] of [[CHEEK_R, 33], [CHEEK_L, 263]]) {
-    const c = P(cheek), o = P(outer);
-    const k = CFG.highlight.reach;
-    const S = c;                                    // cheek apple
-    const E = [c[0] * (1 - k) + o[0] * k, c[1] * (1 - k) + o[1] * k]; // short, up the bone
-    const C = [(S[0] + E[0]) / 2, (S[1] + E[1]) / 2 - lift];      // lift onto the ridge
-    m.beginPath();
-    m.moveTo(S[0], S[1]);
-    m.quadraticCurveTo(C[0], C[1], E[0], E[1]);
-    // wide faint underlay (soft halo), then the brighter core — feathered falloff
-    m.lineWidth = base * CFG.highlight.wide;
-    m.strokeStyle = `rgba(255,255,255,${CFG.highlight.edge})`;
-    m.stroke();
-    m.lineWidth = base;
-    m.strokeStyle = `rgba(255,255,255,${CFG.highlight.core})`;
-    m.stroke();
-  }
+  const faceH = faceW * 1.3; // approximate face height
+  m.save();
+  m.scale(1, faceH / faceW); // stretch to oval
+  const g = m.createRadialGradient(cx, cy * (faceW / faceH), 0, cx, cy * (faceW / faceH), faceW * 0.62);
+  g.addColorStop(0,   'rgba(255,255,255,1.0)');
+  g.addColorStop(0.5, 'rgba(255,255,255,0.7)');
+  g.addColorStop(0.85,'rgba(255,255,255,0.2)');
+  g.addColorStop(1,   'rgba(255,255,255,0)');
+  m.fillStyle = g;
+  m.beginPath();
+  m.ellipse(cx, cy * (faceW / faceH), faceW * 0.62, faceW * 0.62, 0, 0, Math.PI * 2);
+  m.fill();
+  m.restore();
+  m.filter = `blur(${Math.max(3, MW * CFG.highlight.blur)}px)`;
+  // re-apply blur by drawing to itself (filter on the context above already applied to fill)
+  // Actually set filter before drawing:
   m.filter = 'none';
-  cutFeatures(m, landmarks);
+  // Redo with blur upfront
+  m.clearRect(0, 0, MW, MH);
+  m.filter = `blur(${Math.max(3, MW * CFG.highlight.blur)}px)`;
+  m.save();
+  m.scale(1, faceH / faceW);
+  m.fillStyle = g;
+  m.beginPath();
+  m.ellipse(cx, cy * (faceW / faceH), faceW * 0.62, faceW * 0.62, 0, 0, Math.PI * 2);
+  m.fill();
+  m.restore();
+  m.filter = 'none';
+  // Highlight covers the nose — it's a face-wide glow, nose bridge catches light too.
+  // Only cut eyes/lips/brows (not NOSE) so the bridge still glows naturally.
+  if (PROTECT) {
+    m.save();
+    m.filter = 'none';
+    m.globalCompositeOperation = 'destination-out';
+    for (const poly of [EYE_R_FULL, EYE_L_FULL, LIPS_OUTER, BROW_R, BROW_L]) fillPoly(m, landmarks, poly, MW, MH);
+    m.restore();
+  }
   return highlightMaskCv;
 }
 
@@ -480,19 +510,31 @@ export function buildUnderEyeMask(w, h, landmarks) {
   return underEyeMaskCv;
 }
 
-// Lip liner: a thin coloured ring on the lip outer contour (defines the edge).
+// Lip liner: a ring strictly INSIDE the lip contour — crisp outer edge (no blur),
+// very slight inner softness. Achieved by stroking at 2× width then clipping to
+// the lip fill, so the outer half of the stroke is cut away → inner ring only.
 export function buildLipLinerMask(w, h, landmarks) {
   ensure(w, h);
   const m = lipLinerMaskCv.getContext('2d');
   m.setTransform(1, 0, 0, 1, 0, 0);
   m.clearRect(0, 0, MW, MH);
+  m.filter = 'none'; // crisp outer edge — no blur
+
+  // 1. Set clip to the lip fill shape so nothing renders outside the lips.
+  m.save();
+  tracePath(m, landmarks, LIPS_OUTER, MW, MH);
+  m.clip();
+
+  // 2. Stroke at 2× desired width — the clip removes the outer half,
+  //    leaving only the inner ring hugging the lip edge.
   m.strokeStyle = '#fff';
   m.lineJoin = 'round';
-  m.lineWidth = Math.max(1, MW * CFG.lipLiner.width);
-  m.filter = `blur(${Math.max(0.6, MW * CFG.lipLiner.blur)}px)`;
+  m.lineCap = 'round';
+  m.lineWidth = Math.max(2, MW * CFG.lipLiner.width) * 2;
   tracePath(m, landmarks, LIPS_OUTER, MW, MH);
   m.stroke();
-  m.filter = 'none';
+
+  m.restore();
   return lipLinerMaskCv;
 }
 

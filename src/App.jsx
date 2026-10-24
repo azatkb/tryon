@@ -132,13 +132,16 @@ export default function App() {
     const m = lessonLayers(step, profile);
     L = {
       foundation: m.foundation || null,
-      underEye: m.underEye || null,
-      contour: m.contour || null,
-      blush: m.blush ? { ...m.blush, lightResponse } : null,
-      highlight: m.highlight || null,
-      eyes: m.eyes ? { ...m.eyes, lightResponse } : null,
-      lashes: m.lashes || null,
-      lips: m.lips ? { ...m.lips, lightResponse } : null,
+      underEye:   m.underEye   || null,
+      contour:    m.contour    || null,
+      highlight:  m.highlight  || null,
+      blush:      m.blush    ? { ...m.blush,    lightResponse } : null,
+      brows:      m.brows    ? { ...m.brows,    lightResponse } : null,
+      eyes:       m.eyes     ? { ...m.eyes,     lightResponse } : null,
+      eyeliner:   m.eyeliner ? { ...m.eyeliner, lightResponse } : null,
+      lashes:     m.lashes   || null,
+      lipLiner:   m.lipLiner ? { ...m.lipLiner, lightResponse } : null,
+      lips:       m.lips     ? { ...m.lips,     lightResponse } : null,
     };
   } else {
     L = {
@@ -156,7 +159,7 @@ export default function App() {
     ...L,
     hair: hairOn && !lessonOn ? { color: HAIR_SHADES[hairSel].hex, intensity: hairIntensity } : null,
     compare, showPoints, useGL, useSeg, segDebug,
-    tut: lessonOn, // in lesson mode the big view shows the makeup
+    tut: lessonOn,
   };
 
   const selectProduct = useCallback((i) => { setSel(i); setFinish(PRODUCTS[i].finish); }, []);
@@ -172,8 +175,9 @@ export default function App() {
     const hair = o.hair && hairMaskRef.current ? { ...o.hair, mask: hairMaskRef.current } : null;
     const layers = {
       foundation: o.foundation, underEye: o.underEye, contour: o.contour,
-      blush: o.blush, highlight: o.highlight, hair, eyes: o.eyes, lashes: o.lashes, lips,
-      faceLum: faceLumRef.current,
+      highlight: o.highlight, blush: o.blush, brows: o.brows, eyes: o.eyes,
+      eyeliner: o.eyeliner, lashes: o.lashes, lipLiner: o.lipLiner, lips,
+      hair, faceLum: faceLumRef.current,
     };
     if (o.useGL && source) {
       const glc = renderMakeupGL(source, w, h, lms, layers);

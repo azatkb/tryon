@@ -71,6 +71,7 @@ export default function DebugApp() {
   const [showPoints, setShowPoints] = useState(false);
   const [protect, setProtect] = useState(true);
   const [tune, setTune] = useState(() => JSON.parse(JSON.stringify(TUNE_DEFAULT)));
+  const [panelOpen, setPanelOpen] = useState(true);
 
   // enabled entities (default: a sensible full face on)
   const [enabled, setEnabled] = useState(() => {
@@ -203,15 +204,17 @@ export default function DebugApp() {
         {camError && <div className="dbg-overlay err">Camera: {camError}</div>}
       </div>
 
-      <div className="dbg-panel">
+      <div className={`dbg-panel${panelOpen ? '' : ' dbg-panel--collapsed'}`}>
         <div className="dbg-head">
-          <b>Debug · entities</b>
-          <span className="dbg-mini">
+          <b style={{ cursor: 'pointer', userSelect: 'none' }} onClick={() => setPanelOpen((o) => !o)}>
+            {panelOpen ? '▾' : '▸'} Debug · entities
+          </b>
+          {panelOpen && <span className="dbg-mini">
             <button onClick={() => setAll(true)}>all</button>
             <button onClick={() => setAll(false)}>none</button>
-          </span>
+          </span>}
         </div>
-        {AREAS.map((a) => (
+        {panelOpen && AREAS.map((a) => (
           <div key={a.id} className="dbg-group">
             <div className="dbg-area">{a.label}</div>
             {entitiesByArea(a.id).map((e) => {
@@ -230,20 +233,20 @@ export default function DebugApp() {
             })}
           </div>
         ))}
-        <div className="dbg-group">
+        {panelOpen && <div className="dbg-group">
           <div className="dbg-area">Contour (non-contract)</div>
           <label className="dbg-row">
             <input type="checkbox" checked={!!enabled.contour} onChange={() => toggle('contour')} />
             <span className="dbg-dot" style={{ background: REGION_COLOR.contour }} />Contour
           </label>
           {enabled.contour && tuneBlock('contour')}
-        </div>
-        <div className="dbg-foot">
+        </div>}
+        {panelOpen && <div className="dbg-foot">
           <label className="dbg-row"><input type="checkbox" checked={borders} onChange={(e) => setBorders(e.target.checked)} /> Show mask borders</label>
           <label className="dbg-row"><input type="checkbox" checked={showPoints} onChange={(e) => setShowPoints(e.target.checked)} /> Mesh points</label>
           <label className="dbg-row"><input type="checkbox" checked={protect} onChange={(e) => setProtect(e.target.checked)} /> Protect features (nose/eyes/lips/brows)</label>
           <label className="dbg-row"><input type="checkbox" checked={useGL} disabled={!glAvailable()} onChange={(e) => setUseGL(e.target.checked)} /> WebGL render</label>
-        </div>
+        </div>}
       </div>
     </div>
   );

@@ -63,8 +63,17 @@ void main(){
     outc = mix(outc, recolour(outc, uBlushShade), mb);
   }
 
-  float mhi = sc.g * uHighlightInt;       // highlight: champagne glow on the bone
-  if (mhi > 0.001) outc = clamp(outc + mhi * vec3(0.95, 0.9, 0.76) * 0.5, 0.0, 1.0);
+  // Highlight: face-wide mask gated by local luminance so the glow only lands
+  // where light is already hitting the face (bright zones catch it, shadows don't).
+  float mhi = sc.g * uHighlightInt;
+  if (mhi > 0.001) {
+    float localLum = lumv(outc);
+    // smoothstep gate: pixels below 0.35 lum get no highlight; above 0.65 get full.
+    float lightGate = smoothstep(0.35, 0.65, localLum);
+    mhi *= lightGate;
+    // champagne shimmer: add luminance + warm gold tint, stay in range
+    outc = clamp(outc + mhi * vec3(0.95, 0.90, 0.72) * 0.55, 0.0, 1.0);
+  }
 
   float mh = texture2D(uHair, vUv).a * uHairInt;
   if (mh > 0.001) outc = mix(outc, recolour(outc, uHairShade), mh);

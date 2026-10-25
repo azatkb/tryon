@@ -17,7 +17,7 @@ export const LESSON = {
       title: 'Even the skin',     text: 'A light layer of skin tint from the centre outward — thin layers read more like skin.' },
     { key: 'underEye',  region: 'underEye',   product: 'concealer',  family: null,        intensity: 0.55,
       title: 'Brighten under-eye', text: 'Tap a touch-lighter concealer under the eye in a triangle shape, blended down.' },
-    { key: 'contour',   region: 'contour',    product: null,         family: 'contour',   intensity: 0.35,
+    { key: 'contour',   region: 'contour',    product: null,         family: 'contour',   intensity: 0.25,
       title: 'Sculpt the face',   text: 'A cool shadow along the hollow under the cheekbone — shadow, not a stripe. Blend well.' },
     { key: 'blush',     region: 'blush',      product: 'blush',      family: 'rosy',      intensity: 0.38,
       title: 'Add a flush',       text: 'Blush high on the cheekbone, just above the contour — swept toward the temple for a lifted glow.' },

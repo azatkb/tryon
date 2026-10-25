@@ -121,6 +121,21 @@ float percL(vec3 c){
   return dot(c, l);
 }
 
+// Average luminance of a WIDE neighbourhood — the local "skin level".
+float neighbourL(vec2 uv, float r){
+  vec2 o = uTexel * r;
+  float s  = percL(texture2D(uFrame, uv).rgb * uWB) * 4.0;
+  s += percL(texture2D(uFrame, uv + vec2( o.x, 0.0)).rgb * uWB) * 2.0;
+  s += percL(texture2D(uFrame, uv + vec2(-o.x, 0.0)).rgb * uWB) * 2.0;
+  s += percL(texture2D(uFrame, uv + vec2( 0.0, o.y)).rgb * uWB) * 2.0;
+  s += percL(texture2D(uFrame, uv + vec2( 0.0,-o.y)).rgb * uWB) * 2.0;
+  s += percL(texture2D(uFrame, uv + vec2( o.x, o.y)).rgb * uWB);
+  s += percL(texture2D(uFrame, uv + vec2(-o.x, o.y)).rgb * uWB);
+  s += percL(texture2D(uFrame, uv + vec2( o.x,-o.y)).rgb * uWB);
+  s += percL(texture2D(uFrame, uv + vec2(-o.x,-o.y)).rgb * uWB);
+  return s * 0.0625;
+}
+
 vec3 clipColor(vec3 c){
   float l = lumv(c);
   float n = min(min(c.r, c.g), c.b);
@@ -223,20 +238,39 @@ void main(){
   // ── BLUSH: SSS warm flush, reduces where skin is already red ────────────────
   // Blush is swept ABOVE the contour line, never down into the hollow — where
   // the two masks meet it backs off, which is what stops the seam going muddy.
-  float mb = feather(softA(uBlush, vUv, 9.0)) * uBlushInt * skinGate;
+  // No feather() here: like the sculpt pack this mask is a blurred gradient
+  // with no hard edge, so feathering would only cost amplitude — and an
+  // intensity of 1.0 has to actually mean full pigment.
+  float mb = softA(uBlush, vUv, 9.0) * uBlushInt * skinGate;
   mb *= 1.0 - contourD * 0.5;
   if (mb > 0.001) {
-    // Already-pink skin gets less blush — smoothstep, not clamp, so the
-    // roll-off across the cheek has no visible contour line
+    // Already-pink skin gets a little less blush — smoothstep, not clamp, so
+    // the roll-off across the cheek has no visible contour line. Kept light:
+    // it is a nicety, not something that should cap what the slider can reach.
     float redness = smoothstep(0.02, 0.30, outc.r - (outc.g + outc.b) * 0.5);
-    mb *= 1.0 - redness * 0.45;
-    outc = sssBlend(outc, uBlushShade, mb);
+    mb *= 1.0 - redness * 0.25;
+    outc = sssBlend(outc, uBlushShade, min(mb, 1.0));
   }
 
   // ── HIGHLIGHT: specular + luminance gate — only bright zones catch light ─────
   // A surface is either a high point catching light or a hollow in shadow — it
   // cannot be both, so contour cancels highlight where they overlap.
   float mhi = sc.g * uHighlightInt * (1.0 - contourD * 0.8);
+
+  // ONLY THE HIGH POINTS.
+  //
+  // The mask is a broad sweep across the cheekbone, but highlighter belongs on
+  // what actually stands proud of the face — the top of the bone, the brow
+  // ridge, the bridge of the nose. Gating on absolute brightness doesn't find
+  // those; it just lights whichever side happens to face the window. What does
+  // find them is local contrast: raised geometry is brighter than the skin
+  // immediately around it, under any light, from any angle. So compare each
+  // pixel to a wide neighbourhood average and keep only what rises above it.
+  float rawL = percL(clamp(texture2D(uFrame, vUv).rgb * uWB, 0.0, 1.0));
+  float relief = rawL - neighbourL(vUv, 30.0);
+  float peakGate = smoothstep(0.002, 0.045, relief);
+  mhi *= peakGate;
+
   if (mhi > 0.001 || hiBloom > 0.001) {
     float lum = percL(outc);
     // Wide gates: a narrow smoothstep over face luminance shows up as a banding
@@ -247,8 +281,10 @@ void main(){
     vec3 warmGlow  = outc + mhi * warmGate * vec3(0.12, 0.09, 0.04) * 0.9;
     // Specular peak: near-white shimmer at the brightest points
     vec3 specPeak  = warmGlow + mhi * specGate * vec3(0.22, 0.20, 0.16) * 0.9;
-    // Bloom: a faint warm lift spreading past the mask, gated to lit skin only
-    specPeak += hiBloom * uHighlightInt * warmGate * vec3(0.05, 0.04, 0.02);
+    // Bloom: a faint warm lift spreading past the mask. Only partly gated by
+    // relief — a glow that stopped dead at the peak wouldn't read as a glow.
+    float bloomGate = mix(0.3, 1.0, peakGate);
+    specPeak += hiBloom * uHighlightInt * warmGate * bloomGate * vec3(0.05, 0.04, 0.02);
     outc = clamp(specPeak, 0.0, 1.0);
   }
 

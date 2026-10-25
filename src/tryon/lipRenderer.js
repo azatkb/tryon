@@ -63,11 +63,11 @@ const CFG = {
   face:  { blur: 0.017 },  // foundation edge softness
 
   blush: { half: 0.17,     // sweep length (cheek apple → temple)
-           width: 0.080,   // sweep thickness
-           blur: 0.018,    // soft edges
-           coreAlpha: 0.88,// centre intensity
-           haloRatio: 2.4, // halo width relative to core
-           haloAlpha: 0.30 },// halo intensity (soft outer glow)
+           width: 0.095,   // sweep thickness
+           blur: 0.013,    // soft edges — kept under the band (see contour note)
+           coreAlpha: 1.0, // centre intensity: full, so "100%" really is 100%
+           haloRatio: 2.2, // halo width relative to core
+           haloAlpha: 0.42 },// halo intensity (soft outer glow)
 
   // Keep `blur` NARROWER than the core band it softens. A blur wider than the
   // stroke doesn't just soften the edge, it flattens the peak: at width 0.055 /

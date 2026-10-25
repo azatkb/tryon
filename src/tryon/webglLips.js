@@ -139,9 +139,17 @@ void main(){
   // that boundary is where a hard edge would otherwise show.
   float skinGate = smoothstep(0.05, 0.24, skinL);
 
-  // Sculpt pack feathered wide: r=contour g=highlight b=under-eye
-  vec3 sc = softRGB(uSculpt, vUv, 9.0);
-  sc = vec3(feather(sc.r), feather(sc.g), feather(sc.b)) * skinGate;
+  // Sculpt pack: r=contour g=highlight b=under-eye.
+  // These masks are built from blurred gradients — they have no hard edge to
+  // soften, so feather() here would only eat amplitude (it maps 0.44 -> 0.40
+  // and worse further down). A small extra tap is enough; the canvas blur has
+  // already done the feathering.
+  vec3 sc = softRGB(uSculpt, vUv, 4.0) * skinGate;
+
+  // Wide secondary tap on the highlight channel — real specular on skin glows
+  // a little past its own edge (eye and lens scatter), and that halo is most of
+  // what sells "catching the light".
+  float hiBloom = softRGB(uSculpt, vUv, 22.0).g * skinGate;
 
   // ── FOUNDATION: match skin tone, preserve micro-texture via soft-light ──────
   float mf = feather(softA(uFnd, vUv, 7.0)) * uFndInt * skinGate;
@@ -162,17 +170,19 @@ void main(){
     outc = mix(outc, lifted, mu * 0.85);
   }
 
-  // ── CONTOUR: skin-relative darkening — multiply + desaturate, no cast ───────
-  // Fades out in already-dark skin so it can't crush shadows into a hard patch.
+  // ── CONTOUR: a real shadow, not a tint ──────────────────────────────────────
+  // Shadowed skin is darker, cooler and less saturated than lit skin: direct
+  // warm light is blocked, so what fills the hollow is ambient skylight. The
+  // multiply target is therefore well below neutral and biased to blue.
   float contourD = sc.r * uContourInt;   // raw density, reused by blush/highlight
-  float mc = contourD * smoothstep(0.10, 0.38, percL(outc));
+  // The gate exists only to spare true black (hair, nostril, deep shadow) —
+  // not to fade contour inside its own hollow, which is where it belongs.
+  float mc = contourD * smoothstep(0.03, 0.16, percL(outc));
   if (mc > 0.001) {
     float lum = percL(outc);
-    // Darken by multiplying with a neutral desaturated version → cool shadow
-    vec3 shadow = blendMultiply(outc, vec3(0.72, 0.70, 0.74));
-    // Slight desaturation pull to look more like a real matte powder
-    vec3 desat  = vec3(lum);
-    shadow = mix(shadow, desat * 0.85, 0.15);
+    vec3 shadow = blendMultiply(outc, vec3(0.52, 0.53, 0.60));
+    // Pull toward grey — shadow on skin loses chroma as well as light
+    shadow = mix(shadow, vec3(lum * 0.58), 0.22);
     outc = mix(outc, shadow, mc);
   }
 
@@ -193,16 +203,18 @@ void main(){
   // A surface is either a high point catching light or a hollow in shadow — it
   // cannot be both, so contour cancels highlight where they overlap.
   float mhi = sc.g * uHighlightInt * (1.0 - contourD * 0.8);
-  if (mhi > 0.001) {
+  if (mhi > 0.001 || hiBloom > 0.001) {
     float lum = percL(outc);
     // Wide gates: a narrow smoothstep over face luminance shows up as a banding
     // ring on the cheekbone, so both ramps are stretched well past the data.
     float warmGate  = smoothstep(0.12, 0.72, lum);   // warm glow in mid-bright
     float specGate  = smoothstep(0.48, 0.96, lum);   // specular only where very bright
     // Warm champagne base glow
-    vec3 warmGlow  = outc + mhi * warmGate  * vec3(0.12, 0.09, 0.04) * 0.9;
+    vec3 warmGlow  = outc + mhi * warmGate * vec3(0.12, 0.09, 0.04) * 0.9;
     // Specular peak: near-white shimmer at the brightest points
-    vec3 specPeak  = warmGlow + mhi * specGate * specGate * vec3(0.22, 0.20, 0.16) * 0.8;
+    vec3 specPeak  = warmGlow + mhi * specGate * vec3(0.22, 0.20, 0.16) * 0.9;
+    // Bloom: a faint warm lift spreading past the mask, gated to lit skin only
+    specPeak += hiBloom * uHighlightInt * warmGate * vec3(0.05, 0.04, 0.02);
     outc = clamp(specPeak, 0.0, 1.0);
   }
 

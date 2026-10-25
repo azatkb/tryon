@@ -59,20 +59,25 @@ const CFG = {
            haloRatio: 2.4, // halo width relative to core
            haloAlpha: 0.30 },// halo intensity (soft outer glow)
 
-  contour: { width: 0.055, // core stroke thickness — wider band, more blendable
+  // Keep `blur` NARROWER than the core band it softens. A blur wider than the
+  // stroke doesn't just soften the edge, it flattens the peak: at width 0.055 /
+  // blur 0.038 the mask topped out at 0.44 alpha and contour was invisible.
+  contour: { width: 0.075, // core stroke thickness — wider band, more blendable
              drop: 0.25,   // push the curve down into the hollow
-             blur: 0.038,  // softer edges — gradient + more blur for powder-like fade
-             wide: 3.0,    // halo width = core × this (wider soft underlay)
-             edge: 0.4,    // halo alpha (lighter halo)
-             core: 0.85 }, // core alpha (not too sharp in the centre)
+             blur: 0.022,  // powder-soft edge, but narrower than the band
+             wide: 2.6,    // halo width = core × this (wider soft underlay)
+             edge: 0.55,   // halo alpha
+             core: 1.0 },  // core alpha — full, the blur does the feathering
 
   // highlight & underEye use a feathered 2-pass stroke: a wide faint halo + a
   // bright core. Like blush, softness comes from a gradient profile that PEAKS
   // near 1.0 in the centre with light blur — not from a thin line over-blurred
   // (that just fades to nothing).
-  highlight: { width: 0.03,  // core stroke thickness along the top of the cheekbone
+  // Same rule as contour: the 0.03 / 0.016 pair was blurring a 13px band with a
+  // 15px kernel, so the highlight never reached full strength either.
+  highlight: { width: 0.042, // core stroke thickness along the top of the cheekbone
                reach: 0.3,   // how far from the apple toward the eye (shorter = smaller)
-               blur: 0.016,  // edge softness (light — the gradient does the feathering)
+               blur: 0.011,  // edge softness — narrower than the band
                wide: 2.2,    // halo width = core × this
                edge: 0.5,    // halo alpha
                core: 1.0 },  // core alpha (bright centre)

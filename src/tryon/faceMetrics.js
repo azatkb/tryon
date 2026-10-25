@@ -57,7 +57,7 @@ export function smoothLandmarks(cur, smoothed, motion, opts = {}) {
 
 /**
  * Extrapolate landmarks along their velocity so the mask keeps up with motion
- * instead of trailing one detection behind. k = frames to project; 0 disables.
+ * instead of trailing one detection behind. prev/cur are landmark arrays.
  */
 export function predictLandmarks(cur, prev, k) {
   if (!prev || k <= 0 || prev.length !== cur.length) return cur;

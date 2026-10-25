@@ -18,9 +18,9 @@ function layerFor(region, hex, finish) {
     case 'mascara':    return ['lashes',    { intensity: 0.80 }];
     case 'foundation': return ['foundation',{ color: hex, intensity: 0.26 }];
     case 'blush':      return ['blush',     { color: hex, intensity: 0.38, lightResponse: 0.5 }];
-    case 'highlight':  return ['highlight', { intensity: 0.45 }];
+    case 'highlight':  return ['highlight', { intensity: 0.55 }];
     case 'concealer':  return ['underEye',  { intensity: 0.55 }];
-    case 'contour':    return ['contour',   { intensity: 0.30 }];
+    case 'contour':    return ['contour',   { intensity: 0.55 }];
     case 'lipLiner':   return ['lipLiner',  { color: hex, intensity: 0.80 }];
     case 'eyeliner':   return ['eyeliner',  { color: hex, intensity: 0.85 }];
     case 'brows':      return ['brows',     { color: hex, intensity: 0.55 }];
@@ -49,14 +49,16 @@ const TUNE_KEY = { foundation: 'foundation', concealer: 'underEye', blush: 'blus
 // tune key -> CFG key whose .blur we retune (foundation's CFG block is "face").
 const CFG_KEY = { foundation: 'face', underEye: 'underEye', blush: 'blush', highlight: 'highlight', contour: 'contour' };
 // edge softness range per region [soft (hardness 0), hard (hardness 1)] as blur fraction.
+// Soft end stays narrower than the band each stroke draws — a blur wider than
+// the stroke flattens the mask peak instead of just softening its edge.
 const BLUR_RANGE = {
   foundation: [0.020, 0.004], underEye: [0.030, 0.008], blush: [0.020, 0.004],
-  highlight: [0.030, 0.008], contour: [0.035, 0.008],
+  highlight: [0.016, 0.005], contour: [0.032, 0.012],
 };
 // defaults: opacity (layer intensity) + hardness (0=soft .. 1=hard)
 const TUNE_DEFAULT = {
   foundation: { op: 0.26, hd: 0.45 }, underEye: { op: 0.55, hd: 0.55 }, blush: { op: 0.38, hd: 0.40 },
-  highlight: { op: 0.45, hd: 0.50 }, contour: { op: 0.30, hd: 0.55 },
+  highlight: { op: 0.55, hd: 0.50 }, contour: { op: 0.55, hd: 0.55 },
 };
 const blurFor = (rk, hd) => { const [s, h] = BLUR_RANGE[rk]; return s + (h - s) * hd; };
 

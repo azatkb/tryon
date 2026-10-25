@@ -12,7 +12,10 @@ export const EYE_R_V = [159, 145];
 export const EYE_L_V = [386, 374];
 
 // How far up the lid the shadow reaches, in multiples of eye height.
-export const EYE_LIFT = 1.35;
+// Shadow runs from the lash line up over the crease, which is roughly two and
+// a half eye-heights. At 1.35 the band was barely taller than the blur applied
+// to it, so the mask peaked around 0.55 and the colour never registered.
+export const EYE_LIFT = 2.4;
 
 // Full eye opening (upper + lower lid) — used to cut eyes out of the foundation mask.
 export const EYE_R_FULL = [33, 246, 161, 160, 159, 158, 157, 173, 133, 155, 154, 153, 145, 144, 163, 7];

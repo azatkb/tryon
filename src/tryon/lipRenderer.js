@@ -51,7 +51,12 @@ const CFG = {
 
   brows: { blur: 0.004 }, // brow fill edge softness
 
-  eyes:  { blur: 0.013 },  // eyeshadow diffusion (EYE_LIFT lives in regions.js)
+  // Diffusion must stay well under the band height (EYE_LIFT, in regions.js)
+  // or it flattens the mask instead of softening its edge.
+  eyes:  { blur: 0.007,
+           outward: 0.28,  // how far the wash fans sideways near the outer corner
+           tail: 0.42 },   // how far it carries PAST the outer corner, toward
+                           // the temple — both as multiples of the lift
 
   lashes: { width: 0.0022, // lash line / flick thickness (× face HEIGHT)
             count: 32,     // denser flicks
@@ -269,17 +274,47 @@ export function buildEyeMask(w, h, landmarks) {
     const eyeH = Math.abs(landmarks[vref[0]].y - landmarks[vref[1]].y) * MH;
     const lift = eyeH * EYE_LIFT;
     const lo = lash.map((i) => [landmarks[i].x * MW, landmarks[i].y * MH]);
-    const hi = lo.map(([x, y]) => [x, y - lift]);
-    const poly = lo.concat(hi.reverse());
-    // Vertical gradient: fully opaque at the lash line, fades toward the brow
-    // (real eyeshadow is deepest at the crease/lash, sheer toward the brow bone)
-    const topY    = Math.min(...poly.map(([, y]) => y));
-    const bottomY = Math.max(...poly.map(([, y]) => y));
-    const grad = m.createLinearGradient(0, bottomY, 0, topY);
+    const n = lo.length;
+    const outer = lo[0], inner = lo[n - 1];   // lash arrays run outer -> inner
+
+    // Work in the eye's own frame so the shape follows a tilted head.
+    let axX = outer[0] - inner[0], axY = outer[1] - inner[1];
+    const axL = Math.hypot(axX, axY) || 1; axX /= axL; axY /= axL;
+    let upX = (landmarks[vref[0]].x - landmarks[vref[1]].x) * MW;
+    let upY = (landmarks[vref[0]].y - landmarks[vref[1]].y) * MH;
+    const upL = Math.hypot(upX, upY) || 1; upX /= upL; upY /= upL;
+
+    // A straight vertical extrusion of the lash line gives a band exactly as
+    // wide as the eye with sheer sides — which reads as a narrow stripe. Real
+    // shadow is a fan: it climbs higher at the outer third and carries OUT past
+    // the outer corner toward the temple, which is what gives the eye its lift.
+    const hi = lo.map((p, k) => {
+      const t = k / (n - 1);                       // 0 at outer, 1 at inner
+      const lf = lift * (1.3 - 0.6 * t);           // taller over the outer third
+      const ow = lift * CFG.eyes.outward * (1 - t) * (1 - t); // fan, outer-weighted
+      return [p[0] + upX * lf + axX * ow, p[1] + upY * lf + axY * ow];
+    });
+
+    const tailLen = lift * CFG.eyes.tail;
+    const tailBase = [outer[0] + axX * tailLen * 0.5, outer[1] + axY * tailLen * 0.5];
+    const tailTip = [outer[0] + axX * tailLen + upX * lift * 1.0,
+                     outer[1] + axY * tailLen + upY * lift * 1.0];
+
+    // outer corner -> along the lash line -> inner, back along the lifted edge,
+    // then out through the tail and closed.
+    const poly = [tailBase, ...lo, ...hi.slice().reverse(), tailTip];
+
+    // Gradient runs along the eye's own "up", not screen vertical: dense at the
+    // lash line, still solid through the crease, sheer at the brow bone.
+    const gx = (outer[0] + inner[0]) / 2, gy = (outer[1] + inner[1]) / 2;
+    const grad = m.createLinearGradient(
+      gx, gy,
+      gx + upX * lift * 1.35, gy + upY * lift * 1.35,
+    );
     grad.addColorStop(0,    'rgba(255,255,255,1.0)');  // dense at lash line
-    grad.addColorStop(0.45, 'rgba(255,255,255,0.75)');
-    grad.addColorStop(0.75, 'rgba(255,255,255,0.40)');
-    grad.addColorStop(1,    'rgba(255,255,255,0.08)'); // sheer at brow bone
+    grad.addColorStop(0.50, 'rgba(255,255,255,0.90)'); // still solid through the crease
+    grad.addColorStop(0.80, 'rgba(255,255,255,0.52)');
+    grad.addColorStop(1,    'rgba(255,255,255,0.12)'); // sheer at brow bone
     m.fillStyle = grad;
     m.beginPath();
     m.moveTo(poly[0][0], poly[0][1]);
@@ -287,6 +322,26 @@ export function buildEyeMask(w, h, landmarks) {
     m.closePath();
     m.fill();
   }
+
+  // Keep the wash off the brow hair. Clamping the gradient short of the brow
+  // would also rob the lid of the height that makes the shape read, so instead
+  // let it climb and subtract the brows — the shadow reaches the brow BONE and
+  // stops at the hair. Cut with the same blur so the boundary stays soft.
+  m.save();
+  m.filter = `blur(${Math.max(2, MW * CFG.eyes.blur)}px)`;
+  m.globalCompositeOperation = 'destination-out';
+  // Fill the brow, then stroke the same path to dilate the cut past the hair —
+  // the landmark polygon traces the brow tightly, and a bare fill leaves a rim
+  // of colour sitting on its edge.
+  m.lineJoin = 'round';
+  m.lineCap = 'round';
+  m.lineWidth = Math.max(3, MH * 0.022);
+  for (const poly of [BROW_R, BROW_L]) {
+    fillPoly(m, landmarks, poly, MW, MH);  // leaves the path current
+    m.stroke();
+  }
+  m.restore();
+
   m.filter = 'none';
   return eyeMaskCv;
 }

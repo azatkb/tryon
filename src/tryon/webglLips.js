@@ -270,14 +270,23 @@ void main(){
   }
 
   // ── EYESHADOW: colour blend + soft-light warmth for pigment depth ────────────
-  float me = feather(softA(uEye, vUv, 6.0)) * uEyeInt;
+  // No feather: the lid mask is a vertical gradient, so there is no hard edge
+  // to soften and feathering would only cost amplitude.
+  float me = softA(uEye, vUv, 6.0) * uEyeInt;
   if (me > 0.001) {
+    float shadeL = percL(uEyeShade);
     vec3 col  = blendColor(outc, uEyeShade);
     vec3 soft = softLight(outc, uEyeShade);
-    // heavier shadows need more multiply depth
-    float lum = percL(uEyeShade);
-    vec3 deep = blendMultiply(outc, uEyeShade + 0.1);
-    outc = mix(outc, mix(mix(col, soft, 0.4), deep, smoothstep(0.48, 0.12, lum) * 0.5), me);
+    vec3 deep = blendMultiply(outc, uEyeShade * 1.35 + 0.08);
+
+    // Powder pigment SITS ON the lid and darkens it. A colour-only transfer
+    // keeps the skin's own luminance, which on a mid-tone taupe over mid-tone
+    // skin is very nearly the identity — that is why this read as nothing at
+    // all. How far it darkens follows the shade: a deep cocoa buries the lid,
+    // a champagne barely touches it.
+    float depth = smoothstep(0.78, 0.25, shadeL);
+    vec3 pigment = mix(mix(col, soft, 0.30), deep, depth * 0.92);
+    outc = mix(outc, pigment, me);
   }
 
   // ── EYELINER: near-black, slight texture absorption ─────────────────────────

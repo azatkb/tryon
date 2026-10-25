@@ -10,11 +10,20 @@ import { ENTITIES, AREAS, entitiesByArea } from './entities.js';
 import { CATALOG } from './catalog.js';
 import { lookShade, FAMILY_HEX } from './shadeData.js';
 
+// Workbench shade overrides. The catalogue's default eyeshadow is "Taupe"
+// (#8A7466) — a grey-beige at luminance 0.47, which on mid-tone skin is close
+// to invisible however the shader treats it. "Cocoa" from the same palette is
+// the brown that actually reads. Debug-only: the product data and the lesson
+// copy ("a neutral taupe wash") are left alone.
+const SHADE_OVERRIDE = {
+  eyes: '#7A4A2E', // warm bronze-brown — richer than the palette's Cocoa
+};
+
 // Entity region -> how it maps into the renderer's layer object.
 function layerFor(region, hex, finish) {
   switch (region) {
     case 'lips':       return ['lips',      { color: hex, intensity: 0.60, finish: finish || 'satin', lightResponse: 0.5 }];
-    case 'eyes':       return ['eyes',      { color: hex, intensity: 0.45, lightResponse: 0.5 }];
+    case 'eyes':       return ['eyes',      { color: hex, intensity: 0.70, lightResponse: 0.5 }];
     case 'mascara':    return ['lashes',    { intensity: 0.80 }];
     case 'foundation': return ['foundation',{ color: hex, intensity: 0.26 }];
     case 'blush':      return ['blush',     { color: hex, intensity: 0.38, lightResponse: 0.5 }];
@@ -45,20 +54,29 @@ const IMPLEMENTED = new Set(['lipstick', 'eyeshadow', 'mascara', 'foundation', '
 
 // Entities that get live opacity + edge-hardness sliders in the panel.
 // entity.region -> tune key (the layer/CFG region the sliders drive).
-const TUNE_KEY = { foundation: 'foundation', concealer: 'underEye', blush: 'blush', highlight: 'highlight', contour: 'contour' };
+const TUNE_KEY = {
+  foundation: 'foundation', concealer: 'underEye', blush: 'blush',
+  highlight: 'highlight', contour: 'contour', eyeshadow: 'eyes',
+};
 // tune key -> CFG key whose .blur we retune (foundation's CFG block is "face").
-const CFG_KEY = { foundation: 'face', underEye: 'underEye', blush: 'blush', highlight: 'highlight', contour: 'contour' };
+const CFG_KEY = {
+  foundation: 'face', underEye: 'underEye', blush: 'blush',
+  highlight: 'highlight', contour: 'contour', eyes: 'eyes',
+};
 // edge softness range per region [soft (hardness 0), hard (hardness 1)] as blur fraction.
 // Soft end stays narrower than the band each stroke draws — a blur wider than
 // the stroke flattens the mask peak instead of just softening its edge.
 const BLUR_RANGE = {
   foundation: [0.020, 0.004], underEye: [0.030, 0.008], blush: [0.020, 0.004],
   highlight: [0.016, 0.005], contour: [0.032, 0.012],
+  // midpoint lands on CFG.eyes.blur (0.007), so hardness 0.5 == shipped default
+  eyes: [0.011, 0.003],
 };
 // defaults: opacity (layer intensity) + hardness (0=soft .. 1=hard)
 const TUNE_DEFAULT = {
   foundation: { op: 0.26, hd: 0.45 }, underEye: { op: 0.55, hd: 0.55 }, blush: { op: 0.38, hd: 0.40 },
   highlight: { op: 0.55, hd: 0.50 }, contour: { op: 0.55, hd: 0.55 },
+  eyes: { op: 0.70, hd: 0.50 },
 };
 const blurFor = (rk, hd) => { const [s, h] = BLUR_RANGE[rk]; return s + (h - s) * hd; };
 
@@ -98,7 +116,8 @@ export default function DebugApp() {
       const row = CATALOG[e.catalog];
       const picked = lookShade(row, e.family, null, null, null);
       const shade = picked.shade || (row && row.shades && row.shades[0]) || null;
-      const hex = (shade && shade.hex) || (e.family && FAMILY_HEX[e.family]) || '#000000';
+      const hex = SHADE_OVERRIDE[e.region]
+        || (shade && shade.hex) || (e.family && FAMILY_HEX[e.family]) || '#000000';
       const m = layerFor(e.region, hex, e.finish);
       if (m) {
         const tk = TUNE_KEY[e.id];

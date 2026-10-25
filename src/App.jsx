@@ -25,6 +25,20 @@ function smoothLandmarks(cur, smoothed, motion) {
   return out;
 }
 
+// Scale every layer's intensity by one user-facing "how much makeup" factor.
+// 1.0 = the lesson's own tuned values. Clamped at 1 so pushing past 100% can't
+// drive a region into a flat fill.
+function scaleIntensity(layers, k) {
+  if (k === 1) return layers;
+  const out = {};
+  for (const key of Object.keys(layers)) {
+    const l = layers[key];
+    if (!l || typeof l.intensity !== 'number') { out[key] = l; continue; }
+    out[key] = { ...l, intensity: Math.min(1, l.intensity * k) };
+  }
+  return out;
+}
+
 // Extrapolate landmarks along their velocity so the mask keeps up with motion
 // instead of trailing one detection behind. prev/cur are landmark arrays.
 function predictLandmarks(cur, prev, k) {
@@ -106,6 +120,9 @@ export default function App() {
   const [step, setStep] = useState(0);
   const [skinDepth, setSkinDepth] = useState(''); // auto-estimated for deep-skin-aware shades
 
+  // global look intensity — scales every applied layer (1 = as the lesson tuned it)
+  const [lookIntensity, setLookIntensity] = useState(1);
+
   const [lightResponse, setLightResponse] = useState(0.5);
   const [compare, setCompare] = useState(false);
   const [showPoints, setShowPoints] = useState(false);
@@ -172,7 +189,7 @@ export default function App() {
 
   const optsRef = useRef({});
   optsRef.current = {
-    ...L,
+    ...scaleIntensity(L, lookIntensity),
     hair: hairOn && !lessonOn ? { color: HAIR_SHADES[hairSel].hex, intensity: hairIntensity } : null,
     compare, showPoints, useGL, useSeg, segDebug,
     tut: lessonOn,
@@ -426,7 +443,7 @@ export default function App() {
     if (mode === 'photo') redrawPhoto();
   }, [sel, eyeSel, eyeOn, intensity, eyeIntensity, lashOn, lashIntensity, fndSel, fndOn, fndIntensity,
       blushSel, blushOn, blushIntensity, hairSel, hairOn, hairIntensity, lightResponse, finish, compare,
-      showPoints, useGL, segDebug, lessonOn, step, skinDepth, mode, redrawPhoto]);
+      showPoints, useGL, segDebug, lessonOn, step, skinDepth, mode, lookIntensity, redrawPhoto]);
 
   // the segmentation model is needed for the ONNX lip-edge refine AND for hair
   const needSeg = useSeg || hairOn;
@@ -583,6 +600,26 @@ export default function App() {
       </div>
 
       <div className="lesson-foot">
+        <div className="look-int">
+          <div className="li-head">
+            <label htmlFor="lookInt">Intensity</label>
+            <button type="button" className={`li-val${lookIntensity === 1 ? '' : ' off'}`}
+              title="Reset to the tuned look" onClick={() => setLookIntensity(1)}>
+              {Math.round(lookIntensity * 100)}%
+            </button>
+          </div>
+          <div className="li-track">
+            <input id="lookInt" type="range" min="0" max="1.5" step="0.01" value={lookIntensity}
+              style={{ '--p': `${(lookIntensity / 1.5) * 100}%` }}
+              onChange={(e) => setLookIntensity(+e.target.value)}
+              aria-label="Makeup intensity" />
+            <span className="li-detent" aria-hidden="true" />
+          </div>
+          <div className="li-scale" aria-hidden="true">
+            <span>Bare</span><span className="li-mid">Natural</span><span>Full</span>
+          </div>
+        </div>
+
         <div className="lesson-nav">
           <button className="round" disabled={step === 0} onClick={() => setStep((s) => Math.max(0, s - 1))}>‹</button>
           {isFinal

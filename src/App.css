@@ -237,6 +237,45 @@ input[type=range]::-moz-range-thumb { width: 18px; height: 18px; border-radius: 
 .lesson-nav .primary { flex: 1; padding: 15px; border-radius: 16px; border: 0; cursor: pointer; font-size: 1rem; font-weight: 700; background: var(--grad); color: #fff; box-shadow: 0 6px 18px rgba(194,24,91,.32); font-family: var(--f-body); }
 .lesson-nav .round { width: 50px; height: 50px; border-radius: 50%; border: 1px solid var(--line-strong); background: var(--surface-2); color: var(--fg); font-size: 1.3rem; cursor: pointer; flex: 0 0 auto; }
 .lesson-nav .round:disabled { opacity: .4; cursor: default; }
+
+/* ---- global look intensity ---- */
+.look-int {
+  background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: 18px; padding: 13px 16px 11px;
+}
+.li-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 11px; }
+.li-head label {
+  font-size: .68rem; letter-spacing: .09em; text-transform: uppercase;
+  font-weight: 700; color: var(--muted);
+}
+.li-val {
+  font-family: var(--f-body); font-size: .82rem; font-weight: 700;
+  color: var(--primary); background: transparent; border: 0;
+  padding: 0; cursor: default; font-variant-numeric: tabular-nums;
+}
+/* only clickable (as a reset) once it's been moved off the tuned value */
+.li-val.off { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
+
+.li-track { position: relative; display: flex; align-items: center; height: 18px; }
+.li-track input[type=range] {
+  /* --p is the filled fraction, set inline from the value */
+  background: linear-gradient(to right,
+    var(--primary) 0 var(--p, 66.7%),
+    var(--line-strong) var(--p, 66.7%) 100%);
+}
+/* detent marking 100% — the intensity the lesson was tuned at */
+.li-detent {
+  position: absolute; left: 66.7%; top: 50%; width: 2px; height: 10px;
+  margin-left: -1px; margin-top: -5px; border-radius: 1px;
+  background: var(--line-strong); pointer-events: none;
+}
+
+.li-scale {
+  position: relative; display: flex; justify-content: space-between;
+  margin-top: 7px; font-size: .64rem; letter-spacing: .05em;
+  text-transform: uppercase; color: var(--faint);
+}
+.li-scale .li-mid { position: absolute; left: 66.7%; transform: translateX(-50%); }
 .lesson-nav .round.close { color: var(--muted); }
 
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }

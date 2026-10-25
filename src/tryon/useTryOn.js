@@ -38,6 +38,7 @@ export function useTryOn(options = {}) {
     smoothing = {},           // { alpha, maxAlpha, gain, predict }
     resolution = DEFAULT_RESOLUTION,
     lumInterval = 20,         // frames between exposure re-measurements
+    redrawEveryTick = false,  // true = draw on every rAF even without a new frame
     active = true,
     onFrame,
     onError,
@@ -49,7 +50,7 @@ export function useTryOn(options = {}) {
 
   // Live mirrors of the props so the rAF loop never reads a stale closure.
   const cfgRef = useRef({});
-  cfgRef.current = { layers, getLayers, renderer, smoothing, lumInterval, onFrame };
+  cfgRef.current = { layers, getLayers, renderer, smoothing, lumInterval, redrawEveryTick, onFrame };
 
   const videoRef = useRef(null);
   const rafRef = useRef(0);
@@ -185,6 +186,13 @@ export function useTryOn(options = {}) {
           rafRef.current = requestAnimationFrame(tick);
           if (!v.videoWidth) return;
           const isFresh = v.currentTime !== lastTime;
+          // A 30fps camera against a 60Hz display means half of these ticks
+          // carry a video frame we have already drawn. Re-running detection,
+          // ten mask uploads and the shader to produce the same pixels is the
+          // cheapest thing to stop doing, and nothing is lost: there is no new
+          // image to show. Hosts that drive their own animation on top can set
+          // redrawEveryTick to keep the old behaviour.
+          if (!isFresh && !cfgRef.current.redrawEveryTick) return;
           if (isFresh) lastTime = v.currentTime;
           const lms = trackFrame(v, isFresh);
           setFaceSeen(!!lms);

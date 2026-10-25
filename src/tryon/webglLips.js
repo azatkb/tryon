@@ -17,6 +17,40 @@ let gl = null, canvas = null, prog = null, quadBuf = null;
 let tex = {}, loc = {};
 let available = null;
 
+// Mask-upload cache. Masks depend only on landmark geometry and which regions
+// are active, so these four let us detect "nothing that shapes a mask moved"
+// and skip ten texture uploads — by far the most expensive work per frame.
+let lastMaskKey = '', lastHairMask = null, lastLipOverride = null;
+let lastGeom = null;
+
+// Sub-pixel landmark drift doesn't change a mask that was built at half
+// resolution and then blurred, so comparing by object identity alone would
+// miss every chance to reuse one: the smoother hands back a fresh array each
+// frame even when the face is perfectly still. Compare by content instead,
+// with a threshold well under one pixel at 1080p (0.00015 ~ 0.16px).
+const GEOM_EPS = 0.00015;
+
+function geometryMoved(lms) {
+  const n = lms.length;
+  if (!lastGeom || lastGeom.length !== n * 2) {
+    lastGeom = new Float32Array(n * 2);
+    for (let i = 0; i < n; i++) { lastGeom[i * 2] = lms[i].x; lastGeom[i * 2 + 1] = lms[i].y; }
+    return true;
+  }
+  for (let i = 0; i < n; i++) {
+    if (Math.abs(lms[i].x - lastGeom[i * 2]) > GEOM_EPS) return storeGeom(lms);
+    if (Math.abs(lms[i].y - lastGeom[i * 2 + 1]) > GEOM_EPS) return storeGeom(lms);
+  }
+  return false;
+}
+function storeGeom(lms) {
+  for (let i = 0; i < lms.length; i++) {
+    lastGeom[i * 2] = lms[i].x;
+    lastGeom[i * 2 + 1] = lms[i].y;
+  }
+  return true;
+}
+
 const VERT = `
 attribute vec2 aPos;
 varying vec2 vUv;
@@ -391,33 +425,51 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
   if (!landmarks || landmarks.length < 468) return null;
   const { foundation, underEye, contour, blush, highlight, hair, eyes, lashes, lips, lipLiner, eyeliner, brows, wb } = opts;
 
-  const fndMask = foundation ? buildFaceMask(w, h, landmarks) : blank();
-  const blushMask = blush ? buildBlushMask(w, h, landmarks) : blank();
-  const eyeMask = eyes ? buildEyeMask(w, h, landmarks) : blank();
-  const lashMask = lashes ? buildLashMask(w, h, landmarks) : blank();
-  const lipMask = lips ? buildLipMask(w, h, landmarks, lips) : blank();
-  const hairMask = (hair && hair.mask) ? hair.mask : blank();
-  const lipLinerMask = lipLiner ? buildLipLinerMask(w, h, landmarks) : blank();
-  const eyelinerMask = eyeliner ? buildEyelinerMask(w, h, landmarks) : blank();
-  const browMask = brows ? buildBrowMask(w, h, landmarks) : blank();
-  const sculptOn = !!(contour || highlight || underEye);
-  const sculptMask = sculptOn ? buildSculptPack(w, h, landmarks, { contour: !!contour, highlight: !!highlight, underEye: !!underEye }) : blank();
-
   if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
   gl.viewport(0, 0, w, h);
   gl.useProgram(prog);
 
+  // The frame itself always changes, so it always goes up.
   upload(0, tex.frame, source);
-  upload(1, tex.fnd, fndMask);
-  upload(2, tex.blush, blushMask);
-  upload(3, tex.hair, hairMask);
-  upload(4, tex.eye, eyeMask);
-  upload(5, tex.lash, lashMask);
-  upload(6, tex.lip, lipMask);
-  upload(7, tex.sculpt, sculptMask);
-  upload(8, tex.lipLiner, lipLinerMask);
-  upload(9, tex.eyeliner, eyelinerMask);
-  upload(10, tex.brows, browMask);
+
+  // Masks are pure geometry: same landmarks + same active regions => byte-identical
+  // textures. Re-uploading them is the single most expensive thing this function
+  // does (a 1080p texture upload measured ~200x the cost of building the mask
+  // that fills it), so skip it whenever nothing that shapes them has moved.
+  // Colour, finish and intensity are uniforms, not masks — changing a shade
+  // never invalidates this cache.
+  const key = `${w}x${h}|${!!foundation}${!!blush}${!!eyes}${!!lashes}${!!lips}`
+            + `${!!(hair && hair.mask)}${!!lipLiner}${!!eyeliner}${!!brows}`
+            + `${!!contour}${!!highlight}${!!underEye}`;
+  const lipOverride = lips?.overrideMask || null;
+
+  // Evaluate the geometry check first, not inside an || chain — it also
+  // refreshes the stored snapshot, and short-circuiting past it would leave
+  // that snapshot stale.
+  const moved = geometryMoved(landmarks);
+  const changed = moved
+    || key !== lastMaskKey
+    || hair?.mask !== lastHairMask
+    || lipOverride !== lastLipOverride;
+
+  if (changed) {
+    const sculptOn = !!(contour || highlight || underEye);
+    upload(1, tex.fnd, foundation ? buildFaceMask(w, h, landmarks) : blank());
+    upload(2, tex.blush, blush ? buildBlushMask(w, h, landmarks) : blank());
+    upload(3, tex.hair, (hair && hair.mask) ? hair.mask : blank());
+    upload(4, tex.eye, eyes ? buildEyeMask(w, h, landmarks) : blank());
+    upload(5, tex.lash, lashes ? buildLashMask(w, h, landmarks) : blank());
+    upload(6, tex.lip, lips ? buildLipMask(w, h, landmarks, lips) : blank());
+    upload(7, tex.sculpt, sculptOn
+      ? buildSculptPack(w, h, landmarks, { contour: !!contour, highlight: !!highlight, underEye: !!underEye })
+      : blank());
+    upload(8, tex.lipLiner, lipLiner ? buildLipLinerMask(w, h, landmarks) : blank());
+    upload(9, tex.eyeliner, eyeliner ? buildEyelinerMask(w, h, landmarks) : blank());
+    upload(10, tex.brows, brows ? buildBrowMask(w, h, landmarks) : blank());
+    lastMaskKey = key;
+    lastHairMask = hair?.mask || null;
+    lastLipOverride = lipOverride;
+  }
 
   gl.uniform1i(loc.uFrame, 0); gl.uniform1i(loc.uFnd, 1); gl.uniform1i(loc.uBlush, 2);
   gl.uniform1i(loc.uHair, 3); gl.uniform1i(loc.uEye, 4); gl.uniform1i(loc.uLash, 5);

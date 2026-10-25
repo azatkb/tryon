@@ -28,7 +28,7 @@ export const LESSON = {
     // 'bronze' resolves to Cocoa in the palette. The old 'neutral' pick was
     // Taupe (#8A7466) at 0.45 — a grey-beige at skin luminance, which on skin
     // barely registered however the shader treated it.
-    { key: 'eyes',      region: 'eyes',       product: 'eyeshadow',  family: 'bronze',    intensity: 0.9,
+    { key: 'eyes',      region: 'eyes',       product: 'eyeshadow',  family: 'bronze',    intensity: 1,
       title: 'Define the lids',   text: 'A warm cocoa wash across the lid, blended up into the crease and out past the outer corner.' },
     { key: 'eyeliner',  region: 'eyeliner',   product: 'eyeliner',   family: null,        intensity: 0.85,
       title: 'Line the eyes',     text: 'A thin line along the upper lash line — thicker at the outer corner for a subtle wing.' },

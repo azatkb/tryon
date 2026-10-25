@@ -1,12 +1,11 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
-import { useFaceLandmarker } from './useFaceLandmarker.js';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import {
-  renderMakeup, drawLandmarks, setFeatureProtect, setRegionBlur,
+  useTryOn, glAvailable,
+  drawLandmarks, setFeatureProtect, setRegionBlur,
   buildFaceMask, buildBlushMask, buildEyeMask, buildLashMask,
   buildContourMask, buildHighlightMask, buildUnderEyeMask, buildLipMask,
   buildLipLinerMask, buildEyelinerMask, buildBrowMask,
-} from './lipRenderer.js';
-import { renderMakeupGL, glAvailable } from './webglLips.js';
+} from './tryon/index.js';
 import { ENTITIES, AREAS, entitiesByArea } from './entities.js';
 import { CATALOG } from './catalog.js';
 import { lookShade, FAMILY_HEX } from './shadeData.js';
@@ -27,28 +26,6 @@ function layerFor(region, hex, finish) {
     case 'brows':      return ['brows',     { color: hex, intensity: 0.55 }];
     default:           return null;
   }
-}
-
-// Estimate average luminance of the face region from a small sample canvas.
-const lumScratch = document.createElement('canvas');
-lumScratch.width = 32; lumScratch.height = 32;
-function estimateFaceLum(video, lms) {
-  if (!lms || lms.length < 10) return 0.5;
-  // bounding box of nose/cheek landmarks (4, 94, 323, 33, 263)
-  const idxs = [4, 94, 323, 33, 263, 1, 168];
-  let minX = 1, maxX = 0, minY = 1, maxY = 0;
-  for (const i of idxs) {
-    if (!lms[i]) continue;
-    minX = Math.min(minX, lms[i].x); maxX = Math.max(maxX, lms[i].x);
-    minY = Math.min(minY, lms[i].y); maxY = Math.max(maxY, lms[i].y);
-  }
-  const vw = video.videoWidth, vh = video.videoHeight;
-  const ctx = lumScratch.getContext('2d', { willReadFrequently: true });
-  ctx.drawImage(video, minX * vw, minY * vh, (maxX - minX) * vw, (maxY - minY) * vh, 0, 0, 32, 32);
-  const d = ctx.getImageData(0, 0, 32, 32).data;
-  let sum = 0;
-  for (let p = 0; p < d.length; p += 4) sum += 0.2126 * d[p] + 0.7152 * d[p+1] + 0.0722 * d[p+2];
-  return sum / (32 * 32 * 255);
 }
 
 // Which mask builder draws a region (for the border overlay).
@@ -84,11 +61,7 @@ const TUNE_DEFAULT = {
 const blurFor = (rk, hd) => { const [s, h] = BLUR_RANGE[rk]; return s + (h - s) * hd; };
 
 export default function DebugApp() {
-  const { landmarkerRef, ready, error } = useFaceLandmarker();
-  const videoRef = useRef(null), canvasRef = useRef(null), rafRef = useRef(0), streamRef = useRef(null);
-  const lastResRef = useRef(null), procRef = useRef(null), maskTintRef = useRef(null);
-  const faceLumRef = useRef(0.5), faceLumSmRef = useRef(0.5);
-  const [camError, setCamError] = useState(null);
+  const canvasRef = useRef(null), maskTintRef = useRef(null);
   const [useGL, setUseGL] = useState(glAvailable());
   const [borders, setBorders] = useState(false);
   const [showPoints, setShowPoints] = useState(false);
@@ -114,11 +87,12 @@ export default function DebugApp() {
     for (const rk of Object.keys(CFG_KEY)) setRegionBlur(CFG_KEY[rk], blurFor(rk, tune[rk].hd));
   }, [tune]);
 
-  // build the renderer layers from enabled, implemented entities
-  const buildLayers = useCallback(() => {
+  // Renderer layers from the enabled, implemented entities. Recomputed only
+  // when the panel changes — the engine re-reads this object every frame.
+  const layers = useMemo(() => {
     const L = {};
     for (const e of ENTITIES) {
-      if (!stateRef.current.enabled[e.id] || !IMPLEMENTED.has(e.id)) continue;
+      if (!enabled[e.id] || !IMPLEMENTED.has(e.id)) continue;
       const row = CATALOG[e.catalog];
       const picked = lookShade(row, e.family, null, null, null);
       const shade = picked.shade || (row && row.shades && row.shades[0]) || null;
@@ -126,13 +100,13 @@ export default function DebugApp() {
       const m = layerFor(e.region, hex, e.finish);
       if (m) {
         const tk = TUNE_KEY[e.id];
-        if (tk && stateRef.current.tune[tk]) m[1].intensity = stateRef.current.tune[tk].op;
+        if (tk && tune[tk]) m[1].intensity = tune[tk].op;
         L[m[0]] = m[1];
       }
     }
-    if (stateRef.current.enabled.contour) L.contour = { intensity: stateRef.current.tune.contour.op };
+    if (enabled.contour) L.contour = { intensity: tune.contour.op };
     return L;
-  }, []);
+  }, [enabled, tune]);
 
   const drawBorders = useCallback((ctx, w, h, lms) => {
     if (!maskTintRef.current) maskTintRef.current = document.createElement('canvas');
@@ -181,59 +155,24 @@ export default function DebugApp() {
     }
   }, []);
 
-  const startCamera = useCallback(async () => {
-    const fl = landmarkerRef.current;
-    if (!fl) return;
-    try {
-      await fl.setOptions({ runningMode: 'VIDEO' });
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 1920, min: 640 }, height: { ideal: 1080, min: 480 } }, audio: false });
-      streamRef.current = stream;
-      const v = videoRef.current; v.srcObject = stream; await v.play(); setCamError(null);
-      let lastTime = -1;
-      let smoothedLm = null;
-      const tick = () => {
-        rafRef.current = requestAnimationFrame(tick);
-        const cv = canvasRef.current; if (!v || !cv || v.videoWidth === 0) return;
-        if (cv.width !== v.videoWidth) { cv.width = v.videoWidth; cv.height = v.videoHeight; }
-        if (v.currentTime !== lastTime) { lastTime = v.currentTime; try { lastResRef.current = fl.detectForVideo(v, performance.now()); } catch (_) {} }
-        const raw = lastResRef.current?.faceLandmarks?.[0];
-        // EMA jitter smoothing (same as App.jsx)
-        let lms = raw;
-        if (raw) {
-          if (smoothedLm && smoothedLm.length === raw.length) {
-            const alpha = 0.25;
-            smoothedLm = raw.map((c, i) => ({ x: c.x * alpha + smoothedLm[i].x * (1 - alpha), y: c.y * alpha + smoothedLm[i].y * (1 - alpha), z: (c.z||0) * alpha + (smoothedLm[i].z||0) * (1 - alpha) }));
-          } else { smoothedLm = raw; }
-          lms = smoothedLm;
-        }
-        const ctx = cv.getContext('2d');
-        ctx.drawImage(v, 0, 0, cv.width, cv.height);
-        if (lms) {
-          // Estimate face luminance (EMA smoothed) for exposure normalisation
-          const rawLum = estimateFaceLum(v, lms);
-          faceLumSmRef.current = faceLumSmRef.current * 0.92 + rawLum * 0.08;
-          const faceLum = faceLumSmRef.current;
+  // The engine owns camera, detection, smoothing, exposure and the makeup pass.
+  // All this workbench does is blit the processed frame and draw its overlays.
+  const onFrame = useCallback(({ processed, landmarks, w, h }) => {
+    const cv = canvasRef.current;
+    if (!cv) return;
+    if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+    const ctx = cv.getContext('2d');
+    ctx.drawImage(processed, 0, 0, w, h);
+    if (!landmarks) return;
+    if (stateRef.current.borders) drawBorders(ctx, w, h, landmarks);
+    if (stateRef.current.showPoints) drawLandmarks(ctx, w, h, landmarks);
+  }, [drawBorders]);
 
-          const layers = buildLayers();
-          let done = false;
-          if (stateRef.current.useGL) {
-            const glc = renderMakeupGL(v, cv.width, cv.height, lms, { ...layers, faceLum });
-            if (glc) { ctx.drawImage(glc, 0, 0, cv.width, cv.height); done = true; }
-          }
-          if (!done) renderMakeup(ctx, cv.width, cv.height, lms, layers);
-          if (stateRef.current.borders) drawBorders(ctx, cv.width, cv.height, lms);
-          if (stateRef.current.showPoints) drawLandmarks(ctx, cv.width, cv.height, lms);
-        }
-      };
-      cancelAnimationFrame(rafRef.current); tick();
-    } catch (e) { console.error(e); setCamError(e?.message || String(e)); }
-  }, [landmarkerRef, buildLayers, drawBorders]);
-
-  useEffect(() => {
-    if (!ready) return;
-    startCamera();
-    return () => { cancelAnimationFrame(rafRef.current); const s = streamRef.current; if (s) s.getTracks().forEach((t) => t.stop()); };
-  }, [ready, startCamera]);
+  const { ready, error, camError } = useTryOn({
+    layers,
+    renderer: useGL ? 'auto' : 'canvas',
+    onFrame,
+  });
 
   const toggle = (id) => setEnabled((s) => ({ ...s, [id]: !s[id] }));
   const setAll = (val) => setEnabled((s) => { const n = { ...s }; for (const e of ENTITIES) if (IMPLEMENTED.has(e.id)) n[e.id] = val; return n; });
@@ -256,7 +195,6 @@ export default function DebugApp() {
   return (
     <div className="dbg">
       <div className="dbg-stage">
-        <video ref={videoRef} playsInline muted style={{ display: 'none' }} />
         <canvas ref={canvasRef} className="mir" />
         {!ready && !error && <div className="dbg-overlay">Loading face model…</div>}
         {error && <div className="dbg-overlay err">Model failed: {error}</div>}

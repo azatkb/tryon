@@ -791,8 +791,11 @@ function compositeLight(ctx, w, h, maskSrc, color, intensity) {
 }
 
 /**
- * Full makeup pass (Canvas). MUA order: foundation, under-eye, contour, blush,
- * highlight, hair, eyeshadow, lashes, lips. Each region optional.
+ * Full makeup pass (Canvas). True MUA order — each product goes on in the
+ * sequence it would at a counter, because what sits under what changes the
+ * result: base (foundation → concealer), sculpt (contour → blush → highlight),
+ * eyes (brows → shadow → liner → mascara), lips (liner → lipstick).
+ * Each region optional.
  */
 export function renderMakeup(ctx, w, h, landmarks, opts) {
   if (!landmarks || landmarks.length < 468) return;
@@ -832,11 +835,14 @@ export function renderMakeup(ctx, w, h, landmarks, opts) {
     buildLashMask(w, h, landmarks);
     compositeDark(ctx, w, h, lashMaskCv, '#000000', opts.lashes.intensity ?? 0.8);
   }
-  if (opts.lips) renderLips(ctx, w, h, landmarks, opts.lips);
+  // Lip liner goes DOWN FIRST, lipstick over it — that's the actual sequence.
+  // The lipstick then covers it by its own alpha, so the liner survives mostly
+  // at the lip edge (where the colour is thinnest) exactly as it does on a face.
   if (opts.lipLiner) {
     buildLipLinerMask(w, h, landmarks);
     compositeRegion(ctx, w, h, lipLinerMaskCv, { ...opts.lipLiner, finish: 'none', pigment: 0.25 });
   }
+  if (opts.lips) renderLips(ctx, w, h, landmarks, opts.lips);
 }
 
 // ---- Debug overlay: tint the ONNX segmentation mask so you can see what it predicts ----

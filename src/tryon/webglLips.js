@@ -1,7 +1,14 @@
-// WebGL makeup renderer — the production path. One fragment-shader pass, MUA order:
-// foundation, under-eye brighten, contour, blush, highlight, hair, eyeshadow,
-// lashes, lips. Luminance-preserving colour transfer keeps each region's texture;
-// an auto white-balance keeps the look consistent across warm / side lighting.
+// WebGL makeup renderer — the production path. One fragment-shader pass that
+// lays products down in true MUA order, because what sits under what changes
+// the result:
+//   base    foundation → concealer        (concealer corrects ON TOP of base)
+//   sculpt  contour → blush → highlight   (shadow first, then colour, glow last)
+//   eyes    brows → shadow → liner → mascara
+//   lips    liner → lipstick              (line first, colour over it)
+// Layers also talk to each other where they physically must: contour suppresses
+// blush and highlight in the hollow, since a surface can't be both a shadow and
+// a high point. Luminance-preserving colour transfer keeps each region's
+// texture; an auto white-balance holds the look across warm / side lighting.
 
 import { buildLipMask, buildEyeMask, buildFaceMask, buildLashMask, buildBlushMask, buildSculptPack,
          buildLipLinerMask, buildEyelinerMask, buildBrowMask } from './lipRenderer.js';
@@ -157,7 +164,8 @@ void main(){
 
   // ── CONTOUR: skin-relative darkening — multiply + desaturate, no cast ───────
   // Fades out in already-dark skin so it can't crush shadows into a hard patch.
-  float mc = sc.r * uContourInt * smoothstep(0.10, 0.38, percL(outc));
+  float contourD = sc.r * uContourInt;   // raw density, reused by blush/highlight
+  float mc = contourD * smoothstep(0.10, 0.38, percL(outc));
   if (mc > 0.001) {
     float lum = percL(outc);
     // Darken by multiplying with a neutral desaturated version → cool shadow
@@ -169,7 +177,10 @@ void main(){
   }
 
   // ── BLUSH: SSS warm flush, reduces where skin is already red ────────────────
+  // Blush is swept ABOVE the contour line, never down into the hollow — where
+  // the two masks meet it backs off, which is what stops the seam going muddy.
   float mb = feather(softA(uBlush, vUv, 9.0)) * uBlushInt * skinGate;
+  mb *= 1.0 - contourD * 0.5;
   if (mb > 0.001) {
     // Already-pink skin gets less blush — smoothstep, not clamp, so the
     // roll-off across the cheek has no visible contour line
@@ -179,7 +190,9 @@ void main(){
   }
 
   // ── HIGHLIGHT: specular + luminance gate — only bright zones catch light ─────
-  float mhi = sc.g * uHighlightInt;
+  // A surface is either a high point catching light or a hollow in shadow — it
+  // cannot be both, so contour cancels highlight where they overlap.
+  float mhi = sc.g * uHighlightInt * (1.0 - contourD * 0.8);
   if (mhi > 0.001) {
     float lum = percL(outc);
     // Wide gates: a narrow smoothstep over face luminance shows up as a banding
@@ -234,6 +247,17 @@ void main(){
     outc = mix(outc, lashCol, ml2);
   }
 
+  // ── LIP LINER: goes down BEFORE the lipstick ────────────────────────────────
+  // Lining first is the actual sequence, and it matters: the lipstick below
+  // recolours whatever is already here, so the liner reads as a deeper edge
+  // *through* the colour instead of a ring drawn on top of it.
+  float mll = aaA(uLipLiner, vUv) * uLipLinerInt;
+  if (mll > 0.001) {
+    vec3 liner = blendColor(outc, uLipLinerShade);
+    liner = mix(liner, blendMultiply(outc, uLipLinerShade * 0.9), 0.3);
+    outc = mix(outc, liner, mll);
+  }
+
   // ── LIPS: finish-aware colour with ombre edge and SSS ───────────────────────
   float lipA = feather(softA(uLip, vUv, 2.5));
   float ml = lipA * uLipInt;
@@ -263,14 +287,6 @@ void main(){
       mk = mix(mk, sssBlend(mk, uLipShade * 1.1, 0.3), 0.25);
     }
     outc = mix(outc, mk, ml);
-  }
-
-  // ── LIP LINER: crisp inner ring, slightly deeper than lip colour ─────────────
-  float mll = aaA(uLipLiner, vUv) * uLipLinerInt;
-  if (mll > 0.001) {
-    vec3 liner = blendColor(outc, uLipLinerShade);
-    liner = mix(liner, blendMultiply(outc, uLipLinerShade * 0.9), 0.3);
-    outc = mix(outc, liner, mll);
   }
 
   // ── DITHER: ±0.5/255 of noise. The soft regions are wide, shallow gradients;

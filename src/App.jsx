@@ -1,29 +1,10 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
-import { useFaceLandmarker } from './useFaceLandmarker.js';
-import { renderMakeup, drawLandmarks, drawSegMask } from './lipRenderer.js';
-import { renderMakeupGL, glAvailable } from './webglLips.js';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
+import { useTryOn, glAvailable, faceBBox, depthFromLum } from './tryon/index.js';
 import { initSegmenter, segmentLips, segmentHair, segmenterReady, resetSegmenter } from './lipSegmenter.js';
 import { PRODUCTS, EYE_SHADES, FOUNDATION_SHADES, BLUSH_SHADES, HAIR_SHADES } from './products.js';
 import { LESSON, lessonLayers, resolveStep } from './tutorials.js';
 
 const FINISHES = ['matte', 'satin', 'gloss'];
-const MOVE_THRESH = 0.0015; // per-frame face motion above this = "moving": drop the ONNX edge, follow landmarks
-const PREDICT = 1.0;        // landmark extrapolation (frames) to cancel detection latency; 0 = off
-
-// EMA landmark smoother — reduces jitter while tracking motion.
-// alpha: 0 = frozen, 1 = raw. Adaptive: faster when moving, slower when still.
-function smoothLandmarks(cur, smoothed, motion) {
-  if (!smoothed || smoothed.length !== cur.length) return cur;
-  // alpha rises with motion so the mask doesn't lag when the face turns fast
-  const alpha = Math.min(0.85, 0.18 + motion * 120);
-  const inv = 1 - alpha;
-  const out = new Array(cur.length);
-  for (let i = 0; i < cur.length; i++) {
-    const c = cur[i], s = smoothed[i];
-    out[i] = { x: c.x * alpha + s.x * inv, y: c.y * alpha + s.y * inv, z: (c.z || 0) * alpha + (s.z || 0) * inv };
-  }
-  return out;
-}
 
 // Scale every layer's intensity by one user-facing "how much makeup" factor.
 // 1.0 = the lesson's own tuned values. Clamped at 1 so pushing past 100% can't
@@ -39,56 +20,7 @@ function scaleIntensity(layers, k) {
   return out;
 }
 
-// Extrapolate landmarks along their velocity so the mask keeps up with motion
-// instead of trailing one detection behind. prev/cur are landmark arrays.
-function predictLandmarks(cur, prev, k) {
-  if (!prev || k <= 0 || prev.length !== cur.length) return cur;
-  const out = new Array(cur.length);
-  for (let i = 0; i < cur.length; i++) {
-    const c = cur[i], p = prev[i];
-    out[i] = { x: c.x + (c.x - p.x) * k, y: c.y + (c.y - p.y) * k, z: c.z };
-  }
-  return out;
-}
-
-// Estimate the user's skin depth from cheek luminance -> a word depthLevel() reads.
-function estimateDepth(source, lms, w, h, scratch) {
-  const x = scratch.getContext('2d', { willReadFrequently: true });
-  const faceW = Math.abs(lms[454].x - lms[234].x) * w;
-  const box = Math.max(4, faceW * 0.05);
-  let lum = 0, nn = 0;
-  for (const ci of [205, 425]) {
-    const px = lms[ci].x * w, py = lms[ci].y * h;
-    try {
-      x.drawImage(source, px - box / 2, py - box / 2, box, box, 0, 0, 1, 1);
-      const d = x.getImageData(0, 0, 1, 1).data;
-      lum += 0.299 * d[0] + 0.587 * d[1] + 0.114 * d[2]; nn++;
-    } catch (_) { /* ignore */ }
-  }
-  if (!nn) return null;
-  lum /= nn;
-  const depth = lum > 210 ? 'fair' : lum > 185 ? 'light' : lum > 160 ? 'light medium'
-    : lum > 135 ? 'medium' : lum > 110 ? 'medium tan' : lum > 85 ? 'tan'
-    : lum > 60 ? 'deep' : 'rich';
-  return { depth, lum: lum / 255 }; // lum 0..1 for lighting normalisation
-}
-
-// Tight-ish face box from all landmarks (normalised) -> pixel rect, with padding.
-function faceBBox(lms, w, h, pad = 0.12) {
-  let minx = 1, miny = 1, maxx = 0, maxy = 0;
-  for (const p of lms) {
-    if (p.x < minx) minx = p.x; if (p.x > maxx) maxx = p.x;
-    if (p.y < miny) miny = p.y; if (p.y > maxy) maxy = p.y;
-  }
-  const pw = (maxx - minx) * pad, ph = (maxy - miny) * pad;
-  const x = Math.max(0, minx - pw) * w, y = Math.max(0, miny - ph) * h;
-  const x1 = Math.min(1, maxx + pw) * w, y1 = Math.min(1, maxy + ph) * h;
-  return { x, y, w: x1 - x, h: y1 - y };
-}
-
 export default function App() {
-  const { landmarkerRef, ready, error } = useFaceLandmarker();
-
   const [mode, setMode] = useState('camera'); // 'camera' | 'photo'
   const [target, setTarget] = useState('lips'); // which region the controls edit
   // lips
@@ -132,29 +64,14 @@ export default function App() {
   const [segErr, setSegErr] = useState(null);
   const [segDebug, setSegDebug] = useState(false);
   const [segHasMask, setSegHasMask] = useState(false);
-  const [faceSeen, setFaceSeen] = useState(false);
-  const [camError, setCamError] = useState(null);
-
-  const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const imgRef = useRef(null);
-  const rafRef = useRef(0);
-  const streamRef = useRef(null);
-  const lastResRef = useRef(null);
   const segMaskRef = useRef(null);
   const faceBoxRef = useRef(null);
-  const srcRef = useRef(null); // current frame source (video/image) for the WebGL path
-  const procRef = useRef(null); // offscreen processed canvas (feeds the PiP)
   const pipRef = useRef(null);  // small processed preview (top-right)
   const cropRef = useRef(null); // smoothed portrait crop rect on the face
-  const sampleRef = useRef(null); // 1px scratch canvas for skin-depth sampling
-  const skinDepthRef = useRef(''); const frameCountRef = useRef(0);
-  const faceLumRef = useRef(0.5); // average face luminance (lighting normalisation)
+  const skinDepthRef = useRef('');
   const hairMaskRef = useRef(null); // latest hair segmentation mask (full frame)
-  const motionRef = useRef(0); // per-frame face motion (normalised), EMA-smoothed
-  const prevLmRef = useRef(null);   // previous few points, for the motion metric
-  const prevFullRef = useRef(null); // previous full landmark array, for extrapolation
-  const smoothedLmRef = useRef(null); // EMA-smoothed landmarks (jitter reduction)
 
   // live option values for the render loop (avoid stale closures)
   // makeup layers: driven by the lesson when running (cumulative, colours from
@@ -197,26 +114,22 @@ export default function App() {
 
   const selectProduct = useCallback((i) => { setSel(i); setFinish(PRODUCTS[i].finish); }, []);
 
-  // Apply makeup onto `ctx` (which already holds the frame). source = the frame
-  // element for the WebGL path.
-  const applyMakeup = useCallback((ctx, w, h, lms, source) => {
+  // Layers, resolved per frame. The two segmentation masks land asynchronously
+  // between React renders, so they have to be merged in here rather than in the
+  // layers object the engine would otherwise read once per render.
+  const getLayers = useCallback((metrics) => {
     const o = optsRef.current;
-    if (!lms || o.compare) return;
-    const still = motionRef.current <= MOVE_THRESH;
+    if (o.compare) return {};            // compare mode = show the bare frame
     const lips = o.lips ? { ...o.lips } : null;
-    if (lips && o.useSeg && still && segMaskRef.current) lips.overrideMask = segMaskRef.current;
-    const hair = o.hair && hairMaskRef.current ? { ...o.hair, mask: hairMaskRef.current } : null;
-    const layers = {
+    if (lips && o.useSeg && !metrics.moving && segMaskRef.current) {
+      lips.overrideMask = segMaskRef.current;
+    }
+    return {
       foundation: o.foundation, underEye: o.underEye, contour: o.contour,
       highlight: o.highlight, blush: o.blush, brows: o.brows, eyes: o.eyes,
       eyeliner: o.eyeliner, lashes: o.lashes, lipLiner: o.lipLiner, lips,
-      hair, faceLum: faceLumRef.current,
+      hair: o.hair && hairMaskRef.current ? { ...o.hair, mask: hairMaskRef.current } : null,
     };
-    if (o.useGL && source) {
-      const glc = renderMakeupGL(source, w, h, lms, layers);
-      if (glc) { ctx.drawImage(glc, 0, 0, w, h); return; }
-    }
-    renderMakeup(ctx, w, h, lms, layers); // Canvas fallback
   }, []);
 
   // Portrait crop centred on the face (face fills the frame), smoothed over time.
@@ -252,175 +165,81 @@ export default function App() {
     return { sx, sy, sw: s.sw, sh: s.sh };
   }, []);
 
-  // Big view = original (portrait-cropped on the face). Small PiP = processed, same crop.
-  const renderViews = useCallback((source, w, h, lms) => {
+  // The engine hands us the processed full frame; this is purely presentation.
+  // Big view = your bare camera, portrait-cropped on the face. Small PiP = the
+  // same crop of the processed frame, so the look builds up beside you.
+  const onFrame = useCallback(({ processed, source, landmarks, w, h }) => {
     const main = canvasRef.current;
     if (!main) return;
-    const o = optsRef.current;
 
-    // processed into an offscreen canvas (full frame)
-    let proc = procRef.current;
-    if (!proc) { proc = document.createElement('canvas'); procRef.current = proc; }
-    if (proc.width !== w || proc.height !== h) { proc.width = w; proc.height = h; }
-    const pctx = proc.getContext('2d');
-    pctx.drawImage(source, 0, 0, w, h);
-    applyMakeup(pctx, w, h, lms, source);
-
-    // portrait output size (3:4) cropped on the face
-    const outH = h, outW = Math.round(h * 0.75);
+    const outH = h, outW = Math.round(h * 0.75);   // 3:4 portrait
     if (main.width !== outW || main.height !== outH) { main.width = outW; main.height = outH; }
-    const { sx, sy, sw, sh } = computeCrop(lms, w, h, outW / outH);
+    const { sx, sy, sw, sh } = computeCrop(landmarks, w, h, outW / outH);
 
-    // big = your live camera (original), small PiP = the look (builds up on Next)
-    const bigSrc = source;
-    const pipSrc = proc;
-
-    const ctx = main.getContext('2d');
-    ctx.drawImage(bigSrc, sx, sy, sw, sh, 0, 0, outW, outH);
+    main.getContext('2d').drawImage(source, sx, sy, sw, sh, 0, 0, outW, outH);
 
     const pip = pipRef.current;
     if (pip) {
       const pw = Math.max(2, Math.round(outW * 0.42)), ph = Math.max(2, Math.round(outH * 0.42));
       if (pip.width !== pw || pip.height !== ph) { pip.width = pw; pip.height = ph; }
-      pip.getContext('2d').drawImage(pipSrc, sx, sy, sw, sh, 0, 0, pw, ph);
+      pip.getContext('2d').drawImage(processed, sx, sy, sw, sh, 0, 0, pw, ph);
     }
-  }, [applyMakeup, computeCrop]);
 
-  // ---------- CAMERA ----------
-  const startCamera = useCallback(async () => {
-    const fl = landmarkerRef.current;
-    if (!fl) return;
-    try {
-      await fl.setOptions({ runningMode: 'VIDEO' });
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user', width: { ideal: 1920, min: 640 }, height: { ideal: 1080, min: 480 } },
-        audio: false,
-      });
-      streamRef.current = stream;
-      const v = videoRef.current;
-      v.srcObject = stream;
-      await v.play();
-      setCamError(null);
-
-      let lastTime = -1;
-      const tick = () => {
-        rafRef.current = requestAnimationFrame(tick);
-        const cv = canvasRef.current;
-        if (!v || !cv || v.videoWidth === 0) return;
-        if (cv.width !== v.videoWidth) { cv.width = v.videoWidth; cv.height = v.videoHeight; }
-        // run detection only on fresh frames (decouples detect rate from draw rate)
-        if (v.currentTime !== lastTime) {
-          lastTime = v.currentTime;
-          try { lastResRef.current = fl.detectForVideo(v, performance.now()); } catch (_) {}
-        }
-        srcRef.current = v;
-        const raw = lastResRef.current?.faceLandmarks?.[0];
-        let lms = raw;
-        if (raw) {
-          // motion estimate from a few stable points (normalised coords)
-          const idxs = [1, 13, 14, 61, 291, 199];
-          const prev = prevLmRef.current;
-          if (prev) {
-            let d = 0;
-            for (const i of idxs) d += Math.hypot(raw[i].x - prev[i].x, raw[i].y - prev[i].y);
-            motionRef.current = motionRef.current * 0.35 + (d / idxs.length) * 0.65;
-          }
-          const snap = {};
-          for (const i of idxs) snap[i] = { x: raw[i].x, y: raw[i].y };
-          prevLmRef.current = snap;
-
-          // smooth away per-frame jitter (adaptive EMA — tighter when still, looser when moving)
-          const smoothed = smoothLandmarks(raw, smoothedLmRef.current, motionRef.current);
-          smoothedLmRef.current = smoothed;
-
-          // extrapolate along velocity to cancel detection latency (mask keeps up with motion)
-          lms = predictLandmarks(smoothed, prevFullRef.current, PREDICT);
-          prevFullRef.current = smoothed;
-
-          // periodically re-estimate skin depth + white balance (slow signals)
-          if ((frameCountRef.current++ % 20) === 0) {
-            if (!sampleRef.current) { sampleRef.current = document.createElement('canvas'); sampleRef.current.width = sampleRef.current.height = 1; }
-            const est = estimateDepth(v, raw, cv.width, cv.height, sampleRef.current);
-            if (est) {
-              if (est.depth !== skinDepthRef.current) { skinDepthRef.current = est.depth; setSkinDepth(est.depth); }
-              // smooth the luminance so lighting normalisation doesn't flicker
-              faceLumRef.current = faceLumRef.current * 0.7 + est.lum * 0.3;
-            }
-          }
-
-          faceBoxRef.current = faceBBox(lms, cv.width, cv.height);
-          // drop the ONNX mask the instant we move; segmentation resumes when still
-          if (motionRef.current > MOVE_THRESH && segMaskRef.current) {
-            segMaskRef.current = null; setSegHasMask(false);
-          }
-        }
-        setFaceSeen(!!raw);
-        renderViews(v, cv.width, cv.height, lms);
-      };
-      cancelAnimationFrame(rafRef.current);
-      tick();
-    } catch (e) {
-      console.error(e);
-      setCamError(e?.message || String(e));
-    }
-  }, [landmarkerRef, renderViews]);
-
-  const stopCamera = useCallback(() => {
-    cancelAnimationFrame(rafRef.current);
-    const s = streamRef.current;
-    if (s) { s.getTracks().forEach((t) => t.stop()); streamRef.current = null; }
-    if (videoRef.current) videoRef.current.srcObject = null;
-  }, []);
-
-  // ---------- PHOTO ----------
-  const detectPhoto = useCallback(async () => {
-    const fl = landmarkerRef.current;
-    const img = imgRef.current;
-    const cv = canvasRef.current;
-    if (!fl || !img || !cv || !img.naturalWidth) return;
-    await fl.setOptions({ runningMode: 'IMAGE' });
-    cv.width = img.naturalWidth;
-    cv.height = img.naturalHeight;
-    srcRef.current = img;
-    let lms = null;
-    try { lms = fl.detect(img)?.faceLandmarks?.[0]; } catch (e) { console.error(e); }
-    lastResRef.current = { faceLandmarks: lms ? [lms] : [] };
-    setFaceSeen(!!lms);
-    if (lms) {
-      if (!sampleRef.current) { sampleRef.current = document.createElement('canvas'); sampleRef.current.width = sampleRef.current.height = 1; }
-      const est = estimateDepth(img, lms, cv.width, cv.height, sampleRef.current);
-      if (est) {
-        if (est.depth !== skinDepthRef.current) { skinDepthRef.current = est.depth; setSkinDepth(est.depth); }
-        faceLumRef.current = est.lum;
+    // Skin depth drives shade resolution — re-read it from the engine's own
+    // exposure measurement rather than sampling the frame a second time.
+    if (landmarks) {
+      const d = depthFromLum(metricsRef.current.faceLum);
+      if (d !== skinDepthRef.current) { skinDepthRef.current = d; setSkinDepth(d); }
+      faceBoxRef.current = faceBBox(landmarks, w, h);
+      if (metricsRef.current.moving && segMaskRef.current) {
+        segMaskRef.current = null; setSegHasMask(false);
       }
     }
-    // segmentation for the still (if enabled and loaded)
+  }, [computeCrop]);
+
+  const {
+    ready, error, camError, faceSeen, metricsRef, videoEl, detectStill, redrawStill,
+  } = useTryOn({
+    getLayers,
+    source: mode === 'camera' ? 'camera' : 'element',
+    sourceEl: imgRef.current,
+    renderer: useGL ? 'auto' : 'canvas',
+    active: mode === 'camera',
+    onFrame,
+  });
+
+  // ---------- PHOTO ----------
+  // The engine does the detection and the makeup pass; this only adds the
+  // segmentation work, which is App-specific and too slow for the frame loop.
+  const detectPhoto = useCallback(async () => {
+    const img = imgRef.current;
+    if (!img?.naturalWidth) return;
+    const w = img.naturalWidth, h = img.naturalHeight;
+    const lms = await detectStill(img);
+
     if (optsRef.current.useSeg && segmenterReady() && lms) {
       resetSegmenter();
-      const bbox = faceBBox(lms, cv.width, cv.height);
-      try { segMaskRef.current = await segmentLips(img, bbox, cv.width, cv.height); }
+      try { segMaskRef.current = await segmentLips(img, faceBBox(lms, w, h), w, h); }
       catch (e) { console.error('[seg] inference failed:', e); segMaskRef.current = null; }
       setSegHasMask(!!segMaskRef.current);
     } else {
       segMaskRef.current = null;
       setSegHasMask(false);
     }
-    // hair segmentation for the still
+
     if (hairOn && segmenterReady()) {
-      try { hairMaskRef.current = await segmentHair(img, cv.width, cv.height); }
+      try { hairMaskRef.current = await segmentHair(img, w, h); }
       catch (e) { console.error('[hair-seg] failed:', e); hairMaskRef.current = null; }
     } else {
       hairMaskRef.current = null;
     }
-    renderViews(img, cv.width, cv.height, lms);
-  }, [landmarkerRef, renderViews, hairOn]);
+    redrawStill(img); // repaint now that the masks exist
+  }, [detectStill, redrawStill, hairOn]);
 
   const redrawPhoto = useCallback(() => {
-    const img = imgRef.current, cv = canvasRef.current;
-    if (!img || !cv || !img.naturalWidth) return;
-    srcRef.current = img;
-    renderViews(img, cv.width, cv.height, lastResRef.current?.faceLandmarks?.[0]);
-  }, [renderViews]);
+    const img = imgRef.current;
+    if (img?.naturalWidth) redrawStill(img);
+  }, [redrawStill]);
 
   const onFile = useCallback((e) => {
     const f = e.target.files?.[0];
@@ -430,13 +249,10 @@ export default function App() {
     img.src = URL.createObjectURL(f);
   }, [detectPhoto]);
 
-  // start/stop with mode + readiness
+  // leaving camera mode: repaint any photo that's already loaded
   useEffect(() => {
-    if (!ready) return;
-    if (mode === 'camera') { startCamera(); return () => stopCamera(); }
-    stopCamera();
-    redrawPhoto(); // if a photo is already loaded, repaint it
-  }, [ready, mode, startCamera, stopCamera, redrawPhoto]);
+    if (ready && mode === 'photo') redrawPhoto();
+  }, [ready, mode, redrawPhoto]);
 
   // re-render the still when controls change (camera repaints itself each frame)
   useEffect(() => {
@@ -464,17 +280,18 @@ export default function App() {
     let busy = false, stop = false;
     const id = setInterval(async () => {
       if (busy || stop) return;
-      const v = videoRef.current, cv = canvasRef.current;
-      if (!v || v.videoWidth === 0 || !cv) return;
+      const v = videoEl;
+      // full-frame dimensions, NOT the main canvas — that one is a portrait crop
+      if (!v || v.videoWidth === 0) return;
       busy = true;
       try {
-        const mask = await segmentHair(v, cv.width, cv.height);
+        const mask = await segmentHair(v, v.videoWidth, v.videoHeight);
         if (!stop && mask) hairMaskRef.current = mask;
       } catch (e) { console.error('[hair-seg] failed:', e); }
       busy = false;
     }, 250);
     return () => { stop = true; clearInterval(id); hairMaskRef.current = null; };
-  }, [hairOn, segReady, mode]);
+  }, [hairOn, segReady, mode, videoEl]);
 
   // camera: run segmentation asynchronously (throttled), independent of the draw loop
   useEffect(() => {
@@ -483,23 +300,23 @@ export default function App() {
     let busy = false, stop = false;
     const id = setInterval(async () => {
       if (busy || stop) return;
-      const v = videoRef.current, cv = canvasRef.current;
-      if (!v || v.videoWidth === 0 || !cv) return;
+      const v = videoEl;
+      if (!v || v.videoWidth === 0) return;
       // moving → release the ONNX mask immediately so the edge tracks landmarks, no lag/smear
-      if (motionRef.current > MOVE_THRESH) {
+      if (metricsRef.current.moving) {
         if (segMaskRef.current) { segMaskRef.current = null; setSegHasMask(false); resetSegmenter(); }
         return;
       }
-      // still → refine the edge with segmentation
+      // still → refine the edge with segmentation (full-frame dimensions)
       busy = true;
       try {
-        const mask = await segmentLips(v, faceBoxRef.current, cv.width, cv.height);
-        if (!stop && motionRef.current <= MOVE_THRESH && mask) { segMaskRef.current = mask; setSegHasMask(true); }
+        const mask = await segmentLips(v, faceBoxRef.current, v.videoWidth, v.videoHeight);
+        if (!stop && !metricsRef.current.moving && mask) { segMaskRef.current = mask; setSegHasMask(true); }
       } catch (e) { console.error('[seg] inference failed:', e); /* keep landmark fallback */ }
       busy = false;
     }, 150);
     return () => { stop = true; clearInterval(id); segMaskRef.current = null; setSegHasMask(false); };
-  }, [useSeg, segReady, mode]);
+  }, [useSeg, segReady, mode, videoEl, metricsRef]);
 
   // photo: re-run detection+segmentation when seg/hair is toggled or the model becomes ready
   useEffect(() => {
@@ -560,7 +377,6 @@ export default function App() {
 
       <div className="stage">
         <div className={`viewport${mirrored ? ' mir' : ''}`}>
-          <video ref={videoRef} playsInline muted style={{ display: 'none' }} />
           <img ref={imgRef} alt="" style={{ display: 'none' }} />
           <canvas ref={canvasRef} />
           <div className={`pip${lessonOn ? ' live' : ''}`}>

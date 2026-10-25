@@ -10,17 +10,19 @@ export const USER_PROFILE = { undertone: null, depth: null };
 export const LESSON = {
   title: 'Everyday Look',
   steps: [
-    // MUA order: prep skin → sculpt → colour cheeks → eyes → lashes → lips
+    // True MUA order, and the renderer lays the layers down in this same order:
+    // base (foundation → concealer) → sculpt (contour → blush → highlight)
+    // → eyes (brows → shadow → liner → mascara) → lips (liner → lipstick).
     { key: 'foundation', region: 'foundation', product: 'foundation', family: null,        intensity: 0.26,
       title: 'Even the skin',     text: 'A light layer of skin tint from the centre outward — thin layers read more like skin.' },
     { key: 'underEye',  region: 'underEye',   product: 'concealer',  family: null,        intensity: 0.55,
       title: 'Brighten under-eye', text: 'Tap a touch-lighter concealer under the eye in a triangle shape, blended down.' },
     { key: 'contour',   region: 'contour',    product: null,         family: 'contour',   intensity: 0.30,
       title: 'Sculpt the face',   text: 'A cool shadow along the hollow under the cheekbone — shadow, not a stripe. Blend well.' },
-    { key: 'highlight', region: 'highlight',  product: null,         family: 'highlight', intensity: 0.45,
-      title: 'Catch the light',   text: 'A champagne glow on the high points — wherever light naturally lands on your face.' },
     { key: 'blush',     region: 'blush',      product: 'blush',      family: 'rosy',      intensity: 0.38,
-      title: 'Add a flush',       text: 'Blush high on the cheekbone, swept toward the temple for a natural, lifted glow.' },
+      title: 'Add a flush',       text: 'Blush high on the cheekbone, just above the contour — swept toward the temple for a lifted glow.' },
+    { key: 'highlight', region: 'highlight',  product: null,         family: 'highlight', intensity: 0.45,
+      title: 'Catch the light',   text: 'Champagne glow on the high points, last of the cheek products — it sits on top of the blush, never under it.' },
     { key: 'brows',     region: 'brows',      product: 'brows',      family: 'brow',      intensity: 0.55,
       title: 'Frame the eyes',    text: 'Fill sparse spots with light feathery strokes, following the natural brow arch.' },
     { key: 'eyes',      region: 'eyes',       product: 'eyeshadow',  family: 'neutral',   intensity: 0.45,

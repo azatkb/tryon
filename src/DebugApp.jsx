@@ -14,19 +14,41 @@ import { lookShade, FAMILY_HEX } from './shadeData.js';
 // Entity region -> how it maps into the renderer's layer object.
 function layerFor(region, hex, finish) {
   switch (region) {
-    case 'lips':       return ['lips', { color: hex, intensity: 0.7, finish: finish || 'satin', lightResponse: 0.5 }];
-    case 'eyes':       return ['eyes', { color: hex, intensity: 0.5, lightResponse: 0.5 }];
-    case 'mascara':    return ['lashes', { intensity: 0.8 }];
-    case 'foundation': return ['foundation', { color: hex, intensity: 0.3 }];
-    case 'blush':      return ['blush', { color: hex, intensity: 0.4, lightResponse: 0.5 }];
-    case 'highlight':  return ['highlight', { intensity: 0.6 }];
-    case 'concealer':  return ['underEye', { intensity: 0.55 }];
-    case 'contour':    return ['contour', { intensity: 0.45 }];
-    case 'lipLiner':   return ['lipLiner', { color: hex, intensity: 0.8 }];
-    case 'eyeliner':   return ['eyeliner', { color: hex, intensity: 0.9 }];
-    case 'brows':      return ['brows', { color: hex, intensity: 0.55 }];
+    case 'lips':       return ['lips',      { color: hex, intensity: 0.60, finish: finish || 'satin', lightResponse: 0.5 }];
+    case 'eyes':       return ['eyes',      { color: hex, intensity: 0.45, lightResponse: 0.5 }];
+    case 'mascara':    return ['lashes',    { intensity: 0.80 }];
+    case 'foundation': return ['foundation',{ color: hex, intensity: 0.26 }];
+    case 'blush':      return ['blush',     { color: hex, intensity: 0.38, lightResponse: 0.5 }];
+    case 'highlight':  return ['highlight', { intensity: 0.45 }];
+    case 'concealer':  return ['underEye',  { intensity: 0.55 }];
+    case 'contour':    return ['contour',   { intensity: 0.30 }];
+    case 'lipLiner':   return ['lipLiner',  { color: hex, intensity: 0.80 }];
+    case 'eyeliner':   return ['eyeliner',  { color: hex, intensity: 0.85 }];
+    case 'brows':      return ['brows',     { color: hex, intensity: 0.55 }];
     default:           return null;
   }
+}
+
+// Estimate average luminance of the face region from a small sample canvas.
+const lumScratch = document.createElement('canvas');
+lumScratch.width = 32; lumScratch.height = 32;
+function estimateFaceLum(video, lms) {
+  if (!lms || lms.length < 10) return 0.5;
+  // bounding box of nose/cheek landmarks (4, 94, 323, 33, 263)
+  const idxs = [4, 94, 323, 33, 263, 1, 168];
+  let minX = 1, maxX = 0, minY = 1, maxY = 0;
+  for (const i of idxs) {
+    if (!lms[i]) continue;
+    minX = Math.min(minX, lms[i].x); maxX = Math.max(maxX, lms[i].x);
+    minY = Math.min(minY, lms[i].y); maxY = Math.max(maxY, lms[i].y);
+  }
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const ctx = lumScratch.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(video, minX * vw, minY * vh, (maxX - minX) * vw, (maxY - minY) * vh, 0, 0, 32, 32);
+  const d = ctx.getImageData(0, 0, 32, 32).data;
+  let sum = 0;
+  for (let p = 0; p < d.length; p += 4) sum += 0.2126 * d[p] + 0.7152 * d[p+1] + 0.0722 * d[p+2];
+  return sum / (32 * 32 * 255);
 }
 
 // Which mask builder draws a region (for the border overlay).
@@ -56,8 +78,8 @@ const BLUR_RANGE = {
 };
 // defaults: opacity (layer intensity) + hardness (0=soft .. 1=hard)
 const TUNE_DEFAULT = {
-  foundation: { op: 0.30, hd: 0.5 }, underEye: { op: 0.55, hd: 0.5 }, blush: { op: 0.40, hd: 0.5 },
-  highlight: { op: 0.60, hd: 0.5 }, contour: { op: 0.45, hd: 0.5 },
+  foundation: { op: 0.26, hd: 0.45 }, underEye: { op: 0.55, hd: 0.55 }, blush: { op: 0.38, hd: 0.40 },
+  highlight: { op: 0.45, hd: 0.50 }, contour: { op: 0.30, hd: 0.55 },
 };
 const blurFor = (rk, hd) => { const [s, h] = BLUR_RANGE[rk]; return s + (h - s) * hd; };
 
@@ -65,6 +87,7 @@ export default function DebugApp() {
   const { landmarkerRef, ready, error } = useFaceLandmarker();
   const videoRef = useRef(null), canvasRef = useRef(null), rafRef = useRef(0), streamRef = useRef(null);
   const lastResRef = useRef(null), procRef = useRef(null), maskTintRef = useRef(null);
+  const faceLumRef = useRef(0.5), faceLumSmRef = useRef(0.5);
   const [camError, setCamError] = useState(null);
   const [useGL, setUseGL] = useState(glAvailable());
   const [borders, setBorders] = useState(false);
@@ -73,10 +96,11 @@ export default function DebugApp() {
   const [tune, setTune] = useState(() => JSON.parse(JSON.stringify(TUNE_DEFAULT)));
   const [panelOpen, setPanelOpen] = useState(true);
 
-  // enabled entities (default: a sensible full face on)
+  // enabled entities (default: all implemented on for full realism)
   const [enabled, setEnabled] = useState(() => {
     const s = {};
-    for (const e of ENTITIES) s[e.id] = IMPLEMENTED.has(e.id) && ['foundation', 'blush', 'eyeshadow', 'mascara', 'lipstick'].includes(e.id);
+    for (const e of ENTITIES) s[e.id] = IMPLEMENTED.has(e.id);
+    s.contour = true;
     return s;
   });
   const stateRef = useRef({});
@@ -115,24 +139,44 @@ export default function DebugApp() {
     const t = maskTintRef.current;
     if (t.width !== w || t.height !== h) { t.width = w; t.height = h; }
     const tx = t.getContext('2d');
+    // edge-detect scratch
+    if (!maskTintRef._edge) { maskTintRef._edge = document.createElement('canvas'); }
+    const e = maskTintRef._edge;
+    if (e.width !== w || e.height !== h) { e.width = w; e.height = h; }
+    const ex = e.getContext('2d');
+
     const regions = ENTITIES
-      .filter((e) => stateRef.current.enabled[e.id] && IMPLEMENTED.has(e.id))
-      .map((e) => e.region);
+      .filter((ent) => stateRef.current.enabled[ent.id] && IMPLEMENTED.has(ent.id))
+      .map((ent) => ent.region);
     if (stateRef.current.enabled.contour) regions.push('contour');
+
     for (const region of regions) {
       const build = MASK_BUILDERS[region];
       if (!build) continue;
       const mask = region === 'lips' ? build(w, h, lms, {}) : build(w, h, lms);
+
+      // Draw mask into t, tinted with region color
       tx.clearRect(0, 0, w, h);
       tx.globalCompositeOperation = 'source-over';
       tx.drawImage(mask, 0, 0, w, h);
       tx.globalCompositeOperation = 'source-in';
       tx.fillStyle = REGION_COLOR[region] || '#fff';
       tx.fillRect(0, 0, w, h);
-      tx.globalCompositeOperation = 'source-over';
+
+      // Edge-detect: draw mask dilated then subtract original → outline only
+      ex.clearRect(0, 0, w, h);
+      ex.globalCompositeOperation = 'source-over';
+      // Dilate by drawing offset copies
+      for (const [dx, dy] of [[-2,0],[2,0],[0,-2],[0,2]]) {
+        ex.drawImage(t, dx, dy, w, h);
+      }
+      ex.globalCompositeOperation = 'destination-out';
+      ex.drawImage(t, 0, 0, w, h);
+
+      // Blit thin outline onto main ctx
       ctx.save();
-      ctx.globalAlpha = 0.4;
-      ctx.drawImage(t, 0, 0, w, h);
+      ctx.globalAlpha = 0.90;
+      ctx.drawImage(e, 0, 0, w, h);
       ctx.restore();
     }
   }, []);
@@ -146,19 +190,34 @@ export default function DebugApp() {
       streamRef.current = stream;
       const v = videoRef.current; v.srcObject = stream; await v.play(); setCamError(null);
       let lastTime = -1;
+      let smoothedLm = null;
       const tick = () => {
         rafRef.current = requestAnimationFrame(tick);
         const cv = canvasRef.current; if (!v || !cv || v.videoWidth === 0) return;
         if (cv.width !== v.videoWidth) { cv.width = v.videoWidth; cv.height = v.videoHeight; }
         if (v.currentTime !== lastTime) { lastTime = v.currentTime; try { lastResRef.current = fl.detectForVideo(v, performance.now()); } catch (_) {} }
-        const lms = lastResRef.current?.faceLandmarks?.[0];
+        const raw = lastResRef.current?.faceLandmarks?.[0];
+        // EMA jitter smoothing (same as App.jsx)
+        let lms = raw;
+        if (raw) {
+          if (smoothedLm && smoothedLm.length === raw.length) {
+            const alpha = 0.25;
+            smoothedLm = raw.map((c, i) => ({ x: c.x * alpha + smoothedLm[i].x * (1 - alpha), y: c.y * alpha + smoothedLm[i].y * (1 - alpha), z: (c.z||0) * alpha + (smoothedLm[i].z||0) * (1 - alpha) }));
+          } else { smoothedLm = raw; }
+          lms = smoothedLm;
+        }
         const ctx = cv.getContext('2d');
         ctx.drawImage(v, 0, 0, cv.width, cv.height);
         if (lms) {
+          // Estimate face luminance (EMA smoothed) for exposure normalisation
+          const rawLum = estimateFaceLum(v, lms);
+          faceLumSmRef.current = faceLumSmRef.current * 0.92 + rawLum * 0.08;
+          const faceLum = faceLumSmRef.current;
+
           const layers = buildLayers();
           let done = false;
           if (stateRef.current.useGL) {
-            const glc = renderMakeupGL(v, cv.width, cv.height, lms, layers);
+            const glc = renderMakeupGL(v, cv.width, cv.height, lms, { ...layers, faceLum });
             if (glc) { ctx.drawImage(glc, 0, 0, cv.width, cv.height); done = true; }
           }
           if (!done) renderMakeup(ctx, cv.width, cv.height, lms, layers);

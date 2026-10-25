@@ -39,6 +39,7 @@ export function useTryOn(options = {}) {
     resolution = DEFAULT_RESOLUTION,
     lumInterval = 20,         // frames between exposure re-measurements
     redrawEveryTick = false,  // true = draw on every rAF even without a new frame
+    syncToDetection = true,   // show the frame detection actually ran on (no mask drift)
     active = true,
     onFrame,
     onError,
@@ -50,12 +51,16 @@ export function useTryOn(options = {}) {
 
   // Live mirrors of the props so the rAF loop never reads a stale closure.
   const cfgRef = useRef({});
-  cfgRef.current = { layers, getLayers, renderer, smoothing, lumInterval, redrawEveryTick, onFrame };
+  cfgRef.current = {
+    layers, getLayers, renderer, smoothing, lumInterval,
+    redrawEveryTick, syncToDetection, onFrame,
+  };
 
   const videoRef = useRef(null);
   const rafRef = useRef(0);
   const streamRef = useRef(null);
   const procRef = useRef(null);       // offscreen full-frame processed canvas
+  const snapRef = useRef(null);       // frozen camera frame, shared by detect + display
   const lastResRef = useRef(null);
   const smoothedRef = useRef(null);
   const prevFullRef = useRef(null);
@@ -139,7 +144,17 @@ export function useTryOn(options = {}) {
 
     const smoothed = smoothLandmarks(raw, smoothedRef.current, m.motion, cfg.smoothing);
     smoothedRef.current = smoothed;
-    const lms = predictLandmarks(smoothed, prevFullRef.current, cfg.smoothing.predict ?? 1.0);
+
+    // Prediction only exists to cover the gap between the frame detection ran
+    // on and the frame being displayed. A frame-locked preview has no such gap
+    // — the landmarks already fit the pixels on screen exactly — so predicting
+    // would push the mask OFF a frame it currently fits, and add noise doing
+    // it. Default it off there, keep it on when showing the live element.
+    const predict = cfg.smoothing.predict
+      ?? (cfg.syncToDetection !== false ? 0 : 1.0);
+    const lms = predict > 0
+      ? predictLandmarks(smoothed, prevFullRef.current, predict)
+      : smoothed;
     prevFullRef.current = smoothed;
 
     // Exposure is a slow signal — sample it occasionally and ease into it so
@@ -185,6 +200,7 @@ export function useTryOn(options = {}) {
         const tick = () => {
           rafRef.current = requestAnimationFrame(tick);
           if (!v.videoWidth) return;
+          const cfg = cfgRef.current;
           const isFresh = v.currentTime !== lastTime;
           // A 30fps camera against a 60Hz display means half of these ticks
           // carry a video frame we have already drawn. Re-running detection,
@@ -192,11 +208,40 @@ export function useTryOn(options = {}) {
           // cheapest thing to stop doing, and nothing is lost: there is no new
           // image to show. Hosts that drive their own animation on top can set
           // redrawEveryTick to keep the old behaviour.
-          if (!isFresh && !cfgRef.current.redrawEveryTick) return;
+          if (!isFresh && !cfg.redrawEveryTick) return;
           if (isFresh) lastTime = v.currentTime;
-          const lms = trackFrame(v, isFresh);
+
+          const w = v.videoWidth, h = v.videoHeight;
+          let src = v;
+
+          // FRAME-LOCKED PREVIEW.
+          //
+          // Detecting straight off the <video> samples it at time T, but the
+          // draw that follows happens at T + however long detection took — and
+          // a live video element keeps advancing in between. When a new camera
+          // frame lands inside that window the picture on screen is NEWER than
+          // the landmarks drawn over it, and the makeup slides off the face.
+          //
+          // Freezing the frame first removes the window entirely: detection and
+          // display read the same pixels, so the mask cannot drift from the
+          // face it was computed on. The copy costs ~0.008ms, against ~6ms for
+          // one texture upload — effectively free.
+          //
+          // The trade is that the preview shows you a moment ago rather than
+          // now. For a mirror that is invisible; lipstick lagging your lip is
+          // not. Hosts that would rather have the freshest possible image can
+          // set syncToDetection: false.
+          if (cfg.syncToDetection !== false) {
+            let snap = snapRef.current;
+            if (!snap) { snap = document.createElement('canvas'); snapRef.current = snap; }
+            if (snap.width !== w || snap.height !== h) { snap.width = w; snap.height = h; }
+            if (isFresh) snap.getContext('2d').drawImage(v, 0, 0, w, h);
+            src = snap;
+          }
+
+          const lms = trackFrame(src, isFresh);
           setFaceSeen(!!lms);
-          processFrame(v, v.videoWidth, v.videoHeight, lms);
+          processFrame(src, w, h, lms);
         };
         cancelAnimationFrame(rafRef.current);
         tick();

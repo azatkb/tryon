@@ -74,9 +74,9 @@ const BLUR_RANGE = {
 };
 // defaults: opacity (layer intensity) + hardness (0=soft .. 1=hard)
 const TUNE_DEFAULT = {
-  foundation: { op: 0.26, hd: 0.45 }, underEye: { op: 0.55, hd: 0.55 }, blush: { op: 0.38, hd: 0.40 },
+  foundation: { op: 0.26, hd: 0.45 }, underEye: { op: 0.55, hd: 0.55 }, blush: { op: 1.00, hd: 1.00 },
   highlight: { op: 0.55, hd: 0.50 }, contour: { op: 0.55, hd: 0.55 },
-  eyes: { op: 0.70, hd: 0.50 },
+  eyes: { op: 1.00, hd: 1.00 },
 };
 const blurFor = (rk, hd) => { const [s, h] = BLUR_RANGE[rk]; return s + (h - s) * hd; };
 

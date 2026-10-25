@@ -53,7 +53,7 @@ const CFG = {
 
   // Diffusion must stay well under the band height (EYE_LIFT, in regions.js)
   // or it flattens the mask instead of softening its edge.
-  eyes:  { blur: 0.007,
+  eyes:  { blur: 0.003,
            outward: 0.28,  // how far the wash fans sideways near the outer corner
            tail: 0.42 },   // how far it carries PAST the outer corner, toward
                            // the temple — both as multiples of the lift
@@ -69,7 +69,7 @@ const CFG = {
 
   blush: { half: 0.17,     // sweep length (cheek apple → temple)
            width: 0.095,   // sweep thickness
-           blur: 0.013,    // soft edges — kept under the band (see contour note)
+           blur: 0.004,    // soft edges — kept under the band (see contour note)
            coreAlpha: 1.0, // centre intensity: full, so "100%" really is 100%
            haloRatio: 2.2, // halo width relative to core
            haloAlpha: 0.42 },// halo intensity (soft outer glow)

@@ -35,9 +35,19 @@ const CFG = {
 
   lips:  { blur: 0.006 },  // lip edge softness (ombre needs a little)
 
-  lipLiner: { width: 0.003, blur: 0.0015 }, // liner ring thickness / softness (thin)
+  lipLiner: { width: 0.003,      // liner ring thickness
+              blur: 0.0015,      // softness (thin)
+              lowerLift: 0.10 }, // lower-lip line pulled UP toward the mouth,
+                                 // as a fraction of lip height — real liner sits
+                                 // inside the lower edge, not on it
 
-  eyeliner: { width: 0.005, wing: 0.45, blur: 0.0012, taper: true }, // taper = thin at inner corner
+  eyeliner: { width: 0.005,
+              wing: 0.45,        // wing length, relative to eye opening
+              wingReach: 1.25,   // how far the flick travels ALONG the eye axis
+              wingLift: 0.30,    // how far it rises across that axis (keep well
+                                 // under wingReach — a wing goes out, not up)
+              blur: 0.0012,
+              taper: true },     // taper = thin at inner corner
 
   brows: { blur: 0.004 }, // brow fill edge softness
 
@@ -180,6 +190,21 @@ function fillPoly(ctx, landmarks, indices, w, h) {
 // Smooth closed outline through the landmark points (Catmull-Rom -> Bézier).
 // Straight lineTo between sparse lip points gives a jagged shape whose feather
 // bleeds onto skin ("smeared"); a smooth curve hugs the real lip edge.
+// Closed Catmull-Rom-ish curve through an arbitrary point list. Same smoothing
+// tracePath uses, but over points a caller has already adjusted.
+function traceSmooth(ctx, pts) {
+  const n = pts.length;
+  ctx.beginPath();
+  ctx.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 0; i < n; i++) {
+    const p0 = pts[(i - 1 + n) % n], p1 = pts[i], p2 = pts[(i + 1) % n], p3 = pts[(i + 2) % n];
+    const c1x = p1[0] + (p2[0] - p0[0]) / 6, c1y = p1[1] + (p2[1] - p0[1]) / 6;
+    const c2x = p2[0] - (p3[0] - p1[0]) / 6, c2y = p2[1] - (p3[1] - p1[1]) / 6;
+    ctx.bezierCurveTo(c1x, c1y, c2x, c2y, p2[0], p2[1]);
+  }
+  ctx.closePath();
+}
+
 function tracePath(ctx, landmarks, indices, w, h) {
   const pts = indices.map((i) => [landmarks[i].x * w, landmarks[i].y * h]);
   const n = pts.length;
@@ -579,18 +604,59 @@ export function buildLipLinerMask(w, h, landmarks) {
   m.clearRect(0, 0, MW, MH);
   m.filter = 'none'; // crisp outer edge — no blur
 
-  // 1. Set clip to the lip fill shape so nothing renders outside the lips.
+  // Clip to the true lip shape — a safety net so nothing can escape onto skin.
   m.save();
   tracePath(m, landmarks, LIPS_OUTER, MW, MH);
   m.clip();
 
-  // 2. Stroke at 2× desired width — the clip removes the outer half,
-  //    leaving only the inner ring hugging the lip edge.
+  const lineW = Math.max(2, MW * CFG.lipLiner.width);
+
+  // Build the path the liner actually follows. Two adjustments to the raw lip
+  // boundary, both of which is what a hand would do:
+  //
+  //  1. The whole ring is inset by half the stroke width, so the line sits
+  //     just INSIDE the lip edge at a constant thickness, instead of straddling
+  //     the boundary and being half eaten by the clip.
+  //  2. The lower-lip run is lifted further, toward the mouth line. Liner on
+  //     the bottom lip is drawn inside the natural edge, never along it.
+  const pts = LIPS_OUTER.map((i) => [landmarks[i].x * MW, landmarks[i].y * MH]);
+  const n = pts.length;
+
+  let cx = 0, cy = 0;
+  for (const [x, y] of pts) { cx += x; cy += y; }
+  cx /= n; cy /= n;
+
+  // "Up" for the mouth: bottom-lip centre -> top-lip centre. Taken from the
+  // face, so the lift follows a tilted head.
+  let upX = (landmarks[0].x - landmarks[17].x) * MW;
+  let upY = (landmarks[0].y - landmarks[17].y) * MH;
+  const lipH = Math.hypot(upX, upY) || 1;
+  upX /= lipH; upY /= lipH;
+  const lift = lipH * CFG.lipLiner.lowerLift;
+
+  // LIPS_OUTER runs upper-left -> upper-right (0..10), then lower-right ->
+  // lower-left (11..19). Only that second run is lifted, fading to nothing at
+  // the mouth corners so the ring stays a continuous closed curve.
+  const LOWER_FROM = 11, LOWER_TO = n - 1;
+  const adj = pts.map(([x, y], i) => {
+    let dx = cx - x, dy = cy - y;
+    const d = Math.hypot(dx, dy) || 1;
+    let px = x + (dx / d) * (lineW * 0.5);
+    let py = y + (dy / d) * (lineW * 0.5);
+    if (i >= LOWER_FROM && i <= LOWER_TO) {
+      const t = (i - (LOWER_FROM - 1)) / (LOWER_TO + 1 - (LOWER_FROM - 1));
+      const taper = Math.sin(Math.PI * t);   // 0 at both corners, 1 at centre
+      px += upX * lift * taper;
+      py += upY * lift * taper;
+    }
+    return [px, py];
+  });
+
   m.strokeStyle = '#fff';
   m.lineJoin = 'round';
   m.lineCap = 'round';
-  m.lineWidth = Math.max(2, MW * CFG.lipLiner.width) * 2;
-  tracePath(m, landmarks, LIPS_OUTER, MW, MH);
+  m.lineWidth = lineW;
+  traceSmooth(m, adj);
   m.stroke();
 
   m.restore();
@@ -612,7 +678,6 @@ export function buildEyelinerMask(w, h, landmarks) {
     const pts = lash.map((i) => [landmarks[i].x * MW, landmarks[i].y * MH]);
     const n = pts.length;
     const eyeH = Math.abs(landmarks[vref[0]].y - landmarks[vref[1]].y) * MH;
-    const outerDir = Math.sign(pts[0][0] - pts[n - 1][0]) || 1;
     const baseW = Math.max(1, MH * CFG.eyeliner.width);
 
     if (CFG.eyeliner.taper) {
@@ -633,17 +698,39 @@ export function buildEyelinerMask(w, h, landmarks) {
       m.stroke();
     }
 
-    // Wing: curved flick — not a straight line (real wings have a slight curve)
+    // Wing: a flick that continues the eye OUTWARD, lifting only a little.
+    //
+    // Built in the eye's own frame, not the screen's. Offsetting by screen x/y
+    // made the wing shoot up at ~40 degrees and, worse, kept pointing at the
+    // top of the screen when the head tilted. The two axes below come from the
+    // face itself, so the flick stays glued to the eye at any head angle:
+    //   ax = inner corner -> outer corner (the direction a wing travels)
+    //   ux = lower lid -> upper lid       (which way is "up" for this eye)
     const wl = eyeH * CFG.eyeliner.wing;
-    const wx = pts[0][0], wy = pts[0][1];
-    const wingTipX = wx + outerDir * wl * 0.75;
-    const wingTipY = wy - wl * 0.65;
-    const ctrlX = wx + outerDir * wl * 0.25;
-    const ctrlY = wy - wl * 0.1;
+    const inner = pts[n - 1], outer = pts[0];
+    let axX = outer[0] - inner[0], axY = outer[1] - inner[1];
+    const axLen = Math.hypot(axX, axY) || 1;
+    axX /= axLen; axY /= axLen;
+
+    let upX = (landmarks[vref[0]].x - landmarks[vref[1]].x) * MW;
+    let upY = (landmarks[vref[0]].y - landmarks[vref[1]].y) * MH;
+    const upLen = Math.hypot(upX, upY) || 1;
+    upX /= upLen; upY /= upLen;
+
+    const reach = wl * CFG.eyeliner.wingReach;
+    const lift = wl * CFG.eyeliner.wingLift;
+    const wx = outer[0], wy = outer[1];
+    const tipX = wx + axX * reach + upX * lift;
+    const tipY = wy + axY * reach + upY * lift;
+    // Control point sits most of the way along the axis with barely any lift,
+    // so the flick leaves the lash line flat and curves up only at its end.
+    const ctrlX = wx + axX * reach * 0.55 + upX * lift * 0.10;
+    const ctrlY = wy + axY * reach * 0.55 + upY * lift * 0.10;
+
     m.lineWidth = baseW;
     m.beginPath();
     m.moveTo(wx, wy);
-    m.quadraticCurveTo(ctrlX, ctrlY, wingTipX, wingTipY);
+    m.quadraticCurveTo(ctrlX, ctrlY, tipX, tipY);
     m.stroke();
   }
   m.filter = 'none';

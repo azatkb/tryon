@@ -13,22 +13,31 @@ export const LESSON = {
     // True MUA order, and the renderer lays the layers down in this same order:
     // base (foundation → concealer) → sculpt (contour → blush → highlight)
     // → eyes (brows → shadow → liner → mascara) → lips (liner → lipstick).
-    { key: 'foundation', region: 'foundation', product: 'foundation', family: null,        intensity: 0.26,
+    //
+    // Two knobs per step:
+    //   intensity  0..1  how much pigment reaches the skin
+    //   edge       0..1  how tight the region's edge is: 0 = softest wash,
+    //                    1 = hardest. Only the regions whose mask is a blurred
+    //                    sweep take it (foundation, underEye, contour, blush,
+    //                    highlight, eyes) — on a liner or a lash it would do
+    //                    nothing. Each region's actual blur range lives in
+    //                    EDGE_RANGE in tryon/lipRenderer.js.
+    { key: 'foundation', region: 'foundation', product: 'foundation', family: null,        intensity: 0.26, edge: 0.19,
       title: 'Even the skin',     text: 'A light layer of skin tint from the centre outward — thin layers read more like skin.' },
-    { key: 'underEye',  region: 'underEye',   product: 'concealer',  family: null,        intensity: 0.55,
+    { key: 'underEye',  region: 'underEye',   product: 'concealer',  family: null,        intensity: 0.55, edge: 0.64,
       title: 'Brighten under-eye', text: 'Tap a touch-lighter concealer under the eye in a triangle shape, blended down.' },
-    { key: 'contour',   region: 'contour',    product: null,         family: 'contour',   intensity: 0.15,
+    { key: 'contour',   region: 'contour',    product: null,         family: 'contour',   intensity: 0.55, edge: 0.50,
       title: 'Sculpt the face',   text: 'A cool shadow along the hollow under the cheekbone — shadow, not a stripe. Blend well.' },
-    { key: 'blush',     region: 'blush',      product: 'blush',      family: 'rosy',      intensity: 0.5,
+    { key: 'blush',     region: 'blush',      product: 'blush',      family: 'rosy',      intensity: 1.00, edge: 1.00,
       title: 'Add a flush',       text: 'Blush high on the cheekbone, just above the contour — swept toward the temple for a lifted glow.' },
-    { key: 'highlight', region: 'highlight',  product: null,         family: 'highlight', intensity: 0.55,
+    { key: 'highlight', region: 'highlight',  product: null,         family: 'highlight', intensity: 0.55, edge: 0.45,
       title: 'Catch the light',   text: 'Champagne glow on the high points, last of the cheek products — it sits on top of the blush, never under it.' },
     { key: 'brows',     region: 'brows',      product: 'brows',      family: 'brow',      intensity: 0.55,
       title: 'Frame the eyes',    text: 'Fill sparse spots with light feathery strokes, following the natural brow arch.' },
     // 'bronze' resolves to Cocoa in the palette. The old 'neutral' pick was
     // Taupe (#8A7466) at 0.45 — a grey-beige at skin luminance, which on skin
     // barely registered however the shader treated it.
-    { key: 'eyes',      region: 'eyes',       product: 'eyeshadow',  family: 'bronze',    intensity: 1.00,
+    { key: 'eyes',      region: 'eyes',       product: 'eyeshadow',  family: 'bronze',    intensity: 1.00, edge: 0.50,
       title: 'Define the lids',   text: 'A warm cocoa wash across the lid, blended up into the crease and out past the outer corner.' },
     { key: 'eyeliner',  region: 'eyeliner',   product: 'eyeliner',   family: null,        intensity: 0.85,
       title: 'Line the eyes',     text: 'A thin line along the upper lash line — thicker at the outer corner for a subtle wing.' },

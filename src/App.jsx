@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
-import { useTryOn, glAvailable, faceBBox, depthFromLum } from './tryon/index.js';
+import { useTryOn, glAvailable, faceBBox, depthFromLum, setRegionEdge } from './tryon/index.js';
 import { initSegmenter, segmentLips, segmentHair, segmenterReady, resetSegmenter } from './lipSegmenter.js';
 import { PRODUCTS, EYE_SHADES, FOUNDATION_SHADES, BLUSH_SHADES, HAIR_SHADES } from './products.js';
 import { LESSON, lessonLayers, resolveStep } from './tutorials.js';
@@ -54,6 +54,15 @@ export default function App() {
 
   // global look intensity — scales every applied layer (1 = as the lesson tuned it)
   const [lookIntensity, setLookIntensity] = useState(1);
+
+  // Push each step's `edge` into the renderer. Edge hardness is a property of
+  // the mask, not of a layer object, so it can't ride along in lessonLayers()
+  // the way intensity and colour do — it has to be set on the renderer itself.
+  useEffect(() => {
+    for (const s of LESSON.steps) {
+      if (typeof s.edge === 'number') setRegionEdge(s.region, s.edge);
+    }
+  }, []);
 
   const [lightResponse, setLightResponse] = useState(0.5);
   const [compare, setCompare] = useState(false);
@@ -259,7 +268,8 @@ export default function App() {
     if (mode === 'photo') redrawPhoto();
   }, [sel, eyeSel, eyeOn, intensity, eyeIntensity, lashOn, lashIntensity, fndSel, fndOn, fndIntensity,
       blushSel, blushOn, blushIntensity, hairSel, hairOn, hairIntensity, lightResponse, finish, compare,
-      showPoints, useGL, segDebug, lessonOn, step, skinDepth, mode, lookIntensity, redrawPhoto]);
+      showPoints, useGL, segDebug, lessonOn, step, skinDepth, mode, lookIntensity,
+      redrawPhoto]);
 
   // the segmentation model is needed for the ONNX lip-edge refine AND for hair
   const needSeg = useSeg || hairOn;

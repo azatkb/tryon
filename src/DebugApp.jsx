@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import {
   useTryOn, glAvailable,
-  drawLandmarks, setFeatureProtect, setRegionBlur,
+  drawLandmarks, setFeatureProtect, setRegionEdge,
   buildFaceMask, buildBlushMask, buildEyeMask, buildLashMask,
   buildContourMask, buildHighlightMask, buildUnderEyeMask, buildLipMask,
   buildLipLinerMask, buildEyelinerMask, buildBrowMask,
 } from './tryon/index.js';
 import { ENTITIES, AREAS, entitiesByArea } from './entities.js';
 import { CATALOG } from './catalog.js';
+import { LESSON } from './tutorials.js';
 import { lookShade, FAMILY_HEX } from './shadeData.js';
 
 // Workbench shade overrides. The catalogue's default eyeshadow is "Taupe"
@@ -58,27 +59,15 @@ const TUNE_KEY = {
   foundation: 'foundation', concealer: 'underEye', blush: 'blush',
   highlight: 'highlight', contour: 'contour', eyeshadow: 'eyes',
 };
-// tune key -> CFG key whose .blur we retune (foundation's CFG block is "face").
-const CFG_KEY = {
-  foundation: 'face', underEye: 'underEye', blush: 'blush',
-  highlight: 'highlight', contour: 'contour', eyes: 'eyes',
-};
-// edge softness range per region [soft (hardness 0), hard (hardness 1)] as blur fraction.
-// Soft end stays narrower than the band each stroke draws — a blur wider than
-// the stroke flattens the mask peak instead of just softening its edge.
-const BLUR_RANGE = {
-  foundation: [0.020, 0.004], underEye: [0.030, 0.008], blush: [0.020, 0.004],
-  highlight: [0.016, 0.005], contour: [0.032, 0.012],
-  // midpoint lands on CFG.eyes.blur (0.007), so hardness 0.5 == shipped default
-  eyes: [0.011, 0.003],
-};
-// defaults: opacity (layer intensity) + hardness (0=soft .. 1=hard)
-const TUNE_DEFAULT = {
-  foundation: { op: 0.26, hd: 0.45 }, underEye: { op: 0.55, hd: 0.55 }, blush: { op: 1.00, hd: 1.00 },
-  highlight: { op: 0.55, hd: 0.50 }, contour: { op: 0.55, hd: 0.55 },
-  eyes: { op: 1.00, hd: 0.75 },
-};
-const blurFor = (rk, hd) => { const [s, h] = BLUR_RANGE[rk]; return s + (h - s) * hd; };
+
+// Panel defaults are READ FROM THE LESSON, not kept as a second table here.
+// Two hand-maintained copies is exactly how the workbench and the tutorial
+// ended up rendering different makeup. Edit tutorials.js; this follows.
+const TUNE_DEFAULT = Object.fromEntries(
+  LESSON.steps
+    .filter((s) => typeof s.edge === 'number')
+    .map((s) => [s.region, { op: s.intensity, hd: s.edge }]),
+);
 
 export default function DebugApp() {
   const canvasRef = useRef(null), maskTintRef = useRef(null);
@@ -104,7 +93,7 @@ export default function DebugApp() {
 
   // push edge-hardness sliders into the renderer's CFG blur values
   useEffect(() => {
-    for (const rk of Object.keys(CFG_KEY)) setRegionBlur(CFG_KEY[rk], blurFor(rk, tune[rk].hd));
+    for (const rk of Object.keys(tune)) setRegionEdge(rk, tune[rk].hd);
   }, [tune]);
 
   // Renderer layers from the enabled, implemented entities. Recomputed only

@@ -31,7 +31,7 @@ export { renderMakeupGL, glAvailable } from './webglLips.js';
 export { renderMakeup, drawLandmarks, drawSegMask } from './lipRenderer.js';
 
 // Render tuning — module-level switches in the Canvas renderer.
-export { setFeatureProtect, setRegionBlur } from './lipRenderer.js';
+export { setFeatureProtect, setRegionBlur, setRegionEdge, edgeRangeFor } from './lipRenderer.js';
 
 // Mask builders, for hosts that want to inspect or overlay a region.
 export {

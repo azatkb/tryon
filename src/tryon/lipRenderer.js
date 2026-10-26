@@ -13,6 +13,40 @@ export function setFeatureProtect(v) { PROTECT = !!v; }
 export function setRegionBlur(region, frac) {
   if (CFG[region]) CFG[region].blur = frac;
 }
+
+// Layer name -> the CFG block whose blur it drives (foundation's block is "face").
+const REGION_CFG = {
+  foundation: 'face', underEye: 'underEye', blush: 'blush',
+  highlight: 'highlight', contour: 'contour', eyes: 'eyes',
+};
+
+// Edge hardness 0..1 -> blur fraction, per region. ONE table, so a lesson's
+// `edge` field and the workbench slider can't drift apart — they did, and that
+// is why debug and the tutorial kept disagreeing.
+// The soft end stays narrower than the band each region draws: past it the blur
+// no longer softens the edge, it flattens the mask and the colour disappears.
+const EDGE_RANGE = {
+  face:      [0.020, 0.004],
+  underEye:  [0.030, 0.008],
+  blush:     [0.020, 0.004],
+  highlight: [0.016, 0.005],
+  contour:   [0.032, 0.012],
+  eyes:      [0.011, 0.003],
+};
+
+/** Set a region's edge hardness: 0 = softest wash, 1 = tightest to the mask. */
+export function setRegionEdge(region, hardness) {
+  const key = REGION_CFG[region] || region;
+  const r = EDGE_RANGE[key];
+  if (!r || !CFG[key]) return;
+  const t = Math.min(1, Math.max(0, hardness));
+  CFG[key].blur = r[0] + (r[1] - r[0]) * t;
+}
+
+/** The [soft, hard] blur range for a region — for UI that shows the extremes. */
+export function edgeRangeFor(region) {
+  return EDGE_RANGE[REGION_CFG[region] || region] || null;
+}
 function cutFeatures(m, landmarks) {
   if (!PROTECT) return;
   m.save();
@@ -53,7 +87,7 @@ const CFG = {
 
   // Diffusion must stay well under the band height (EYE_LIFT, in regions.js)
   // or it flattens the mask instead of softening its edge.
-  eyes:  { blur: 0.005,
+  eyes:  { blur: 0.007,
            outward: 0.28,  // how far the wash fans sideways near the outer corner
            tail: 0.42 },   // how far it carries PAST the outer corner, toward
                            // the temple — both as multiples of the lift

@@ -76,7 +76,7 @@ const BLUR_RANGE = {
 const TUNE_DEFAULT = {
   foundation: { op: 0.26, hd: 0.45 }, underEye: { op: 0.55, hd: 0.55 }, blush: { op: 1.00, hd: 1.00 },
   highlight: { op: 0.55, hd: 0.50 }, contour: { op: 0.55, hd: 0.55 },
-  eyes: { op: 1.00, hd: 1.00 },
+  eyes: { op: 1.00, hd: 0.75 },
 };
 const blurFor = (rk, hd) => { const [s, h] = BLUR_RANGE[rk]; return s + (h - s) * hd; };
 

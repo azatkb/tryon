@@ -53,7 +53,7 @@ const CFG = {
 
   // Diffusion must stay well under the band height (EYE_LIFT, in regions.js)
   // or it flattens the mask instead of softening its edge.
-  eyes:  { blur: 0.003,
+  eyes:  { blur: 0.005,
            outward: 0.28,  // how far the wash fans sideways near the outer corner
            tail: 0.42 },   // how far it carries PAST the outer corner, toward
                            // the temple — both as multiples of the lift

@@ -26,7 +26,7 @@ export const LESSON = {
       title: 'Even the skin',     text: 'A light layer of skin tint from the centre outward — thin layers read more like skin.' },
     { key: 'underEye',  region: 'underEye',   product: 'concealer',  family: null,        intensity: 0.55, edge: 0.64,
       title: 'Brighten under-eye', text: 'Tap a touch-lighter concealer under the eye in a triangle shape, blended down.' },
-    { key: 'contour',   region: 'contour',    product: null,         family: 'contour',   intensity: 0.55, edge: 0.50,
+    { key: 'contour',   region: 'contour',    product: null,         family: 'contour',   intensity: 0.25, edge: 0.50,
       title: 'Sculpt the face',   text: 'A cool shadow along the hollow under the cheekbone — shadow, not a stripe. Blend well.' },
     { key: 'blush',     region: 'blush',      product: 'blush',      family: 'rosy',      intensity: 1.00, edge: 1.00,
       title: 'Add a flush',       text: 'Blush high on the cheekbone, just above the contour — swept toward the temple for a lifted glow.' },
@@ -37,7 +37,7 @@ export const LESSON = {
     // 'bronze' resolves to Cocoa in the palette. The old 'neutral' pick was
     // Taupe (#8A7466) at 0.45 — a grey-beige at skin luminance, which on skin
     // barely registered however the shader treated it.
-    { key: 'eyes',      region: 'eyes',       product: 'eyeshadow',  family: 'bronze',    intensity: 1.00, edge: 0.50,
+    { key: 'eyes',      region: 'eyes',       product: 'eyeshadow',  family: 'bronze',    intensity: 0.50, edge: 0.25,
       title: 'Define the lids',   text: 'A warm cocoa wash across the lid, blended up into the crease and out past the outer corner.' },
     { key: 'eyeliner',  region: 'eyeliner',   product: 'eyeliner',   family: null,        intensity: 0.85,
       title: 'Line the eyes',     text: 'A thin line along the upper lash line — thicker at the outer corner for a subtle wing.' },

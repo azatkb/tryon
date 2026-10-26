@@ -168,10 +168,24 @@ vec3 sssBlend(vec3 base, vec3 pigment, float strength){
 
 void main(){
   vec3 outc = clamp(texture2D(uFrame, vUv).rgb * uWB, 0.0, 1.0);
+  vec3 orig = outc;          // preserved for post-processing texture re-injection
   float skinL = percL(outc);
-  // Guard: never let soft makeup spill onto hair, nostrils or deep shadow —
-  // that boundary is where a hard edge would otherwise show.
-  float skinGate = smoothstep(0.05, 0.24, skinL);
+
+  // ── Exposure normalisation ──────────────────────────────────────────────
+  // uFaceLum = EMA mean luminance of the central face patch (0..1).
+  // Every makeup layer scales so the look reads consistently from bright
+  // daylight to a dim room: less pigment in shadow (contrast shrinks on
+  // dark skin), a touch more in hard light (pigment washes out otherwise).
+  float expOff = uFaceLum - 0.5;
+  float expI   = clamp(1.0 + expOff * 0.7, 0.55, 1.25);
+
+  // Skin / non-skin gate: thresholds track face brightness so that dim
+  // skin still passes and bright nostrils are still excluded.
+  float skinGate = smoothstep(
+    clamp(0.05 + expOff * 0.10, 0.01, 0.10),
+    clamp(0.24 + expOff * 0.30, 0.10, 0.40),
+    skinL
+  );
 
   // Sculpt pack: r=contour g=highlight b=under-eye.
   // These masks are built from blurred gradients — they have no hard edge to
@@ -186,7 +200,7 @@ void main(){
   float hiBloom = softRGB(uSculpt, vUv, 22.0).g * skinGate;
 
   // ── FOUNDATION: match skin tone, preserve micro-texture via soft-light ──────
-  float mf = feather(softA(uFnd, vUv, 7.0)) * uFndInt * skinGate;
+  float mf = feather(softA(uFnd, vUv, 7.0)) * uFndInt * skinGate * expI;
   if (mf > 0.001) {
     vec3 tinted = blendColor(outc, uFndShade); // hue+sat from shade, luma stays
     vec3 texd   = softLight(outc, uFndShade * 0.5 + 0.25); // texture-preserving lift
@@ -194,7 +208,7 @@ void main(){
   }
 
   // ── UNDER-EYE CONCEALER: warm lift, kills blue-grey cast ────────────────────
-  float mu = sc.b * uUnderEyeInt;
+  float mu = sc.b * uUnderEyeInt * expI;
   if (mu > 0.001) {
     float lum = percL(outc);
     // Kill cool cast first (blue-grey under-eye circles have low R, high B)
@@ -211,7 +225,7 @@ void main(){
   float contourD = sc.r * uContourInt;   // raw density, reused by blush/highlight
   // The gate exists only to spare true black (hair, nostril, deep shadow) —
   // not to fade contour inside its own hollow, which is where it belongs.
-  float mc = contourD * smoothstep(0.03, 0.16, percL(outc));
+  float mc = contourD * smoothstep(0.03 + expOff * 0.06, 0.16 + expOff * 0.20, percL(outc)) * expI;
   if (mc > 0.001) {
     float lum = percL(outc);
     vec3 shadow = blendMultiply(outc, vec3(0.52, 0.53, 0.60));
@@ -233,14 +247,14 @@ void main(){
     // the roll-off across the cheek has no visible contour line. Kept light:
     // it is a nicety, not something that should cap what the slider can reach.
     float redness = smoothstep(0.02, 0.30, outc.r - (outc.g + outc.b) * 0.5);
-    mb *= 1.0 - redness * 0.25;
+    mb *= (1.0 - redness * 0.25) * expI;
     outc = sssBlend(outc, uBlushShade, min(mb, 1.0));
   }
 
   // ── HIGHLIGHT: specular + luminance gate — only bright zones catch light ─────
   // A surface is either a high point catching light or a hollow in shadow — it
   // cannot be both, so contour cancels highlight where they overlap.
-  float mhi = sc.g * uHighlightInt * (1.0 - contourD * 0.8);
+  float mhi = sc.g * uHighlightInt * (1.0 - contourD * 0.8) * expI;
   if (mhi > 0.001 || hiBloom > 0.001) {
     float lum = percL(outc);
     // Wide gates: a narrow smoothstep over face luminance shows up as a banding
@@ -252,16 +266,16 @@ void main(){
     // Specular peak: near-white shimmer at the brightest points
     vec3 specPeak  = warmGlow + mhi * specGate * vec3(0.22, 0.20, 0.16) * 0.9;
     // Bloom: a faint warm lift spreading past the mask, gated to lit skin only
-    specPeak += hiBloom * uHighlightInt * warmGate * vec3(0.05, 0.04, 0.02);
+    specPeak += hiBloom * uHighlightInt * warmGate * vec3(0.05, 0.04, 0.02) * expI;
     outc = clamp(specPeak, 0.0, 1.0);
   }
 
   // ── HAIR ────────────────────────────────────────────────────────────────────
-  float mh = feather(softA(uHair, vUv, 4.0)) * uHairInt;
+  float mh = feather(softA(uHair, vUv, 4.0)) * uHairInt * expI;
   if (mh > 0.001) outc = mix(outc, recolour(outc, uHairShade), mh);
 
   // ── BROWS: tint with texture preservation ───────────────────────────────────
-  float mbr = aaA(uBrows, vUv) * uBrowInt;
+  float mbr = aaA(uBrows, vUv) * uBrowInt * expI;
   if (mbr > 0.001) {
     vec3 tinted = blendColor(outc, uBrowShade);
     // darken softly in addition to colour (brows have depth)
@@ -272,7 +286,7 @@ void main(){
   // ── EYESHADOW: colour blend + soft-light warmth for pigment depth ────────────
   // No feather: the lid mask is a vertical gradient, so there is no hard edge
   // to soften and feathering would only cost amplitude.
-  float me = softA(uEye, vUv, 6.0) * uEyeInt;
+  float me = softA(uEye, vUv, 6.0) * uEyeInt * expI;
   if (me > 0.001) {
     float shadeL = percL(uEyeShade);
     vec3 col  = blendColor(outc, uEyeShade);
@@ -290,7 +304,7 @@ void main(){
   }
 
   // ── EYELINER: near-black, slight texture absorption ─────────────────────────
-  float mel = aaA(uEyeliner, vUv) * uEyelinerInt;
+  float mel = aaA(uEyeliner, vUv) * uEyelinerInt * expI;
   if (mel > 0.001) {
     // multiply then push toward liner colour — keeps a hint of skin texture
     vec3 liner = blendMultiply(outc, uEyelinerShade * 0.4);
@@ -299,7 +313,7 @@ void main(){
   }
 
   // ── MASCARA LASHES: pure black overlay, feathered alpha ─────────────────────
-  float ml2 = aaA(uLash, vUv) * uLashInt;
+  float ml2 = aaA(uLash, vUv) * uLashInt * expI;
   if (ml2 > 0.001) {
     // Tiny desaturated version of underlying skin leaked through for anti-aliasing
     vec3 lashCol = mix(vec3(0.04, 0.03, 0.04), outc * 0.08, 0.12);
@@ -310,7 +324,7 @@ void main(){
   // Lining first is the actual sequence, and it matters: the lipstick below
   // recolours whatever is already here, so the liner reads as a deeper edge
   // *through* the colour instead of a ring drawn on top of it.
-  float mll = aaA(uLipLiner, vUv) * uLipLinerInt;
+  float mll = aaA(uLipLiner, vUv) * uLipLinerInt * expI;
   if (mll > 0.001) {
     vec3 liner = blendColor(outc, uLipLinerShade);
     liner = mix(liner, blendMultiply(outc, uLipLinerShade * 0.9), 0.3);
@@ -319,7 +333,7 @@ void main(){
 
   // ── LIPS: finish-aware colour with ombre edge and SSS ───────────────────────
   float lipA = feather(softA(uLip, vUv, 2.5));
-  float ml = lipA * uLipInt;
+  float ml = lipA * uLipInt * expI;
   if (ml > 0.001) {
     float lum = percL(outc);
     vec3 mk = recolour(outc, uLipShade);
@@ -348,8 +362,32 @@ void main(){
     outc = mix(outc, mk, ml);
   }
 
-  // ── DITHER: ±0.5/255 of noise. The soft regions are wide, shallow gradients;
-  // at 8 bit they quantise into visible contour rings. This dissolves them.
+  // ── POST-PROCESSING: unify synthetic masks with camera texture ──────────
+  // Makeup gradients are clean and synthetic; the camera feed has sensor
+  // grain, pore texture and micro-contrast.  Without reconciliation the
+  // made-up areas read as airbrushed against the untouched skin.
+
+  // 1. Skin micro-texture re-injection
+  //    High-pass the original frame (3×3 Gaussian blur subtracted from the
+  //    raw sample) to isolate pores, grain and fine wrinkles.  Lay it back
+  //    on top of the makeup, proportional to how much the pixel actually
+  //    changed — untouched skin gets zero extra, heavy makeup gets full
+  //    texture so it never looks plastic.
+  vec3 origLow = clamp(softRGB(uFrame, vUv, 3.0) * uWB, 0.0, 1.0);
+  vec3 detail  = orig - origLow;
+  float delta  = clamp(length(outc - orig) * 5.0, 0.0, 1.0);
+  outc += detail * delta * 0.7;
+
+  // 2. Camera-matched grain
+  //    Sensor noise is heavier in shadows (high ISO / low-light regions).
+  //    The hash seed includes uFaceLum, which shifts slightly each frame,
+  //    so the grain pattern never freezes into a static texture.
+  float grain    = hash21(vUv * 768.0 + fract(uFaceLum * 137.0)) - 0.5;
+  float grainAmt = mix(0.010, 0.003, clamp(skinL * 1.5, 0.0, 1.0));
+  outc += grain * grainAmt;
+
+  // 3. Anti-banding dither (targets gradient quantisation steps, not film
+  //    grain — the two operate at different spatial frequencies).
   float d = (hash21(vUv * 1024.0 + fract(uFaceLum * 97.0)) - 0.5) * 0.0039;
   gl_FragColor = vec4(clamp(outc + d, 0.0, 1.0), 1.0);
 }`;

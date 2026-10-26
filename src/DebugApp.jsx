@@ -77,6 +77,7 @@ export default function DebugApp() {
   const [protect, setProtect] = useState(true);
   const [tune, setTune] = useState(() => JSON.parse(JSON.stringify(TUNE_DEFAULT)));
   const [panelOpen, setPanelOpen] = useState(true);
+  const [cinema, setCinema] = useState(0);
 
   // enabled entities (default: all implemented on for full realism)
   const [enabled, setEnabled] = useState(() => {
@@ -115,8 +116,9 @@ export default function DebugApp() {
       }
     }
     if (enabled.contour) L.contour = { intensity: tune.contour.op };
+    L.cinema = cinema;
     return L;
-  }, [enabled, tune]);
+  }, [enabled, tune, cinema]);
 
   const drawBorders = useCallback((ctx, w, h, lms) => {
     if (!maskTintRef.current) maskTintRef.current = document.createElement('canvas');
@@ -253,6 +255,9 @@ export default function DebugApp() {
           <label className="dbg-row"><input type="checkbox" checked={showPoints} onChange={(e) => setShowPoints(e.target.checked)} /> Mesh points</label>
           <label className="dbg-row"><input type="checkbox" checked={protect} onChange={(e) => setProtect(e.target.checked)} /> Protect features (nose/eyes/lips/brows)</label>
           <label className="dbg-row"><input type="checkbox" checked={useGL} disabled={!glAvailable()} onChange={(e) => setUseGL(e.target.checked)} /> WebGL render</label>
+          <label className="dbg-row" style={{marginTop:6}}>
+            Cinema <input type="range" min="0" max="1" step="0.01" value={cinema} onChange={(e) => setCinema(+e.target.value)} style={{width:90,verticalAlign:'middle'}} /> {cinema.toFixed(2)}
+          </label>
         </div>}
       </div>
     </div>

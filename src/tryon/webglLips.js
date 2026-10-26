@@ -63,7 +63,7 @@ uniform sampler2D uFrame, uFnd, uBlush, uHair, uEye, uLash, uLip, uSculpt, uLipL
 uniform vec3 uFndShade, uBlushShade, uHairShade, uEyeShade, uLipShade, uWB, uLipLinerShade, uEyelinerShade, uBrowShade;
 uniform float uFndInt, uBlushInt, uHairInt, uEyeInt, uLashInt, uLipInt;
 uniform float uContourInt, uHighlightInt, uUnderEyeInt, uLipLinerInt, uEyelinerInt, uBrowInt;
-uniform float uLight, uFinish, uFaceLum;
+uniform float uLight, uFinish, uFaceLum, uCinema;
 uniform vec2 uTexel;   // 1/w, 1/h — for multi-tap mask feathering
 
 // ── MASK FEATHERING ─────────────────────────────────────────────────────────
@@ -378,15 +378,51 @@ void main(){
   float delta  = clamp(length(outc - orig) * 5.0, 0.0, 1.0);
   outc += detail * delta * 0.7;
 
-  // 2. Camera-matched grain
+  // 2. Cinematic look (uCinema 0..1 — off to full)
+  //    Lift-gamma-gain colour grade, S-curve contrast, soft bloom on
+  //    bright skin, vignette. All one pass, no extra textures.
+  if (uCinema > 0.001) {
+    float ci = uCinema;
+
+    // ── Lift / Gamma / Gain ──
+    // Warm shadows (lift), neutral mids (gamma), cool-warm highlights (gain).
+    vec3 lifted = outc + vec3(0.020, 0.012, 0.005) * ci;       // warm amber lift
+    vec3 gained = lifted * (1.0 + vec3(0.03, 0.01, -0.02) * ci); // gain: warm highs
+    // Gamma nudge — push midtones slightly warm
+    outc = pow(max(gained, 0.0), vec3(1.0 - 0.04 * ci, 1.0 - 0.02 * ci, 1.0 + 0.01 * ci));
+
+    // ── S-curve contrast ──
+    // Pegtop soft-light of the image on itself = classic S-curve.  Blend is
+    // subtle so skin tones stay natural and shadow detail isn't crushed.
+    vec3 sCurve = 2.0 * outc * outc * (3.0 - 2.0 * outc);  // smoothstep polynomial
+    outc = mix(outc, sCurve, 0.22 * ci);
+
+    // ── Soft bloom on bright zones ──
+    // A wide Gaussian of the original frame gives the glow; gated to bright
+    // pixels so it reads as lens diffusion, not fog.
+    vec3 bloom = clamp(softRGB(uFrame, vUv, 18.0) * uWB, 0.0, 1.0);
+    float bloomGate = smoothstep(0.50, 0.85, percL(bloom));
+    outc += bloom * bloomGate * 0.08 * ci;
+
+    // ── Vignette ──
+    // Darkens corners, keeps the face centred.  Elliptical so it works on
+    // both portrait and landscape aspect ratios.
+    vec2 vc = vUv - 0.5;
+    float vignette = 1.0 - smoothstep(0.35, 0.95, length(vc * vec2(1.1, 1.0)));
+    outc *= mix(1.0, vignette, 0.35 * ci);
+  }
+
+  // 3. Camera-matched grain
   //    Sensor noise is heavier in shadows (high ISO / low-light regions).
   //    The hash seed includes uFaceLum, which shifts slightly each frame,
   //    so the grain pattern never freezes into a static texture.
+  //    With cinema on, grain is scaled up toward a 35mm film look.
   float grain    = hash21(vUv * 768.0 + fract(uFaceLum * 137.0)) - 0.5;
-  float grainAmt = mix(0.010, 0.003, clamp(skinL * 1.5, 0.0, 1.0));
+  float grainBase = mix(0.010, 0.003, clamp(skinL * 1.5, 0.0, 1.0));
+  float grainAmt  = grainBase * (1.0 + uCinema * 1.2);   // heavier grain in cinema mode
   outc += grain * grainAmt;
 
-  // 3. Anti-banding dither (targets gradient quantisation steps, not film
+  // 4. Anti-banding dither (targets gradient quantisation steps, not film
   //    grain — the two operate at different spatial frequencies).
   float d = (hash21(vUv * 1024.0 + fract(uFaceLum * 97.0)) - 0.5) * 0.0039;
   gl_FragColor = vec4(clamp(outc + d, 0.0, 1.0), 1.0);
@@ -442,7 +478,7 @@ function initGL() {
                    'uFndShade','uBlushShade','uHairShade','uEyeShade','uLipShade','uWB','uLipLinerShade','uEyelinerShade','uBrowShade',
                    'uFndInt','uBlushInt','uHairInt','uEyeInt','uLashInt','uLipInt',
                    'uContourInt','uHighlightInt','uUnderEyeInt','uLipLinerInt','uEyelinerInt','uBrowInt',
-                   'uLight','uFinish','uFaceLum','uTexel']) {
+                   'uLight','uFinish','uFaceLum','uCinema','uTexel']) {
     loc[u] = gl.getUniformLocation(prog, u);
   }
   tex = { frame: makeTex(), fnd: makeTex(), blush: makeTex(), hair: makeTex(), eye: makeTex(), lash: makeTex(), lip: makeTex(), sculpt: makeTex(), lipLiner: makeTex(), eyeliner: makeTex(), brows: makeTex() };
@@ -553,6 +589,7 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
   gl.uniform1f(loc.uLight, (lips?.lightResponse ?? eyes?.lightResponse ?? 0.5));
   gl.uniform1f(loc.uFinish, FINISH_CODE[lips?.finish] ?? 1);
   gl.uniform1f(loc.uFaceLum, typeof opts.faceLum === 'number' ? opts.faceLum : 0.5);
+  gl.uniform1f(loc.uCinema, typeof opts.cinema === 'number' ? opts.cinema : 0);
   gl.uniform2f(loc.uTexel, 1 / w, 1 / h);
 
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);

@@ -8,7 +8,7 @@ import {
 } from './tryon/index.js';
 import { ENTITIES, AREAS, entitiesByArea } from './entities.js';
 import { CATALOG } from './catalog.js';
-import { LESSON } from './tutorials.js';
+import { LESSON, LESSONS } from './tutorials.js';
 import { lookShade, FAMILY_HEX } from './shadeData.js';
 
 // Workbench shade overrides. The catalogue's default eyeshadow is "Taupe"
@@ -24,10 +24,10 @@ const SHADE_OVERRIDE = {
 function layerFor(region, hex, finish) {
   switch (region) {
     case 'lips':       return ['lips',      { color: hex, intensity: 0.60, finish: finish || 'satin', lightResponse: 0.5 }];
-    case 'eyes':       return ['eyes',      { color: hex, intensity: 0.70, lightResponse: 0.5 }];
+    case 'eyes':       return ['eyes',      { color: hex, intensity: 0.70, finish: finish || 'satin', lightResponse: 0.5 }];
     case 'mascara':    return ['lashes',    { intensity: 0.80 }];
-    case 'foundation': return ['foundation',{ color: hex, intensity: 0.26 }];
-    case 'blush':      return ['blush',     { color: hex, intensity: 0.38, lightResponse: 0.5 }];
+    case 'foundation': return ['foundation',{ color: hex, intensity: 0.26, finish: finish || 'natural' }];
+    case 'blush':      return ['blush',     { color: hex, intensity: 0.38, finish: finish || 'powder', lightResponse: 0.5 }];
     case 'highlight':  return ['highlight', { intensity: 0.55 }];
     case 'concealer':  return ['underEye',  { intensity: 0.55 }];
     case 'contour':    return ['contour',   { intensity: 0.55 }];
@@ -78,6 +78,9 @@ export default function DebugApp() {
   const [tune, setTune] = useState(() => JSON.parse(JSON.stringify(TUNE_DEFAULT)));
   const [panelOpen, setPanelOpen] = useState(true);
   const [cinema, setCinema] = useState(0);
+  const [eyeFinish, setEyeFinish] = useState('satin');
+  const [fndFinish, setFndFinish] = useState('natural');
+  const [blushFinish, setBlushFinish] = useState('powder');
 
   // enabled entities (default: all implemented on for full realism)
   const [enabled, setEnabled] = useState(() => {
@@ -116,9 +119,13 @@ export default function DebugApp() {
       }
     }
     if (enabled.contour) L.contour = { intensity: tune.contour.op };
+    // Override finishes from panel selectors
+    if (L.eyes) L.eyes.finish = eyeFinish;
+    if (L.foundation) L.foundation.finish = fndFinish;
+    if (L.blush) L.blush.finish = blushFinish;
     L.cinema = cinema;
     return L;
-  }, [enabled, tune, cinema]);
+  }, [enabled, tune, cinema, eyeFinish, fndFinish, blushFinish]);
 
   const drawBorders = useCallback((ctx, w, h, lms) => {
     if (!maskTintRef.current) maskTintRef.current = document.createElement('canvas');
@@ -257,6 +264,21 @@ export default function DebugApp() {
           <label className="dbg-row"><input type="checkbox" checked={useGL} disabled={!glAvailable()} onChange={(e) => setUseGL(e.target.checked)} /> WebGL render</label>
           <label className="dbg-row" style={{marginTop:6}}>
             Cinema <input type="range" min="0" max="1" step="0.01" value={cinema} onChange={(e) => setCinema(+e.target.value)} style={{width:90,verticalAlign:'middle'}} /> {cinema.toFixed(2)}
+          </label>
+          <label className="dbg-row">
+            Foundation <select value={fndFinish} onChange={(e) => setFndFinish(e.target.value)} style={{marginLeft:4}}>
+              <option value="matte">Matte</option><option value="natural">Natural</option><option value="dewy">Dewy</option>
+            </select>
+          </label>
+          <label className="dbg-row">
+            Eyeshadow <select value={eyeFinish} onChange={(e) => setEyeFinish(e.target.value)} style={{marginLeft:4}}>
+              <option value="matte">Matte</option><option value="satin">Satin</option><option value="shimmer">Shimmer</option>
+            </select>
+          </label>
+          <label className="dbg-row">
+            Blush <select value={blushFinish} onChange={(e) => setBlushFinish(e.target.value)} style={{marginLeft:4}}>
+              <option value="powder">Powder</option><option value="cream">Cream</option>
+            </select>
           </label>
         </div>}
       </div>

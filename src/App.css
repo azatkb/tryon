@@ -208,6 +208,10 @@ input[type=range]::-moz-range-thumb { width: 18px; height: 18px; border-radius: 
 .lesson-progress .seg.on { background: var(--grad); }
 .lesson-title { font-family: var(--f-head); font-style: italic; font-weight: 400; font-size: clamp(1.9rem, 7vw, 2.6rem); line-height: 1.04; margin: 4px 0 0; color: var(--primary); }
 .lesson-desc { margin: 0 auto; max-width: 42ch; font-size: .98rem; line-height: 1.45; color: var(--muted); }
+.lesson-picker { display: flex; gap: 6px; justify-content: center; flex-wrap: wrap; margin-top: 4px; }
+.lp-btn { padding: 5px 14px; border-radius: 20px; border: 1px solid var(--line-strong); background: var(--surface-2); color: var(--muted); font-size: .78rem; font-weight: 600; cursor: pointer; font-family: var(--f-body); transition: all .15s; }
+.lp-btn.on { background: var(--grad); color: #fff; border-color: transparent; box-shadow: 0 2px 8px rgba(194,24,91,.25); }
+.lp-btn:not(.on):hover { border-color: var(--primary-2); color: var(--fg); }
 
 .app.lesson .viewport { border: 3px solid var(--primary-2); box-shadow: 0 0 0 4px rgba(224,96,140,.18), 0 10px 30px rgba(194,24,91,.2); }
 
@@ -276,6 +280,7 @@ input[type=range]::-moz-range-thumb { width: 18px; height: 18px; border-radius: 
   text-transform: uppercase; color: var(--faint);
 }
 .li-scale .li-mid { position: absolute; left: 66.7%; transform: translateX(-50%); }
+
 .lesson-nav .round.close { color: var(--muted); }
 
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }

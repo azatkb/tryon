@@ -13,6 +13,10 @@ export const TUTORIAL_SHADE_FAMILY = {
   'make-it-last-all-night': { lip: 'berry', cheek: 'rosy', bronze: 'bronze' },
   'contour-without-the-confusion': { bronze: 'bronze', contour: 'contour' },
   'make-those-eyes-pop': { eye: 'neutral', shimmer: 'champagne' },
+  // Lessons added for the multi-tutorial set
+  'soft-glam':     { lip: 'berry', cheek: 'peach', eye: 'champagne', glow: 'champagne', contour: 'contour' },
+  'no-makeup':     { lip: 'pink-nude', cheek: 'peach', glow: 'champagne' },
+  'bold-red-lip':  { lip: 'red', cheek: 'rosy', eye: 'neutral', glow: 'champagne', contour: 'contour' },
 };
 
 export function shadeFamilyFor(tipId, label) {

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { useTryOn, glAvailable, faceBBox, depthFromLum, setRegionEdge } from './tryon/index.js';
 import { initSegmenter, segmentLips, segmentHair, segmenterReady, resetSegmenter } from './lipSegmenter.js';
 import { PRODUCTS, EYE_SHADES, FOUNDATION_SHADES, BLUSH_SHADES, HAIR_SHADES } from './products.js';
-import { LESSON, lessonLayers, resolveStep } from './tutorials.js';
+import { LESSON, LESSONS, lessonLayers, resolveStep } from './tutorials.js';
 
 const FINISHES = ['matte', 'satin', 'gloss'];
 
@@ -47,22 +47,25 @@ export default function App() {
   const [hairOn, setHairOn] = useState(false);
   const [hairIntensity, setHairIntensity] = useState(0.7);
 
-  // lesson mode (single 5-step guided look) — this is the whole app
+  // lesson mode (guided look) — this is the whole app
   const [lessonOn] = useState(true);
+  const [lessonIdx, setLessonIdx] = useState(0);
   const [step, setStep] = useState(0);
   const [skinDepth, setSkinDepth] = useState(''); // auto-estimated for deep-skin-aware shades
 
   // global look intensity — scales every applied layer (1 = as the lesson tuned it)
   const [lookIntensity, setLookIntensity] = useState(1);
 
+  const activeLesson = LESSONS[lessonIdx] || LESSON;
+
   // Push each step's `edge` into the renderer. Edge hardness is a property of
   // the mask, not of a layer object, so it can't ride along in lessonLayers()
   // the way intensity and colour do — it has to be set on the renderer itself.
   useEffect(() => {
-    for (const s of LESSON.steps) {
+    for (const s of activeLesson.steps) {
       if (typeof s.edge === 'number') setRegionEdge(s.region, s.edge);
     }
-  }, []);
+  }, [activeLesson]);
 
   const [lightResponse, setLightResponse] = useState(0.5);
   const [compare, setCompare] = useState(false);
@@ -88,7 +91,7 @@ export default function App() {
   const profile = { undertone: null, depth: skinDepth || null };
   let L;
   if (lessonOn) {
-    const m = lessonLayers(step, profile);
+    const m = lessonLayers(step, profile, activeLesson);
     L = {
       foundation: m.foundation || null,
       underEye:   m.underEye   || null,
@@ -360,20 +363,30 @@ export default function App() {
   const activePal = palettes[target];
   const activeShade = activePal ? activePal[palSel[target]].shade : 'lashes';
 
-  const lessonStep = LESSON.steps[step];
-  const isFinal = step === LESSON.steps.length - 1;
-  const stepProduct = resolveStep(step, profile).product;
+  const lessonStep = activeLesson.steps[step];
+  const isFinal = step === activeLesson.steps.length - 1;
+  const stepProduct = resolveStep(step, profile, activeLesson).product;
 
   return (
     <div className={`app${lessonOn ? ' lesson' : ''}`}>
       {lessonOn ? (
         <div className="lesson-head">
-          <p className="lesson-eyebrow">{isFinal ? 'Final step' : `Step ${step + 1} of ${LESSON.steps.length}`}</p>
+          <p className="lesson-eyebrow">{isFinal ? 'Final step' : `Step ${step + 1} of ${activeLesson.steps.length}`}</p>
           <div className="lesson-progress">
-            {LESSON.steps.map((_, i) => <span key={i} className={`seg${i <= step ? ' on' : ''}`} />)}
+            {activeLesson.steps.map((_, i) => <span key={i} className={`seg${i <= step ? ' on' : ''}`} />)}
           </div>
           <h1 className="lesson-title">{lessonStep.title}</h1>
           <p className="lesson-desc">{lessonStep.text}</p>
+          {LESSONS.length > 1 && (
+            <div className="lesson-picker">
+              {LESSONS.map((ls, i) => (
+                <button key={i} className={`lp-btn${i === lessonIdx ? ' on' : ''}`}
+                  onClick={() => { setLessonIdx(i); setStep(0); }}>
+                  {ls.title}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       ) : (
         <header>

@@ -6,6 +6,11 @@ import { EYE_R_LASH, EYE_L_LASH, EYE_R_V, EYE_L_V, EYE_LIFT,
 // When on, face-area makeup (blush, contour, highlight, concealer, foundation)
 // is cut away where it overlaps protected features (eyes, nose, lips, brows).
 let PROTECT = true;
+
+// Hysteresis for the inner-lip cutout: once the mouth-open cutout is active,
+// keep it on until the gap drops well below the activation threshold, so a
+// mouth hovering near 8% open doesn't flicker the cutout on and off.
+let _lipCutoutActive = false;
 export function setFeatureProtect(v) { PROTECT = !!v; }
 
 // Runtime override for a region's edge softness (blur fraction of mask width).
@@ -47,6 +52,37 @@ export function setRegionEdge(region, hardness) {
 export function edgeRangeFor(region) {
   return EDGE_RANGE[REGION_CFG[region] || region] || null;
 }
+// Per-eye foreshortening: how much each eye is compressed by head rotation.
+// Returns [ratioR, ratioL] where 1 = frontal (full width), <1 = foreshortened.
+// The narrower eye is the far one; its inner corner (nose side) should tuck in.
+// Eye perspective: ratio of each eye's apparent width to the wider one.
+// Called multiple times per frame (eyeshadow, eyeliner, lashes) — cached
+// per landmarks reference so the result is consistent within a frame.
+// Rate-limited: max 0.08 change per frame to kill jitter without adding lag.
+let _perspPrev = null;
+let _perspCached = null;
+let _perspRef = null;
+const PERSP_MAX_STEP = 0.08;
+
+function eyePerspective(landmarks) {
+  if (landmarks === _perspRef && _perspCached) return _perspCached;
+  _perspRef = landmarks;
+
+  const wR = Math.abs(landmarks[33].x - landmarks[133].x);
+  const wL = Math.abs(landmarks[263].x - landmarks[362].x);
+  const maxW = Math.max(wR, wL, 0.001);
+  let rR = wR / maxW, rL = wL / maxW;
+  if (_perspPrev) {
+    // Clamp per-frame change — kills jitter, follows real turns instantly
+    const dR = rR - _perspPrev[0], dL = rL - _perspPrev[1];
+    rR = _perspPrev[0] + Math.max(-PERSP_MAX_STEP, Math.min(PERSP_MAX_STEP, dR));
+    rL = _perspPrev[1] + Math.max(-PERSP_MAX_STEP, Math.min(PERSP_MAX_STEP, dL));
+  }
+  _perspPrev = [rR, rL];
+  _perspCached = [rR, rL];
+  return _perspCached;
+}
+
 function cutFeatures(m, landmarks) {
   if (!PROTECT) return;
   m.save();
@@ -276,10 +312,48 @@ export function buildLipMask(w, h, landmarks, opts = {}) {
   m.filter = 'none';
   const gap = Math.abs(landmarks[14].y - landmarks[13].y);
   const lipW = Math.abs(landmarks[291].x - landmarks[61].x);
-  if (lipW > 0 && gap / lipW > 0.08) {
+  // Hysteresis: activate at 8%, deactivate at 5% — avoids flicker near threshold
+  const ratio = lipW > 0 ? gap / lipW : 0;
+  _lipCutoutActive = ratio > (_lipCutoutActive ? 0.05 : 0.08);
+  if (_lipCutoutActive) {
+    // The mouth-opening cutout must never punch through the lip fill.
+    // LIPS_INNER landmarks don't perfectly nest inside LIPS_OUTER (the real
+    // lip shape is more complex than 20 sparse points can capture), so we
+    // build the cutout as the INTERSECTION of:
+    //   A) the LIPS_INNER path (the actual mouth opening), and
+    //   B) a heavily-shrunk LIPS_OUTER path (the maximum safe cutout).
+    // This way the cutout can never extend past the safe zone no matter how
+    // the inner landmarks misbehave — the shrunk outer acts as a hard clamp.
+
+    // Step 1: draw LIPS_INNER (the mouth opening) onto a temp canvas
+    const tc = refineCv.getContext('2d');
+    tc.setTransform(1, 0, 0, 1, 0, 0);
+    tc.clearRect(0, 0, MW, MH);
+    tc.fillStyle = '#fff';
+    tc.filter = `blur(${Math.max(1, blur * 0.5)}px)`;
+    tracePath(tc, landmarks, LIPS_INNER, MW, MH);
+    tc.fill();
+
+    // Step 2: intersect with shrunk LIPS_OUTER — guarantees minimum lip thickness
+    const outerPts = LIPS_OUTER.map((i) => [landmarks[i].x * MW, landmarks[i].y * MH]);
+    let ocx = 0, ocy = 0;
+    for (const [x, y] of outerPts) { ocx += x; ocy += y; }
+    ocx /= outerPts.length; ocy /= outerPts.length;
+    // Shrink outer by 25% — leaves a guaranteed lip-paint band around the mouth
+    const safeInset = 0.25;
+    const safePts = outerPts.map(([x, y]) => [
+      x + (ocx - x) * safeInset,
+      y + (ocy - y) * safeInset,
+    ]);
+    tc.globalCompositeOperation = 'destination-in';
+    tc.filter = 'none';
+    traceSmooth(tc, safePts);
+    tc.fill();
+    tc.globalCompositeOperation = 'source-over';
+
+    // Step 3: use the clamped cutout to erase from the lip mask
     m.globalCompositeOperation = 'destination-out';
-    tracePath(m, landmarks, LIPS_INNER, MW, MH);
-    m.fill();
+    m.drawImage(refineCv, 0, 0);
     m.globalCompositeOperation = 'source-over';
   }
   if (opts.overrideMask) {
@@ -304,7 +378,8 @@ export function buildEyeMask(w, h, landmarks) {
   m.setTransform(1, 0, 0, 1, 0, 0);
   m.clearRect(0, 0, MW, MH);
   m.filter = `blur(${Math.max(2, MW * CFG.eyes.blur)}px)`;
-  for (const [lash, vref] of [[EYE_R_LASH, EYE_R_V], [EYE_L_LASH, EYE_L_V]]) {
+  const [perspR, perspL] = eyePerspective(landmarks);
+  for (const [lash, vref, persp] of [[EYE_R_LASH, EYE_R_V, perspR], [EYE_L_LASH, EYE_L_V, perspL]]) {
     const eyeH = Math.abs(landmarks[vref[0]].y - landmarks[vref[1]].y) * MH;
     const lift = eyeH * EYE_LIFT;
     const lo = lash.map((i) => [landmarks[i].x * MW, landmarks[i].y * MH]);
@@ -318,18 +393,43 @@ export function buildEyeMask(w, h, landmarks) {
     let upY = (landmarks[vref[0]].y - landmarks[vref[1]].y) * MH;
     const upL = Math.hypot(upX, upY) || 1; upX /= upL; upY /= upL;
 
+    // ── Perspective tuck ──────────────────────────────────────────────
+    // When the face turns, the far eye foreshortens (persp < 1). The inner
+    // corner (nose side) needs to tuck inward and the shadow height should
+    // compress — mimicking real perspective where the near-nose edge wraps
+    // around the bridge and disappears.
+    // tuck: 0 = frontal (no change), up to ~0.6 at strong foreshortening
+    const tuck = Math.max(0, 1 - persp) * 2.0;  // stronger tuck for eyeshadow
+    // Pull inner points toward the eye centre along the lash axis
+    if (tuck > 0.01) {
+      const cx = (outer[0] + inner[0]) / 2, cy = (outer[1] + inner[1]) / 2;
+      for (let k = 0; k < n; k++) {
+        const t = k / (n - 1);  // 0 at outer, 1 at inner
+        const pull = t > 0.35 ? (t - 0.35) / 0.65 * tuck : 0;
+        if (pull > 0) {
+          lo[k][0] += (cx - lo[k][0]) * pull * 0.65;
+          lo[k][1] += (cy - lo[k][1]) * pull * 0.4;
+        }
+      }
+    }
+
+    // Shadow height scales down on the foreshortened eye — perspective
+    // compresses the visible lid surface, so the wash should be shorter.
+    const perspLift = lift * (1 - tuck * 0.35);
+
     // A straight vertical extrusion of the lash line gives a band exactly as
     // wide as the eye with sheer sides — which reads as a narrow stripe. Real
     // shadow is a fan: it climbs higher at the outer third and carries OUT past
     // the outer corner toward the temple, which is what gives the eye its lift.
     const hi = lo.map((p, k) => {
       const t = k / (n - 1);                       // 0 at outer, 1 at inner
-      const lf = lift * (1.3 - 0.6 * t);           // taller over the outer third
-      const ow = lift * CFG.eyes.outward * (1 - t) * (1 - t); // fan, outer-weighted
+      const lf = perspLift * (1.3 - 0.6 * t);     // taller over the outer third
+      const ow = perspLift * CFG.eyes.outward * (1 - t) * (1 - t); // fan, outer-weighted
       return [p[0] + upX * lf + axX * ow, p[1] + upY * lf + axY * ow];
     });
 
-    const tailLen = lift * CFG.eyes.tail;
+    // Tail also shrinks on foreshortened eye
+    const tailLen = perspLift * CFG.eyes.tail;
     const tailBase = [outer[0] + axX * tailLen * 0.5, outer[1] + axY * tailLen * 0.5];
     const tailTip = [outer[0] + axX * tailLen + upX * lift * 1.0,
                      outer[1] + axY * tailLen + upY * lift * 1.0];
@@ -355,6 +455,30 @@ export function buildEyeMask(w, h, landmarks) {
     for (let k = 1; k < poly.length; k++) m.lineTo(poly[k][0], poly[k][1]);
     m.closePath();
     m.fill();
+
+    // ── Inner-corner fade on the far eye ─────────────────────────────
+    // On top of the geometric tuck, fade the opacity near the nose so the
+    // shadow doesn't end with a hard edge at the bridge.
+    if (tuck > 0.05) {
+      const fadeStr = Math.min(1, tuck * 0.7);   // 0 at frontal, up to ~0.7
+      // Gradient runs from inner corner (fully transparent) outward along the
+      // eye axis, covering the inner ~40% of the eye width.
+      const fadeEnd = [
+        inner[0] + (outer[0] - inner[0]) * 0.4,
+        inner[1] + (outer[1] - inner[1]) * 0.4,
+      ];
+      const fg = m.createLinearGradient(inner[0], inner[1], fadeEnd[0], fadeEnd[1]);
+      fg.addColorStop(0, `rgba(0,0,0,${fadeStr})`);
+      fg.addColorStop(1, 'rgba(0,0,0,0)');
+      m.globalCompositeOperation = 'destination-out';
+      m.fillStyle = fg;
+      m.beginPath();
+      m.moveTo(poly[0][0], poly[0][1]);
+      for (let k = 1; k < poly.length; k++) m.lineTo(poly[k][0], poly[k][1]);
+      m.closePath();
+      m.fill();
+      m.globalCompositeOperation = 'source-over';
+    }
   }
 
   // Keep the wash off the brow hair. Clamping the gradient short of the brow
@@ -414,35 +538,51 @@ export function buildLashMask(w, h, landmarks) {
   m.filter = 'none'; // crisp — no blur ever on lashes
   const thin = Math.max(1.0, LH * CFG.lashes.width);
 
-  // Face yaw from nose-tip z vs face width — used to fade the far eye at profile angles
-  const faceW = Math.abs(landmarks[234].x - landmarks[454].x); // normalised
-  const noseTipZ = landmarks[4]?.z ?? 0;  // negative = toward camera
-  // yaw: 0 = frontal, 1 = full profile. Derived from asymmetry in nose z + eye x positions
-  const eyeRX = landmarks[33].x, eyeLX = landmarks[263].x;
-  const eyeMid = (eyeRX + eyeLX) / 2;
-  const noseTipX = landmarks[4].x;
-  const yawSign = noseTipX - eyeMid; // positive = turned right, negative = left
-  const yawMag = Math.min(1, Math.abs(yawSign) / (faceW * 0.18 + 0.001));
+  const [perspR, perspL] = eyePerspective(landmarks);
 
-  // Per-eye visibility: far eye fades as face turns
-  // eyeR is on the RIGHT side of image (x > mid), eyeL on the LEFT
-  const visR = yawSign > 0 ? Math.max(0, 1 - yawMag * 1.8) : 1;  // right eye fades when turning right
-  const visL = yawSign < 0 ? Math.max(0, 1 - yawMag * 1.8) : 1;  // left eye fades when turning left
-
-  for (const [lash, vref, vis] of [[EYE_R_LASH, EYE_R_V, visR], [EYE_L_LASH, EYE_L_V, visL]]) {
-    if (vis < 0.02) continue; // fully hidden eye — skip entirely
+  for (const [lash, vref, persp] of [[EYE_R_LASH, EYE_R_V, perspR], [EYE_L_LASH, EYE_L_V, perspL]]) {
     const pts = lash.map((i) => [landmarks[i].x * LW, landmarks[i].y * LH]);
+    const n2 = pts.length;
     const eyeH = Math.abs(landmarks[vref[0]].y - landmarks[vref[1]].y) * LH;
     // pts[0] = outer corner, pts[last] = inner corner
-    const outerDir = Math.sign(pts[0][0] - pts[pts.length - 1][0]) || 1;
+    const outerDir = Math.sign(pts[0][0] - pts[n2 - 1][0]) || 1;
 
-    m.strokeStyle = `rgba(255,255,255,${vis.toFixed(3)})`;
+    // Perspective tuck: gently pull inner points toward eye centre on the
+    // foreshortened eye. Softer than eyeshadow/liner — lashes are thin strokes
+    // and collapse visibly if pulled too hard.
+    const tuck = Math.max(0, 1 - persp) * 1.2;   // stronger but still softer than eyeshadow
+    if (tuck > 0.01) {
+      const cx = (pts[0][0] + pts[n2 - 1][0]) / 2;
+      const cy = (pts[0][1] + pts[n2 - 1][1]) / 2;
+      for (let k = 0; k < n2; k++) {
+        const t = k / (n2 - 1);
+        const pull = t > 0.45 ? (t - 0.45) / 0.55 * tuck : 0;
+        if (pull > 0) {
+          pts[k][0] += (cx - pts[k][0]) * pull * 0.45;
+          pts[k][1] += (cy - pts[k][1]) * pull * 0.28;
+        }
+      }
+    }
 
-    // 1. thin upper lash line
+    // 1. thin upper lash line — with inner-corner fade on far eye
     m.lineWidth = thin;
-    m.beginPath();
-    pts.forEach(([x, y], k) => (k === 0 ? m.moveTo(x, y) : m.lineTo(x, y)));
-    m.stroke();
+    if (tuck > 0.05) {
+      // Draw segments with fading alpha near inner corner
+      for (let k = 1; k < n2; k++) {
+        const t = k / (n2 - 1); // 0 outer, 1 inner
+        const fade = 1 - Math.max(0, (t - 0.55) / 0.45) * Math.min(1, tuck * 0.9);
+        m.strokeStyle = `rgba(255,255,255,${fade.toFixed(3)})`;
+        m.beginPath();
+        m.moveTo(pts[k - 1][0], pts[k - 1][1]);
+        m.lineTo(pts[k][0], pts[k][1]);
+        m.stroke();
+      }
+    } else {
+      m.strokeStyle = '#fff';
+      m.beginPath();
+      pts.forEach(([x, y], k) => (k === 0 ? m.moveTo(x, y) : m.lineTo(x, y)));
+      m.stroke();
+    }
 
     // 2. individual lash flicks — resampled densely along the lash line
     //    (not just at the sparse landmarks), each thin, up-and-out.
@@ -463,6 +603,11 @@ export function buildLashMask(w, h, landmarks) {
     };
     const N = CFG.lashes.count;
     const curl = CFG.lashes.curl ?? 0.25;
+    // Perspective factor for lash flicks: on the far eye, inner flicks are
+    // shorter and curl inward (toward nose) instead of outward — gives a 3D
+    // foreshortened look instead of flat identical flicks on both eyes.
+    const perspShorten = Math.max(0.4, persp);          // 1 = near eye full, 0.4 = far eye floor
+    const perspCurlFlip = Math.max(0, (1 - persp) * 0.6); // 0 = near, up to 0.6 = far
     for (let i = 0; i < N; i++) {
       const u = i / (N - 1);
       if (u > CFG.lashes.reachT) continue;
@@ -470,14 +615,25 @@ export function buildLashMask(w, h, landmarks) {
       const grow = 1 - u / CFG.lashes.reachT;
       // slight random variation — different lashes have different lengths (±15%)
       const jitter = 0.85 + 0.30 * (((i * 7 + 3) % 13) / 13.0);
-      const lashLen = len * grow * jitter;
+      // On the far eye, scale inner flicks down more aggressively for depth
+      const innerPerspScale = 1 - (1 - perspShorten) * u;  // outer stays full, inner shrinks
+      const lashLen = len * grow * jitter * innerPerspScale;
       const [x, y] = at(u);
+      // Perspective curl: inner flicks on the far eye curl inward (toward nose)
+      // instead of outward, as if viewed at an angle.
+      const flipAmount = perspCurlFlip * u;  // only inner flicks flip
+      const effectiveOuterDir = outerDir * (1 - flipAmount * 2); // blend toward opposite
+      // Inner-corner fade: lashes near the nose on the far eye fade out
+      const fadeFactor = tuck > 0.05
+        ? 1 - Math.max(0, (u - 0.55) / 0.45) * Math.min(1, tuck * 0.9)
+        : 1;
       // curl: tip endpoint is curled outward/upward using quadratic bezier
-      const tipX = x + outerDir * lashLen * (0.45 + curl * 0.35);
+      const tipX = x + effectiveOuterDir * lashLen * (0.45 + curl * 0.35);
       const tipY = y - lashLen;
       // control point: pulled outward for curl arc
-      const ctrlX = x + outerDir * lashLen * 0.25;
+      const ctrlX = x + effectiveOuterDir * lashLen * 0.25;
       const ctrlY = y - lashLen * (0.5 + curl * 0.35);
+      m.strokeStyle = `rgba(255,255,255,${fadeFactor.toFixed(3)})`;
       m.beginPath();
       m.moveTo(x, y);
       m.quadraticCurveTo(ctrlX, ctrlY, tipX, tipY);
@@ -693,9 +849,20 @@ export function buildLipLinerMask(w, h, landmarks) {
   m.clearRect(0, 0, MW, MH);
   m.filter = 'none'; // crisp outer edge — no blur
 
-  // Clip to the true lip shape — a safety net so nothing can escape onto skin.
+  // Clip to a slightly inset lip shape — the Catmull-Rom spline on the inset
+  // stroke path can overshoot at mouth corners; a 1-2px safety margin on the
+  // clip ensures nothing pokes out past the actual lip contour.
   m.save();
-  tracePath(m, landmarks, LIPS_OUTER, MW, MH);
+  const clipPts = LIPS_OUTER.map((i) => [landmarks[i].x * MW, landmarks[i].y * MH]);
+  let clipCx = 0, clipCy = 0;
+  for (const [x, y] of clipPts) { clipCx += x; clipCy += y; }
+  clipCx /= clipPts.length; clipCy /= clipPts.length;
+  const clipShrink = 0.035; // ~3.5% inset — tighter to the lip edge
+  const clipInset = clipPts.map(([x, y]) => [
+    x + (clipCx - x) * clipShrink,
+    y + (clipCy - y) * clipShrink,
+  ]);
+  traceSmooth(m, clipInset);
   m.clip();
 
   const lineW = Math.max(2, MW * CFG.lipLiner.width);
@@ -730,8 +897,8 @@ export function buildLipLinerMask(w, h, landmarks) {
   const adj = pts.map(([x, y], i) => {
     let dx = cx - x, dy = cy - y;
     const d = Math.hypot(dx, dy) || 1;
-    let px = x + (dx / d) * (lineW * 0.5);
-    let py = y + (dy / d) * (lineW * 0.5);
+    let px = x + (dx / d) * (lineW * 0.75);
+    let py = y + (dy / d) * (lineW * 0.75);
     if (i >= LOWER_FROM && i <= LOWER_TO) {
       const t = (i - (LOWER_FROM - 1)) / (LOWER_TO + 1 - (LOWER_FROM - 1));
       const taper = Math.sin(Math.PI * t);   // 0 at both corners, 1 at centre
@@ -758,16 +925,32 @@ export function buildEyelinerMask(w, h, landmarks) {
   const m = eyelinerMaskCv.getContext('2d');
   m.setTransform(1, 0, 0, 1, 0, 0);
   m.clearRect(0, 0, MW, MH);
-  m.strokeStyle = '#fff';
   m.lineCap = 'round';
   m.lineJoin = 'round';
   m.lineWidth = Math.max(1, MH * CFG.eyeliner.width);
   m.filter = `blur(${Math.max(0.5, MW * CFG.eyeliner.blur)}px)`;
-  for (const [lash, vref] of [[EYE_R_LASH, EYE_R_V], [EYE_L_LASH, EYE_L_V]]) {
+  const [perspR, perspL] = eyePerspective(landmarks);
+  for (const [lash, vref, persp] of [[EYE_R_LASH, EYE_R_V, perspR], [EYE_L_LASH, EYE_L_V, perspL]]) {
+    m.strokeStyle = '#fff';
     const pts = lash.map((i) => [landmarks[i].x * MW, landmarks[i].y * MH]);
     const n = pts.length;
     const eyeH = Math.abs(landmarks[vref[0]].y - landmarks[vref[1]].y) * MH;
     const baseW = Math.max(1, MH * CFG.eyeliner.width);
+
+    // ── Perspective tuck: pull inner-corner points toward eye centre ──
+    const tuck = Math.max(0, 1 - persp) * 2.0;  // matches eyeshadow strength
+    if (tuck > 0.01) {
+      const cx = (pts[0][0] + pts[n - 1][0]) / 2;
+      const cy = (pts[0][1] + pts[n - 1][1]) / 2;
+      for (let k = 0; k < n; k++) {
+        const t = k / (n - 1); // 0 at outer, 1 at inner
+        const pull = t > 0.35 ? (t - 0.35) / 0.65 * tuck : 0;
+        if (pull > 0) {
+          pts[k][0] += (cx - pts[k][0]) * pull * 0.65;
+          pts[k][1] += (cy - pts[k][1]) * pull * 0.4;
+        }
+      }
+    }
 
     if (CFG.eyeliner.taper) {
       // Draw each segment individually with varying thickness — thin at inner, thick at outer
@@ -806,8 +989,10 @@ export function buildEyelinerMask(w, h, landmarks) {
     const upLen = Math.hypot(upX, upY) || 1;
     upX /= upLen; upY /= upLen;
 
-    const reach = wl * CFG.eyeliner.wingReach;
-    const lift = wl * CFG.eyeliner.wingLift;
+    // Wing scales down on the foreshortened eye — perspective compresses it
+    const perspScale = Math.max(0.3, persp);
+    const reach = wl * CFG.eyeliner.wingReach * perspScale;
+    const lift = wl * CFG.eyeliner.wingLift * perspScale;
     const wx = outer[0], wy = outer[1];
     const tipX = wx + axX * reach + upX * lift;
     const tipY = wy + axY * reach + upY * lift;
@@ -821,6 +1006,25 @@ export function buildEyelinerMask(w, h, landmarks) {
     m.moveTo(wx, wy);
     m.quadraticCurveTo(ctrlX, ctrlY, tipX, tipY);
     m.stroke();
+
+    // ── Inner-corner fade on far eye ──
+    if (tuck > 0.05) {
+      const fadeStr = Math.min(1, tuck * 0.8);
+      const innerPt = pts[n - 1], outerPt = pts[0];
+      const fadeEnd = [
+        innerPt[0] + (outerPt[0] - innerPt[0]) * 0.35,
+        innerPt[1] + (outerPt[1] - innerPt[1]) * 0.35,
+      ];
+      const fg = m.createLinearGradient(innerPt[0], innerPt[1], fadeEnd[0], fadeEnd[1]);
+      fg.addColorStop(0, `rgba(0,0,0,${fadeStr})`);
+      fg.addColorStop(1, 'rgba(0,0,0,0)');
+      m.globalCompositeOperation = 'destination-out';
+      m.fillStyle = fg;
+      // Cover the eye region generously — the gradient does the precision work
+      const r = Math.hypot(outerPt[0] - innerPt[0], outerPt[1] - innerPt[1]) * 0.6;
+      m.fillRect(innerPt[0] - r, innerPt[1] - r, r * 2, r * 2);
+      m.globalCompositeOperation = 'source-over';
+    }
   }
   m.filter = 'none';
   return eyelinerMaskCv;

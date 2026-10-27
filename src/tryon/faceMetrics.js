@@ -40,22 +40,47 @@ export function faceMotion(landmarks, prev) {
   return { motion: n ? d / n : 0, snapshot };
 }
 
+// Landmark ranges that move independently of head motion. These regions get
+// per-point adaptive alpha so a lip purse or a blink isn't dragged back by
+// heavy smoothing tuned for the stable skull points.
+const LIP_RANGE  = [61, 62, 63, 64, 65, 66, 67, 78, 80, 81, 82, 13, 312, 311, 310, 415, 308, 324, 318, 402, 317, 14, 87, 178, 88, 95, 146, 91,
+                    185, 40, 39, 37, 0, 267, 269, 270, 409, 291, 375, 321, 405, 314, 17, 84, 181, 91, 146, 61,
+                    /* inner lip */ 78, 191, 80, 81, 82, 13, 312, 311, 310, 415, 308, 324, 318, 402, 317, 14, 87, 178, 88, 95];
+const EYE_RANGE  = [// upper+lower lids left
+                    33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246,
+                    // upper+lower lids right
+                    263, 249, 390, 373, 374, 380, 381, 382, 362, 398, 384, 385, 386, 387, 388, 466];
+const FAST_SET = new Set([...LIP_RANGE, ...EYE_RANGE]);
+
 /**
  * EMA landmark smoother — kills per-frame jitter without adding lag when the
  * face actually moves. alpha rises with motion: still face => heavy smoothing,
  * fast turn => follow the raw detection.
  *   alpha 0 = frozen, 1 = raw.
+ *
+ * Lip and eye landmarks get a per-point adaptive boost: if the point itself
+ * moved more than the skull did, it gets a higher alpha so lips and lashes
+ * track immediately even when the head is still.
  */
 export function smoothLandmarks(cur, smoothed, motion, opts = {}) {
   if (!smoothed || smoothed.length !== cur.length) return cur;
   const base = opts.alpha ?? 0.18;
   const max = opts.maxAlpha ?? 0.85;
   const gain = opts.gain ?? 120;
-  const alpha = Math.min(max, base + motion * gain);
-  const inv = 1 - alpha;
+  const globalAlpha = Math.min(max, base + motion * gain);
   const out = new Array(cur.length);
   for (let i = 0; i < cur.length; i++) {
     const c = cur[i], s = smoothed[i];
+    let alpha = globalAlpha;
+    // Per-point boost for lips & eyes: compare this point's own displacement
+    // against a low threshold. If it moved, raise alpha so the mask follows.
+    if (FAST_SET.has(i)) {
+      const pd = Math.hypot(c.x - s.x, c.y - s.y);
+      // 0.002 normalised ≈ 1-2px on 1080p — meaningful lip/eye movement
+      const localBoost = Math.min(max, 0.45 + pd * 300);
+      alpha = Math.max(alpha, localBoost);
+    }
+    const inv = 1 - alpha;
     out[i] = {
       x: c.x * alpha + s.x * inv,
       y: c.y * alpha + s.y * inv,

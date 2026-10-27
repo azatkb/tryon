@@ -20,7 +20,7 @@ import { useFaceLandmarker } from './useFaceLandmarker.js';
 import { renderMakeup } from './lipRenderer.js';
 import { renderMakeupGL, glAvailable } from './webglLips.js';
 import {
-  smoothLandmarks, predictLandmarks, estimateFaceLum, faceMotion,
+  smoothLandmarks, predictLandmarks, estimateFaceLum, estimateLightBalance, faceMotion,
 } from './faceMetrics.js';
 
 export const DEFAULT_RESOLUTION = { width: 1920, height: 1080 };
@@ -69,7 +69,7 @@ export function useTryOn(options = {}) {
 
   // Per-frame metrics the host may want (motion gating, exposure, landmarks).
   // A ref, not state: these change every frame and must not drive re-renders.
-  const metricsRef = useRef({ motion: 0, faceLum: 0.5, landmarks: null, moving: false });
+  const metricsRef = useRef({ motion: 0, faceLum: 0.5, lightBal: 0, landmarks: null, moving: false });
 
   // The hidden <video> is owned here so a host only has to provide a canvas.
   if (!videoRef.current && typeof document !== 'undefined' && source === 'camera') {
@@ -100,7 +100,7 @@ export function useTryOn(options = {}) {
       // data (a segmentation mask that lands between renders, say) — a plain
       // `layers` object can only update when React re-renders.
       const live = cfg.getLayers ? cfg.getLayers(metricsRef.current) : cfg.layers;
-      const withLum = { ...live, faceLum: metricsRef.current.faceLum };
+      const withLum = { ...live, faceLum: metricsRef.current.faceLum, lightBal: metricsRef.current.lightBal };
       const useGL = cfg.renderer === 'gl' || (cfg.renderer === 'auto' && glAvailable());
       let done = false;
       if (useGL) {
@@ -113,6 +113,7 @@ export function useTryOn(options = {}) {
     cfg.onFrame?.({
       processed: proc, source: src, landmarks: lms, w, h,
       faceLum: metricsRef.current.faceLum,
+      lightBal: metricsRef.current.lightBal,
       motion: metricsRef.current.motion,
       moving: metricsRef.current.moving,
     });
@@ -163,6 +164,8 @@ export function useTryOn(options = {}) {
     if (every > 0 && frameRef.current++ % every === 0) {
       const lum = estimateFaceLum(src, raw);
       if (lum != null) m.faceLum = m.faceLum * 0.7 + lum * 0.3;
+      const bal = estimateLightBalance(src, raw);
+      if (bal != null) m.lightBal = m.lightBal * 0.7 + bal * 0.3;
     }
 
     m.landmarks = lms;
@@ -284,6 +287,8 @@ export function useTryOn(options = {}) {
     if (lms) {
       const lum = estimateFaceLum(img, lms);
       if (lum != null) m.faceLum = lum;
+      const bal = estimateLightBalance(img, lms);
+      if (bal != null) m.lightBal = bal;
     }
     setFaceSeen(!!lms);
     processFrame(img, w, h, lms);

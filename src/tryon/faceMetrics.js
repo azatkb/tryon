@@ -129,6 +129,52 @@ export function estimateFaceLum(source, landmarks) {
   }
 }
 
+// Left / right cheek landmarks for directional light estimation.
+// MediaPipe face mesh: 234 = left cheek outer, 50 = left cheek inner,
+// 454 = right cheek outer, 280 = right cheek inner.
+const CHEEK_L = [234, 50, 117, 123];   // viewer's left = face's right cheek
+const CHEEK_R = [454, 280, 346, 352];  // viewer's right = face's left cheek
+
+/**
+ * Light balance: –1 = lit from the left, +1 = lit from the right, 0 = even.
+ * Compares mean luminance of left-cheek patch vs right-cheek patch.
+ * Returns null when landmarks are insufficient.
+ */
+export function estimateLightBalance(source, landmarks) {
+  if (!landmarks || landmarks.length < 400) return null;
+  const vw = source.videoWidth || source.naturalWidth || source.width;
+  const vh = source.videoHeight || source.naturalHeight || source.height;
+  if (!vw || !vh) return null;
+
+  function patchLum(idxArr) {
+    let minX = 1, maxX = 0, minY = 1, maxY = 0, n = 0;
+    for (const i of idxArr) {
+      const p = landmarks[i];
+      if (!p) continue;
+      minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+      minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+      n++;
+    }
+    if (n < 2 || maxX <= minX || maxY <= minY) return null;
+    const cv = scratch();
+    const ctx = cv.getContext('2d', { willReadFrequently: true });
+    try {
+      ctx.drawImage(source, minX * vw, minY * vh, (maxX - minX) * vw, (maxY - minY) * vh, 0, 0, 16, 16);
+      const d = ctx.getImageData(0, 0, 16, 16).data;
+      let sum = 0;
+      for (let p = 0; p < d.length; p += 4) sum += 0.2126 * d[p] + 0.7152 * d[p + 1] + 0.0722 * d[p + 2];
+      return sum / (16 * 16 * 255);
+    } catch (_) { return null; }
+  }
+
+  const ll = patchLum(CHEEK_L), lr = patchLum(CHEEK_R);
+  if (ll == null || lr == null) return null;
+  const total = ll + lr;
+  if (total < 0.01) return 0;
+  // Normalise: (right - left) / (right + left). Positive = right side brighter.
+  return Math.max(-1, Math.min(1, (lr - ll) / total));
+}
+
 /** Skin depth word (for shade resolution) from a 0..1 luminance. */
 export function depthFromLum(lum) {
   const v = lum * 255;

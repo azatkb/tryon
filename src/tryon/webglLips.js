@@ -63,7 +63,7 @@ uniform sampler2D uFrame, uFnd, uBlush, uHair, uEye, uLash, uLip, uSculpt, uLipL
 uniform vec3 uFndShade, uBlushShade, uHairShade, uEyeShade, uLipShade, uWB, uLipLinerShade, uEyelinerShade, uBrowShade;
 uniform float uFndInt, uBlushInt, uHairInt, uEyeInt, uLashInt, uLipInt;
 uniform float uContourInt, uHighlightInt, uUnderEyeInt, uLipLinerInt, uEyelinerInt, uBrowInt;
-uniform float uLight, uFinish, uFaceLum, uCinema;
+uniform float uLight, uFinish, uFaceLum, uCinema, uLightBal;
 uniform float uEyeFinish;  // 0=matte, 1=satin, 2=shimmer
 uniform float uFndFinish;  // 0=powder/matte, 1=natural, 2=dewy/cream
 uniform float uBlushFinish; // 0=powder, 1=cream
@@ -256,6 +256,15 @@ void main(){
   // warm light is blocked, so what fills the hollow is ambient skylight. The
   // multiply target is therefore well below neutral and biased to blue.
   float contourD = sc.r * uContourInt;   // raw density, reused by blush/highlight
+  // Light-direction modulation: real contour shadow fades when the actual light
+  // source already illuminates that side. uLightBal: –1 = lit from left, +1 = right.
+  // Side is determined by UV x relative to 0.5 (mirrored camera: left of frame
+  // is the viewer's left). When light comes from the same side as the pixel,
+  // the contour is weakened — real light washes out painted shadow.
+  float side = sign(vUv.x - 0.5);  // –1 left of centre, +1 right
+  float sameAsLight = max(0.0, side * uLightBal);  // 0..1, how much this side is lit
+  float lightFade = 1.0 - sameAsLight * 0.75;      // keep at least 25% contour
+  contourD *= lightFade;
   // The gate exists only to spare true black (hair, nostril, deep shadow) —
   // not to fade contour inside its own hollow, which is where it belongs.
   float mc = contourD * smoothstep(0.03 + expOff * 0.06, 0.16 + expOff * 0.20, percL(outc)) * expI;
@@ -544,7 +553,7 @@ function initGL() {
                    'uFndShade','uBlushShade','uHairShade','uEyeShade','uLipShade','uWB','uLipLinerShade','uEyelinerShade','uBrowShade',
                    'uFndInt','uBlushInt','uHairInt','uEyeInt','uLashInt','uLipInt',
                    'uContourInt','uHighlightInt','uUnderEyeInt','uLipLinerInt','uEyelinerInt','uBrowInt',
-                   'uLight','uFinish','uFaceLum','uCinema','uEyeFinish','uFndFinish','uBlushFinish','uTexel']) {
+                   'uLight','uFinish','uFaceLum','uCinema','uLightBal','uEyeFinish','uFndFinish','uBlushFinish','uTexel']) {
     loc[u] = gl.getUniformLocation(prog, u);
   }
   tex = { frame: makeTex(), fnd: makeTex(), blush: makeTex(), hair: makeTex(), eye: makeTex(), lash: makeTex(), lip: makeTex(), sculpt: makeTex(), lipLiner: makeTex(), eyeliner: makeTex(), brows: makeTex() };
@@ -655,6 +664,7 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
   gl.uniform1f(loc.uLight, (lips?.lightResponse ?? eyes?.lightResponse ?? 0.5));
   gl.uniform1f(loc.uFinish, FINISH_CODE[lips?.finish] ?? 1);
   gl.uniform1f(loc.uFaceLum, typeof opts.faceLum === 'number' ? opts.faceLum : 0.5);
+  gl.uniform1f(loc.uLightBal, typeof opts.lightBal === 'number' ? opts.lightBal : 0);
   gl.uniform1f(loc.uCinema, typeof opts.cinema === 'number' ? opts.cinema : 0);
 
   // Per-region finish codes: 0=matte/powder, 1=satin/natural, 2=shimmer/dewy/cream

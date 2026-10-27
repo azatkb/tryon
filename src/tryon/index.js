@@ -22,7 +22,7 @@ export { default as TryOnCanvas } from './TryOnCanvas.jsx';
 export { useTryOn, MOVE_THRESH, DEFAULT_RESOLUTION } from './useTryOn.js';
 
 export {
-  smoothLandmarks, predictLandmarks, estimateFaceLum,
+  smoothLandmarks, predictLandmarks, estimateFaceLum, estimateLightBalance,
   faceMotion, faceBBox, depthFromLum,
 } from './faceMetrics.js';
 

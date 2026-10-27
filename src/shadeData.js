@@ -14,9 +14,13 @@ export const TUTORIAL_SHADE_FAMILY = {
   'contour-without-the-confusion': { bronze: 'bronze', contour: 'contour' },
   'make-those-eyes-pop': { eye: 'neutral', shimmer: 'champagne' },
   // Lessons added for the multi-tutorial set
-  'soft-glam':     { lip: 'berry', cheek: 'peach', eye: 'champagne', glow: 'champagne', contour: 'contour' },
-  'no-makeup':     { lip: 'pink-nude', cheek: 'peach', glow: 'champagne' },
-  'bold-red-lip':  { lip: 'red', cheek: 'rosy', eye: 'neutral', glow: 'champagne', contour: 'contour' },
+  'coral-summer':  { lip: 'peach', cheek: 'peach', eye: 'bronze', glow: 'champagne' },
+  'plum-smoke':    { lip: 'berry', cheek: 'berry', eye: 'berry', glow: 'champagne', contour: 'contour' },
+  'bold-red-lip':  { lip: 'red', cheek: 'rosy', eye: 'bronze', glow: 'champagne', contour: 'contour' },
+  'warm-bronze':   { lip: 'peach', cheek: 'peach', eye: 'bronze', glow: 'champagne', contour: 'contour' },
+  'emerald-night': { lip: 'burgundy', cheek: 'rosy', eye: 'emerald', glow: 'champagne', contour: 'contour' },
+  'copper-sunset': { lip: 'peach', cheek: 'peach', eye: 'copper', glow: 'champagne', contour: 'contour' },
+  'sapphire-glam': { lip: 'pink-nude', cheek: 'rosy', eye: 'sapphire', glow: 'champagne', contour: 'contour' },
 };
 
 export function shadeFamilyFor(tipId, label) {
@@ -44,12 +48,20 @@ export const SHADE_FAMILIES = {
   contour: { good: /\b(taupe|cool|ash|grey|gray|mushroom|shadow|sculpt\w*|contour|mocha)\b/, bad: /\b(pink|rose|berry|orange|gold|bronze|shimmer|glow)\b/, h: [[0, 45]], s: [0, 40], l: [22, 62] },
   champagne: { good: /\b(champagne|gold\w*|pearl|opal|moon\w*|glow|ivory|vanilla|prosecco|star\w*)\b/, bad: /\b(bronze|copper|rose|pink|purple|blue|green|deep|dark)\b/, h: [[20, 60]], s: [0, 100], l: [65, 100] },
   neutral: { good: /\b(taupe|brown|nude|neutral|beige|cocoa|mocha|chocolate|caramel|tan|sand|stone|espresso|coffee|champagne)\b/, bad: /\b(blue|green|teal|purple|violet|pink|red|yellow|orange|turquoise|lilac|lavender)\b/, h: [[5, 50]], s: [0, 60], l: [10, 85] },
+  copper: { good: /\b(copper\w*|burnt\s*orange|amber|rust|terracotta|sienna|cayenne|spice)\b/, bad: /\b(pink|rose|cool|grey|gray|blue|green|plum)\b/, h: [[15, 40]], s: [50, 100], l: [28, 55] },
+  'rose-gold': { good: /\b(rose\s*gold|rose\w*|blush\w*|pink\s*gold)\b/, bad: /\b(red|berry|plum|dark|deep|brown|orange)\b/, h: [[340, 360], [0, 15]], s: [20, 60], l: [40, 60] },
+  emerald: { good: /\b(emerald|green|forest|jade|moss|sage|olive|teal|fern|ivy|pine|hunter)\b/, bad: /\b(pink|red|orange|brown|gold|bronze|yellow)\b/, h: [[100, 180]], s: [20, 100], l: [15, 55] },
+  sapphire: { good: /\b(sapphire|blue|navy|cobalt|ocean|midnight|marine|indigo|denim|steel)\b/, bad: /\b(pink|red|orange|brown|gold|bronze|green|yellow)\b/, h: [[195, 260]], s: [20, 100], l: [15, 55] },
+  burgundy: { good: /\b(burgundy|oxblood|wine|merlot|maroon|garnet|claret|sangria|port)\b/, bad: /\b(nude|peach|coral|orange|clear|beige|bare|gold|pink)\b/, h: [[335, 360], [0, 10]], s: [30, 100], l: [12, 35] },
+  mauve: { good: /\b(mauve|dusty\s*rose|lilac|lavender|muted\s*pink|heather|wisteria|thistle)\b/, bad: /\b(red|orange|coral|bronze|gold|brown|green|blue)\b/, h: [[300, 350]], s: [15, 55], l: [35, 60] },
 };
 
 // Representative hex per family (fallback when a catalogue has no shade).
 export const FAMILY_HEX = {
   'pink-nude': '#C98F8A', rosy: '#D77A86', peach: '#E89477', berry: '#8E2F5A',
   red: '#B52532', bronze: '#9A6B3F', contour: '#8A7466', champagne: '#E8D7B0', neutral: '#8A7466',
+  copper: '#B5651D', 'rose-gold': '#B76E79', emerald: '#2E6B50', sapphire: '#2B4570',
+  burgundy: '#6C2334', mauve: '#915F6D',
 };
 
 export function hexHsl(hex) {

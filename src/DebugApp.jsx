@@ -8,8 +8,8 @@ import {
 } from './tryon/index.js';
 import { ENTITIES, AREAS, entitiesByArea } from './entities.js';
 import { CATALOG } from './catalog.js';
-import { LESSON, LESSONS } from './tutorials.js';
-import { lookShade, FAMILY_HEX } from './shadeData.js';
+import { LESSON, LESSONS, lessonLayers, resolveStep } from './tutorials.js';
+import { lookShade, FAMILY_HEX, SHADE_FAMILIES } from './shadeData.js';
 
 // Workbench shade overrides. The catalogue's default eyeshadow is "Taupe"
 // (#8A7466) — a grey-beige at luminance 0.47, which on mid-tone skin is close
@@ -63,11 +63,24 @@ const TUNE_KEY = {
 // Panel defaults are READ FROM THE LESSON, not kept as a second table here.
 // Two hand-maintained copies is exactly how the workbench and the tutorial
 // ended up rendering different makeup. Edit tutorials.js; this follows.
-const TUNE_DEFAULT = Object.fromEntries(
-  LESSON.steps
-    .filter((s) => typeof s.edge === 'number')
-    .map((s) => [s.region, { op: s.intensity, hd: s.edge }]),
-);
+// All tunable regions need an entry even if the lesson doesn't have that step,
+// otherwise the slider crashes on `tune[rk].op`.
+const ALL_TUNE_REGIONS = ['foundation', 'underEye', 'blush', 'highlight', 'contour', 'eyes', 'brows'];
+function tuneFromLesson(lesson) {
+  const base = Object.fromEntries(ALL_TUNE_REGIONS.map(r => [r, { op: 0.0, hd: 0.30 }]));
+  for (const s of lesson.steps) {
+    if (typeof s.edge === 'number') base[s.region] = { op: s.intensity, hd: s.edge };
+  }
+  return base;
+}
+const TUNE_DEFAULT = tuneFromLesson(LESSON);
+
+// Collect all shade families used across lessons for the palette viewer.
+function collectFamilies() {
+  const seen = new Set();
+  for (const ls of LESSONS) for (const s of ls.steps) if (s.family) seen.add(s.family);
+  return [...seen].sort();
+}
 
 export default function DebugApp() {
   const canvasRef = useRef(null), maskTintRef = useRef(null);
@@ -81,6 +94,10 @@ export default function DebugApp() {
   const [eyeFinish, setEyeFinish] = useState('satin');
   const [fndFinish, setFndFinish] = useState('natural');
   const [blushFinish, setBlushFinish] = useState('powder');
+  const [lessonIdx, setLessonIdx] = useState(0);
+  const [showFamilies, setShowFamilies] = useState(false);
+  const activeLesson = LESSONS[lessonIdx] || LESSON;
+  const allFamilies = useMemo(collectFamilies, []);
 
   // enabled entities (default: all implemented on for full realism)
   const [enabled, setEnabled] = useState(() => {
@@ -100,32 +117,36 @@ export default function DebugApp() {
     for (const rk of Object.keys(tune)) setRegionEdge(rk, tune[rk].hd);
   }, [tune]);
 
-  // Renderer layers from the enabled, implemented entities. Recomputed only
-  // when the panel changes — the engine re-reads this object every frame.
+  // Renderer layers built from the ACTIVE LESSON's steps. Tune sliders and
+  // finish overrides are applied on top. Entity toggles still gate regions.
+  const REGION_TO_ENTITY = { foundation: 'foundation', underEye: 'concealer', blush: 'blush',
+    highlight: 'highlight', contour: 'contour', eyes: 'eyeshadow', eyeliner: 'eyeliner',
+    lashes: 'mascara', lips: 'lipstick', lipLiner: 'lip-liner', brows: 'brows' };
+
   const layers = useMemo(() => {
-    const L = {};
-    for (const e of ENTITIES) {
-      if (!enabled[e.id] || !IMPLEMENTED.has(e.id)) continue;
-      const row = CATALOG[e.catalog];
-      const picked = lookShade(row, e.family, null, null, null);
-      const shade = picked.shade || (row && row.shades && row.shades[0]) || null;
-      const hex = SHADE_OVERRIDE[e.region]
-        || (shade && shade.hex) || (e.family && FAMILY_HEX[e.family]) || '#000000';
-      const m = layerFor(e.region, hex, e.finish);
-      if (m) {
-        const tk = TUNE_KEY[e.id];
-        if (tk && tune[tk]) m[1].intensity = tune[tk].op;
-        L[m[0]] = m[1];
-      }
+    // Build full lesson layers (all steps applied)
+    const lastIdx = activeLesson.steps.length - 1;
+    const L = lessonLayers(lastIdx, undefined, activeLesson);
+
+    // Gate by entity toggles — remove regions whose entity is disabled
+    for (const [region, entId] of Object.entries(REGION_TO_ENTITY)) {
+      if (region === 'contour') continue; // handled separately
+      if (!enabled[entId] && L[region]) delete L[region];
     }
-    if (enabled.contour) L.contour = { intensity: tune.contour.op };
+    if (!enabled.contour) delete L.contour;
+
+    // Apply tune slider overrides (opacity + edge)
+    for (const [rk, tv] of Object.entries(tune)) {
+      if (L[rk]) L[rk].intensity = tv.op;
+    }
+
     // Override finishes from panel selectors
     if (L.eyes) L.eyes.finish = eyeFinish;
     if (L.foundation) L.foundation.finish = fndFinish;
     if (L.blush) L.blush.finish = blushFinish;
     L.cinema = cinema;
     return L;
-  }, [enabled, tune, cinema, eyeFinish, fndFinish, blushFinish]);
+  }, [enabled, tune, cinema, eyeFinish, fndFinish, blushFinish, activeLesson]);
 
   const drawBorders = useCallback((ctx, w, h, lms) => {
     if (!maskTintRef.current) maskTintRef.current = document.createElement('canvas');
@@ -221,10 +242,57 @@ export default function DebugApp() {
       </div>
 
       <div className={`dbg-panel${panelOpen ? '' : ' dbg-panel--collapsed'}`}>
+        {/* ── Lesson picker ── */}
         <div className="dbg-head">
           <b style={{ cursor: 'pointer', userSelect: 'none' }} onClick={() => setPanelOpen((o) => !o)}>
-            {panelOpen ? '▾' : '▸'} Debug · entities
+            {panelOpen ? '▾' : '▸'} Debug
           </b>
+        </div>
+        {panelOpen && (
+          <div className="dbg-group">
+            <div className="dbg-area">Lesson ({LESSONS.length})</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, padding: '2px 0' }}>
+              {LESSONS.map((ls, i) => (
+                <button key={i}
+                  onClick={() => { setLessonIdx(i); setTune(JSON.parse(JSON.stringify(tuneFromLesson(ls)))); }}
+                  style={{
+                    padding: '3px 10px', borderRadius: 12, fontSize: '.72rem', fontWeight: 600,
+                    border: i === lessonIdx ? '2px solid #c2185b' : '1px solid #555',
+                    background: i === lessonIdx ? '#c2185b' : 'transparent',
+                    color: i === lessonIdx ? '#fff' : '#ccc', cursor: 'pointer',
+                  }}>
+                  {ls.title}
+                </button>
+              ))}
+            </div>
+            <div style={{ fontSize: '.7rem', color: '#888', marginTop: 2 }}>
+              Steps: {activeLesson.steps.length} · Eye: {activeLesson.steps.find(s => s.region === 'eyes')?.family || '—'} · Lip: {activeLesson.steps.find(s => s.region === 'lips')?.family || '—'}
+            </div>
+          </div>
+        )}
+
+        {/* ── Shade families ── */}
+        {panelOpen && (
+          <div className="dbg-group">
+            <div className="dbg-area" style={{ cursor: 'pointer' }} onClick={() => setShowFamilies(f => !f)}>
+              {showFamilies ? '▾' : '▸'} Shade Families ({Object.keys(SHADE_FAMILIES).length})
+            </div>
+            {showFamilies && (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 3, padding: '4px 0' }}>
+                {Object.entries(FAMILY_HEX).map(([fam, hex]) => (
+                  <div key={fam} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: '.68rem', color: '#ccc' }}>
+                    <span style={{ width: 14, height: 14, borderRadius: 3, background: hex, border: '1px solid #555', flexShrink: 0 }} />
+                    {fam}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── Entities ── */}
+        <div className="dbg-head" style={{ borderTop: '1px solid #333', marginTop: 4, paddingTop: 4 }}>
+          <b>Entities</b>
           {panelOpen && <span className="dbg-mini">
             <button onClick={() => setAll(true)}>all</button>
             <button onClick={() => setAll(false)}>none</button>

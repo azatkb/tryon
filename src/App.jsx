@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { useTryOn, glAvailable, faceBBox, depthFromLum, setRegionEdge } from './tryon/index.js';
 import { initSegmenter, segmentLips, segmentHair, segmenterReady, resetSegmenter } from './lipSegmenter.js';
 import { PRODUCTS, EYE_SHADES, FOUNDATION_SHADES, BLUSH_SHADES, HAIR_SHADES } from './products.js';
-import { LESSON, LESSONS, lessonLayers, resolveStep } from './tutorials.js';
+import { LESSON, lessonLayers, resolveStep } from './tutorials.js';
 
 const FINISHES = ['matte', 'satin', 'gloss'];
 
@@ -49,14 +49,13 @@ export default function App() {
 
   // lesson mode (guided look) — this is the whole app
   const [lessonOn] = useState(true);
-  const [lessonIdx, setLessonIdx] = useState(0);
   const [step, setStep] = useState(0);
   const [skinDepth, setSkinDepth] = useState(''); // auto-estimated for deep-skin-aware shades
 
   // global look intensity — scales every applied layer (1 = as the lesson tuned it)
   const [lookIntensity, setLookIntensity] = useState(1);
 
-  const activeLesson = LESSONS[lessonIdx] || LESSON;
+  const activeLesson = LESSON;
 
   // Push each step's `edge` into the renderer. Edge hardness is a property of
   // the mask, not of a layer object, so it can't ride along in lessonLayers()
@@ -377,16 +376,6 @@ export default function App() {
           </div>
           <h1 className="lesson-title">{lessonStep.title}</h1>
           <p className="lesson-desc">{lessonStep.text}</p>
-          {LESSONS.length > 1 && (
-            <div className="lesson-picker">
-              {LESSONS.map((ls, i) => (
-                <button key={i} className={`lp-btn${i === lessonIdx ? ' on' : ''}`}
-                  onClick={() => { setLessonIdx(i); setStep(0); }}>
-                  {ls.title}
-                </button>
-              ))}
-            </div>
-          )}
         </div>
       ) : (
         <header>

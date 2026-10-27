@@ -9,6 +9,16 @@ const MOTION_IDX = [1, 13, 14, 61, 291, 199];
 // Nose bridge / tip / cheeks / eye corners — the patch we sample for exposure.
 const LUM_IDX = [4, 94, 323, 33, 263, 1, 168];
 
+// Symmetric landmark pairs for yaw estimation (left idx, right idx).
+// Outer eye corners + outer cheek + jaw edge — widely spaced for precision.
+const YAW_PAIRS = [
+  [33, 263],   // outer eye corners
+  [234, 454],  // outer cheek
+  [127, 356],  // jaw edge
+];
+// Nose tip — the face centre reference.
+const NOSE_TIP = 4;
+
 /**
  * Per-frame face motion in normalised units, EMA-smoothed by the caller.
  * Returns { motion, snapshot } — pass the snapshot back in as `prev` next frame.
@@ -127,6 +137,35 @@ export function estimateFaceLum(source, landmarks) {
   } catch (_) {
     return null; // tainted canvas or a frame that isn't ready yet
   }
+}
+
+/**
+ * Estimate face yaw (horizontal rotation) from landmarks, 0..1.
+ *   0 = perfectly frontal, 1 = full profile (90°).
+ * Uses the ratio of nose-to-left vs nose-to-right distances on x-axis.
+ * When the face turns right, the nose moves closer to the right outline
+ * and further from the left — the asymmetry maps directly to yaw.
+ */
+export function estimateFaceYaw(landmarks) {
+  if (!landmarks || landmarks.length < 400) return null;
+  const nose = landmarks[NOSE_TIP];
+  if (!nose) return null;
+  let sumL = 0, sumR = 0, n = 0;
+  for (const [li, ri] of YAW_PAIRS) {
+    const pl = landmarks[li], pr = landmarks[ri];
+    if (!pl || !pr) continue;
+    sumL += Math.abs(nose.x - pl.x);
+    sumR += Math.abs(nose.x - pr.x);
+    n++;
+  }
+  if (n === 0) return null;
+  const dL = sumL / n, dR = sumR / n;
+  const total = dL + dR;
+  if (total < 0.001) return 0;
+  // ratio: 0.5 = frontal, 0 or 1 = full profile
+  const ratio = dR / total;
+  // Map deviation from 0.5 to 0..1: abs(ratio - 0.5) * 2
+  return Math.min(1, Math.abs(ratio - 0.5) * 2);
 }
 
 // Left / right cheek landmarks for directional light estimation.

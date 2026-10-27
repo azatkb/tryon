@@ -63,7 +63,7 @@ uniform sampler2D uFrame, uFnd, uBlush, uHair, uEye, uLash, uLip, uSculpt, uLipL
 uniform vec3 uFndShade, uBlushShade, uHairShade, uEyeShade, uLipShade, uWB, uLipLinerShade, uEyelinerShade, uBrowShade;
 uniform float uFndInt, uBlushInt, uHairInt, uEyeInt, uLashInt, uLipInt;
 uniform float uContourInt, uHighlightInt, uUnderEyeInt, uLipLinerInt, uEyelinerInt, uBrowInt;
-uniform float uLight, uFinish, uFaceLum, uCinema, uLightBal;
+uniform float uLight, uFinish, uFaceLum, uCinema, uLightBal, uFaceYaw;
 uniform float uEyeFinish;  // 0=matte, 1=satin, 2=shimmer
 uniform float uFndFinish;  // 0=powder/matte, 1=natural, 2=dewy/cream
 uniform float uBlushFinish; // 0=powder, 1=cream
@@ -261,6 +261,13 @@ void main(){
   // Side is determined by UV x relative to 0.5 (mirrored camera: left of frame
   // is the viewer's left). When light comes from the same side as the pixel,
   // the contour is weakened — real light washes out painted shadow.
+  // ── Yaw fade: contour is for faking depth on a frontal face — when the face
+  // is actually turned, real geometry casts its own shadows and painted contour
+  // looks wrong. Fade rapidly: at ~30% yaw already nearly invisible.
+  float yawFade = 1.0 - smoothstep(0.05, 0.35, uFaceYaw);  // 1 at frontal, ~0 at 35%+ yaw
+  contourD *= yawFade;
+
+  // ── Light-direction fade (existing): real light washes out painted shadow.
   float side = sign(vUv.x - 0.5);  // –1 left of centre, +1 right
   float sameAsLight = max(0.0, side * uLightBal);  // 0..1, how much this side is lit
   float lightFade = 1.0 - sameAsLight * 0.75;      // keep at least 25% contour
@@ -553,7 +560,7 @@ function initGL() {
                    'uFndShade','uBlushShade','uHairShade','uEyeShade','uLipShade','uWB','uLipLinerShade','uEyelinerShade','uBrowShade',
                    'uFndInt','uBlushInt','uHairInt','uEyeInt','uLashInt','uLipInt',
                    'uContourInt','uHighlightInt','uUnderEyeInt','uLipLinerInt','uEyelinerInt','uBrowInt',
-                   'uLight','uFinish','uFaceLum','uCinema','uLightBal','uEyeFinish','uFndFinish','uBlushFinish','uTexel']) {
+                   'uLight','uFinish','uFaceLum','uCinema','uLightBal','uFaceYaw','uEyeFinish','uFndFinish','uBlushFinish','uTexel']) {
     loc[u] = gl.getUniformLocation(prog, u);
   }
   tex = { frame: makeTex(), fnd: makeTex(), blush: makeTex(), hair: makeTex(), eye: makeTex(), lash: makeTex(), lip: makeTex(), sculpt: makeTex(), lipLiner: makeTex(), eyeliner: makeTex(), brows: makeTex() };
@@ -665,6 +672,7 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
   gl.uniform1f(loc.uFinish, FINISH_CODE[lips?.finish] ?? 1);
   gl.uniform1f(loc.uFaceLum, typeof opts.faceLum === 'number' ? opts.faceLum : 0.5);
   gl.uniform1f(loc.uLightBal, typeof opts.lightBal === 'number' ? opts.lightBal : 0);
+  gl.uniform1f(loc.uFaceYaw, typeof opts.faceYaw === 'number' ? opts.faceYaw : 0);
   gl.uniform1f(loc.uCinema, typeof opts.cinema === 'number' ? opts.cinema : 0);
 
   // Per-region finish codes: 0=matte/powder, 1=satin/natural, 2=shimmer/dewy/cream

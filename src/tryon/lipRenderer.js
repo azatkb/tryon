@@ -1217,8 +1217,19 @@ export function renderMakeup(ctx, w, h, landmarks, opts) {
     compositeDark(ctx, w, h, eyelinerMaskCv, opts.eyeliner.color || '#0a0a0a', opts.eyeliner.intensity ?? 0.9);
   }
   if (opts.lashes) {
-    buildLashMask(w, h, landmarks);
-    compositeDark(ctx, w, h, lashMaskCv, '#000000', opts.lashes.intensity ?? 0.8);
+    // Lashes are thin strokes — even small landmark lag is visible as floating
+    // lashes during a sharp head jerk. Fade them out when motion is high;
+    // perspective tuck inside buildLashMask is untouched.
+    const lashMotion = opts.motion ?? 0;
+    const LASH_FADE_START = 0.003;  // begin fading
+    const LASH_FADE_END   = 0.008;  // fully hidden
+    const lashFade = lashMotion <= LASH_FADE_START ? 1
+      : lashMotion >= LASH_FADE_END ? 0
+      : 1 - (lashMotion - LASH_FADE_START) / (LASH_FADE_END - LASH_FADE_START);
+    if (lashFade > 0.01) {
+      buildLashMask(w, h, landmarks);
+      compositeDark(ctx, w, h, lashMaskCv, '#000000', (opts.lashes.intensity ?? 0.8) * lashFade);
+    }
   }
   // Lip liner goes DOWN FIRST, lipstick over it — that's the actual sequence.
   // The lipstick then covers it by its own alpha, so the liner survives mostly

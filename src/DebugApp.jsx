@@ -84,6 +84,7 @@ function collectFamilies() {
 
 export default function DebugApp() {
   const canvasRef = useRef(null), maskTintRef = useRef(null);
+  const imgRef = useRef(null);
   const [useGL, setUseGL] = useState(glAvailable());
   const [borders, setBorders] = useState(false);
   const [showPoints, setShowPoints] = useState(false);
@@ -96,6 +97,8 @@ export default function DebugApp() {
   const [blushFinish, setBlushFinish] = useState('powder');
   const [lessonIdx, setLessonIdx] = useState(0);
   const [showFamilies, setShowFamilies] = useState(false);
+  const [photoMode, setPhotoMode] = useState(false);
+  const [photoUrl, setPhotoUrl] = useState(null);
   const activeLesson = LESSONS[lessonIdx] || LESSON;
   const allFamilies = useMemo(collectFamilies, []);
 
@@ -208,11 +211,40 @@ export default function DebugApp() {
     if (stateRef.current.showPoints) drawLandmarks(ctx, w, h, landmarks);
   }, [drawBorders]);
 
-  const { ready, error, camError } = useTryOn({
+  const { ready, error, camError, detectStill, redrawStill } = useTryOn({
     layers,
+    source: photoMode ? 'element' : 'camera',
+    sourceEl: imgRef.current,
     renderer: useGL ? 'auto' : 'canvas',
     onFrame,
   });
+
+  // Photo upload handler
+  const handlePhoto = useCallback((e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    setPhotoUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return url; });
+    setPhotoMode(true);
+  }, []);
+
+  // Detect face when photo loads
+  const handleImgLoad = useCallback(() => {
+    if (imgRef.current && ready) detectStill(imgRef.current);
+  }, [ready, detectStill]);
+
+  // Redraw makeup when layers change in photo mode
+  useEffect(() => {
+    if (photoMode && imgRef.current && ready) {
+      redrawStill(imgRef.current);
+    }
+  }, [photoMode, layers, ready, redrawStill]);
+
+  // Back to camera
+  const exitPhoto = useCallback(() => {
+    setPhotoMode(false);
+    setPhotoUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return null; });
+  }, []);
 
   const toggle = (id) => setEnabled((s) => ({ ...s, [id]: !s[id] }));
   const setAll = (val) => setEnabled((s) => { const n = { ...s }; for (const e of ENTITIES) if (IMPLEMENTED.has(e.id)) n[e.id] = val; return n; });
@@ -234,11 +266,17 @@ export default function DebugApp() {
 
   return (
     <div className="dbg">
+      {/* Hidden img for photo mode — needed as sourceEl for detectStill */}
+      {photoUrl && <img ref={imgRef} src={photoUrl} onLoad={handleImgLoad}
+        style={{ position: 'absolute', width: 0, height: 0, opacity: 0, pointerEvents: 'none' }}
+        crossOrigin="anonymous" />}
+
       <div className="dbg-stage">
         <canvas ref={canvasRef} className="mir" />
         {!ready && !error && <div className="dbg-overlay">Loading face model…</div>}
         {error && <div className="dbg-overlay err">Model failed: {error}</div>}
-        {camError && <div className="dbg-overlay err">Camera: {camError}</div>}
+        {camError && !photoMode && <div className="dbg-overlay err">Camera: {camError}</div>}
+        {photoMode && !photoUrl && <div className="dbg-overlay">Upload a photo to debug</div>}
       </div>
 
       <div className={`dbg-panel${panelOpen ? '' : ' dbg-panel--collapsed'}`}>
@@ -326,6 +364,25 @@ export default function DebugApp() {
           {enabled.contour && tuneBlock('contour')}
         </div>}
         {panelOpen && <div className="dbg-foot">
+          {/* ── Photo mode ── */}
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 6, paddingBottom: 6, borderBottom: '1px solid #333' }}>
+            <label style={{ fontSize: '.72rem', cursor: 'pointer', padding: '3px 10px', borderRadius: 12, fontWeight: 600,
+              border: photoMode ? '2px solid #2196f3' : '1px solid #555',
+              background: photoMode ? '#2196f3' : 'transparent',
+              color: photoMode ? '#fff' : '#ccc' }}>
+              Photo
+              <input type="file" accept="image/*" onChange={handlePhoto} style={{ display: 'none' }} />
+            </label>
+            {photoMode && (
+              <button onClick={exitPhoto} style={{ fontSize: '.72rem', padding: '3px 10px', borderRadius: 12,
+                border: '1px solid #555', background: 'transparent', color: '#ccc', cursor: 'pointer', fontWeight: 600 }}>
+                Camera
+              </button>
+            )}
+            {photoMode && photoUrl && (
+              <span style={{ fontSize: '.65rem', color: '#888' }}>still mode</span>
+            )}
+          </div>
           <label className="dbg-row"><input type="checkbox" checked={borders} onChange={(e) => setBorders(e.target.checked)} /> Show mask borders</label>
           <label className="dbg-row"><input type="checkbox" checked={showPoints} onChange={(e) => setShowPoints(e.target.checked)} /> Mesh points</label>
           <label className="dbg-row"><input type="checkbox" checked={protect} onChange={(e) => setProtect(e.target.checked)} /> Protect features (nose/eyes/lips/brows)</label>

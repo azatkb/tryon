@@ -627,7 +627,8 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
     upload(2, tex.blush, blush ? buildBlushMask(w, h, landmarks) : blank());
     upload(3, tex.hair, (hair && hair.mask) ? hair.mask : blank());
     upload(4, tex.eye, eyes ? buildEyeMask(w, h, landmarks) : blank());
-    upload(5, tex.lash, lashes ? buildLashMask(w, h, landmarks) : blank());
+    const lashMot = opts.motion ?? 0;
+    upload(5, tex.lash, (lashes && lashMot < 0.008) ? buildLashMask(w, h, landmarks) : blank());
     upload(6, tex.lip, lips ? buildLipMask(w, h, landmarks, lips) : blank());
     upload(7, tex.sculpt, sculptOn
       ? buildSculptPack(w, h, landmarks, { contour: !!contour, highlight: !!highlight, underEye: !!underEye })
@@ -659,7 +660,11 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
   gl.uniform1f(loc.uBlushInt, blush ? (blush.intensity ?? 0.4) : 0);
   gl.uniform1f(loc.uHairInt, (hair && hair.mask) ? (hair.intensity ?? 0.7) : 0);
   gl.uniform1f(loc.uEyeInt, eyes ? (eyes.intensity ?? 0.5) : 0);
-  gl.uniform1f(loc.uLashInt, lashes ? (lashes.intensity ?? 0.8) : 0);
+  // Fade out lashes during fast head movement — thin strokes lag visibly
+  const lashMotion = opts.motion ?? 0;
+  const lashFade = lashMotion <= 0.003 ? 1 : lashMotion >= 0.008 ? 0
+    : 1 - (lashMotion - 0.003) / (0.008 - 0.003);
+  gl.uniform1f(loc.uLashInt, lashes ? (lashes.intensity ?? 0.8) * lashFade : 0);
   gl.uniform1f(loc.uLipInt, lips ? (lips.intensity ?? 0.7) : 0);
   gl.uniform1f(loc.uContourInt, contour ? (contour.intensity ?? 0.35) : 0);
   gl.uniform1f(loc.uHighlightInt, highlight ? (highlight.intensity ?? 0.5) : 0);

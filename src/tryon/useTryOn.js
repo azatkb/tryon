@@ -100,7 +100,7 @@ export function useTryOn(options = {}) {
       // data (a segmentation mask that lands between renders, say) — a plain
       // `layers` object can only update when React re-renders.
       const live = cfg.getLayers ? cfg.getLayers(metricsRef.current) : cfg.layers;
-      const withLum = { ...live, faceLum: metricsRef.current.faceLum, lightBal: metricsRef.current.lightBal, faceYaw: metricsRef.current.faceYaw };
+      const withLum = { ...live, faceLum: metricsRef.current.faceLum, lightBal: metricsRef.current.lightBal, faceYaw: metricsRef.current.faceYaw, motion: metricsRef.current.motion };
       const useGL = cfg.renderer === 'gl' || (cfg.renderer === 'auto' && glAvailable());
       let done = false;
       if (useGL) {

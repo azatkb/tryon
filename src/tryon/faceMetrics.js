@@ -52,6 +52,14 @@ const EYE_RANGE  = [// upper+lower lids left
                     263, 249, 390, 373, 374, 380, 381, 382, 362, 398, 384, 385, 386, 387, 388, 466];
 const FAST_SET = new Set([...LIP_RANGE, ...EYE_RANGE]);
 
+// Lash landmarks need even less smoothing — thin strokes make sub-pixel lag
+// visible. These points track near-raw so lashes never trail the eye.
+const LASH_IDX = [// upper lid right
+                  33, 246, 161, 160, 159, 158, 157, 173, 133,
+                  // upper lid left
+                  263, 466, 388, 387, 386, 385, 384, 398, 362];
+const LASH_SET = new Set(LASH_IDX);
+
 /**
  * EMA landmark smoother — kills per-frame jitter without adding lag when the
  * face actually moves. alpha rises with motion: still face => heavy smoothing,
@@ -77,7 +85,10 @@ export function smoothLandmarks(cur, smoothed, motion, opts = {}) {
     if (FAST_SET.has(i)) {
       const pd = Math.hypot(c.x - s.x, c.y - s.y);
       // 0.002 normalised ≈ 1-2px on 1080p — meaningful lip/eye movement
-      const localBoost = Math.min(max, 0.45 + pd * 300);
+      // Lash points get a higher floor (0.72) — thin strokes can't tolerate
+      // even small lag without looking like they float off the lid.
+      const floor = LASH_SET.has(i) ? 0.72 : 0.45;
+      const localBoost = Math.min(max, floor + pd * 300);
       alpha = Math.max(alpha, localBoost);
     }
     const inv = 1 - alpha;

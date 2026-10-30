@@ -84,6 +84,7 @@ function collectFamilies() {
 
 export default function DebugApp() {
   const canvasRef = useRef(null), maskTintRef = useRef(null);
+  const origCanvasRef = useRef(null);  // original photo for side-by-side
   const imgRef = useRef(null);
   const [useGL, setUseGL] = useState(glAvailable());
   const [borders, setBorders] = useState(false);
@@ -228,9 +229,21 @@ export default function DebugApp() {
     setPhotoMode(true);
   }, []);
 
-  // Detect face when photo loads
+  // Detect face when photo loads + draw original for side-by-side
   const handleImgLoad = useCallback(() => {
-    if (imgRef.current && ready) detectStill(imgRef.current);
+    const img = imgRef.current;
+    if (!img) return;
+    // Draw original onto origCanvasRef for side-by-side comparison
+    const oc = origCanvasRef.current;
+    if (oc) {
+      const w = img.naturalWidth || img.width;
+      const h = img.naturalHeight || img.height;
+      if (w && h) {
+        oc.width = w; oc.height = h;
+        oc.getContext('2d').drawImage(img, 0, 0, w, h);
+      }
+    }
+    if (ready) detectStill(img);
   }, [ready, detectStill]);
 
   // Redraw makeup when layers change in photo mode
@@ -244,6 +257,38 @@ export default function DebugApp() {
   const exitPhoto = useCallback(() => {
     setPhotoMode(false);
     setPhotoUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return null; });
+  }, []);
+
+  // Download combined side-by-side: original | processed
+  const downloadCombined = useCallback(() => {
+    const orig = origCanvasRef.current;
+    const proc = canvasRef.current;
+    if (!orig || !proc || !orig.width || !proc.width) return;
+    const w = orig.width, h = orig.height;
+    const gap = Math.round(w * 0.005);  // thin gap between halves
+    const combo = document.createElement('canvas');
+    combo.width = w * 2 + gap;
+    combo.height = h;
+    const ctx = combo.getContext('2d');
+    ctx.fillStyle = '#111';
+    ctx.fillRect(0, 0, combo.width, combo.height);
+    ctx.drawImage(orig, 0, 0, w, h);
+    ctx.drawImage(proc, w + gap, 0, w, h);
+    // Labels
+    ctx.font = `bold ${Math.max(14, Math.round(h * 0.025))}px sans-serif`;
+    ctx.textAlign = 'left';
+    ctx.fillStyle = 'rgba(255,255,255,0.8)';
+    ctx.shadowColor = 'rgba(0,0,0,0.7)';
+    ctx.shadowBlur = 4;
+    const pad = Math.round(h * 0.02);
+    ctx.fillText('Original', pad, h - pad);
+    ctx.fillText('REESOLVE', w + gap + pad, h - pad);
+    ctx.shadowBlur = 0;
+    // Download
+    const a = document.createElement('a');
+    a.download = 'reesolve-comparison.png';
+    a.href = combo.toDataURL('image/png');
+    a.click();
   }, []);
 
   const toggle = (id) => setEnabled((s) => ({ ...s, [id]: !s[id] }));
@@ -272,7 +317,23 @@ export default function DebugApp() {
         crossOrigin="anonymous" />}
 
       <div className="dbg-stage">
-        <canvas ref={canvasRef} className="mir" />
+        {photoMode && photoUrl ? (
+          /* Side-by-side: original | processed */
+          <div style={{ display: 'flex', gap: 2, width: '100%', height: '100%', alignItems: 'center', justifyContent: 'center' }}>
+            <div style={{ flex: 1, position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <canvas ref={origCanvasRef} className="mir" style={{ maxWidth: '100%', maxHeight: '100%' }} />
+              <span style={{ position: 'absolute', bottom: 8, left: 10, fontSize: '.7rem', color: 'rgba(255,255,255,0.7)',
+                textShadow: '0 1px 3px rgba(0,0,0,0.8)', fontWeight: 600 }}>Original</span>
+            </div>
+            <div style={{ flex: 1, position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <canvas ref={canvasRef} className="mir" style={{ maxWidth: '100%', maxHeight: '100%' }} />
+              <span style={{ position: 'absolute', bottom: 8, left: 10, fontSize: '.7rem', color: 'rgba(255,255,255,0.7)',
+                textShadow: '0 1px 3px rgba(0,0,0,0.8)', fontWeight: 600 }}>REESOLVE</span>
+            </div>
+          </div>
+        ) : (
+          <canvas ref={canvasRef} className="mir" />
+        )}
         {!ready && !error && <div className="dbg-overlay">Loading face model…</div>}
         {error && <div className="dbg-overlay err">Model failed: {error}</div>}
         {camError && !photoMode && <div className="dbg-overlay err">Camera: {camError}</div>}
@@ -380,7 +441,10 @@ export default function DebugApp() {
               </button>
             )}
             {photoMode && photoUrl && (
-              <span style={{ fontSize: '.65rem', color: '#888' }}>still mode</span>
+              <button onClick={downloadCombined} style={{ fontSize: '.72rem', padding: '3px 10px', borderRadius: 12,
+                border: '1px solid #4caf50', background: '#4caf50', color: '#fff', cursor: 'pointer', fontWeight: 600 }}>
+                ⬇ Download
+              </button>
             )}
           </div>
           <label className="dbg-row"><input type="checkbox" checked={borders} onChange={(e) => setBorders(e.target.checked)} /> Show mask borders</label>

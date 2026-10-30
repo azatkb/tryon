@@ -184,6 +184,8 @@ let MW = 0, MH = 0;
 // Reused offscreen canvases (avoid per-frame allocation).
 // lashMaskCv is FULL-RES (no MASK_SCALE) so lash strokes stay crisp.
 let maskCv, eyeMaskCv, faceMaskCv, lashMaskCv, blushMaskCv, contourMaskCv, highlightMaskCv, underEyeMaskCv, lipLinerMaskCv, eyelinerMaskCv, browMaskCv, packCv, colorCv, specCv, refineCv, lumaCv;
+// Frequency separation scratch canvases (full resolution)
+let freqLoCv, freqHiCv;
 let LW = 0, LH = 0; // full-res dimensions for lash canvas
 function ensure(w, h) {
   if (!maskCv) {
@@ -195,13 +197,14 @@ function ensure(w, h) {
     browMaskCv = document.createElement('canvas'); packCv = document.createElement('canvas');
     colorCv = document.createElement('canvas'); specCv = document.createElement('canvas');
     refineCv = document.createElement('canvas'); lumaCv = document.createElement('canvas');
+    freqLoCv = document.createElement('canvas'); freqHiCv = document.createElement('canvas');
   }
   MW = Math.max(2, Math.round(w * MASK_SCALE));
   MH = Math.max(2, Math.round(h * MASK_SCALE));
   LW = w; LH = h; // lash mask at full resolution — crisp lines
   if (lashMaskCv.width !== LW || lashMaskCv.height !== LH) { lashMaskCv.width = LW; lashMaskCv.height = LH; }
   for (const c of [maskCv, eyeMaskCv, faceMaskCv, blushMaskCv, contourMaskCv, highlightMaskCv, underEyeMaskCv, lipLinerMaskCv, eyelinerMaskCv, browMaskCv, packCv, refineCv]) { if (c.width !== MW || c.height !== MH) { c.width = MW; c.height = MH; } }
-  for (const c of [colorCv, specCv, lumaCv]) { if (c.width !== w || c.height !== h) { c.width = w; c.height = h; } }
+  for (const c of [colorCv, specCv, lumaCv, freqLoCv, freqHiCv]) { if (c.width !== w || c.height !== h) { c.width = w; c.height = h; } }
 }
 
 // Pack contour / highlight / under-eye masks into one RGB texture (R / G / B)
@@ -584,10 +587,11 @@ export function buildLashMask(w, h, landmarks) {
       m.stroke();
     }
 
-    // 2. individual lash flicks — resampled densely along the lash line
-    //    (not just at the sparse landmarks), each thin, up-and-out.
-    m.lineWidth = Math.max(0.8, thin * 0.7);
-    const len = eyeH * CFG.lashes.len;
+    // 2. Natural lash flicks — clustered, with thickness/curl/length variation
+    //    Real lashes grow in clusters of 2-4 from follicle groups, not evenly
+    //    spaced. Each cluster fans slightly and individual lashes within it vary
+    //    in length and curl. Longest at the outer third, tapering inward.
+    const baseLen = eyeH * CFG.lashes.len;
     // arc-length sampler along the polyline (u: 0 = outer corner, 1 = inner)
     const seg = []; let total = 0;
     for (let k = 1; k < pts.length; k++) {
@@ -601,43 +605,98 @@ export function buildLashMask(w, h, landmarks) {
       const f = seg[k] ? d / seg[k] : 0;
       return [pts[k][0] + (pts[k + 1][0] - pts[k][0]) * f, pts[k][1] + (pts[k + 1][1] - pts[k][1]) * f];
     };
-    const N = CFG.lashes.count;
-    const curl = CFG.lashes.curl ?? 0.25;
-    // Perspective factor for lash flicks: on the far eye, inner flicks are
-    // shorter and curl inward (toward nose) instead of outward — gives a 3D
-    // foreshortened look instead of flat identical flicks on both eyes.
-    const perspShorten = Math.max(0.4, persp);          // 1 = near eye full, 0.4 = far eye floor
-    const perspCurlFlip = Math.max(0, (1 - persp) * 0.6); // 0 = near, up to 0.6 = far
-    for (let i = 0; i < N; i++) {
-      const u = i / (N - 1);
-      if (u > CFG.lashes.reachT) continue;
-      // taper: longest at outer corner, shorter toward inner
-      const grow = 1 - u / CFG.lashes.reachT;
-      // slight random variation — different lashes have different lengths (±15%)
-      const jitter = 0.85 + 0.30 * (((i * 7 + 3) % 13) / 13.0);
-      // On the far eye, scale inner flicks down more aggressively for depth
-      const innerPerspScale = 1 - (1 - perspShorten) * u;  // outer stays full, inner shrinks
-      const lashLen = len * grow * jitter * innerPerspScale;
-      const [x, y] = at(u);
-      // Perspective curl: inner flicks on the far eye curl inward (toward nose)
-      // instead of outward, as if viewed at an angle.
-      const flipAmount = perspCurlFlip * u;  // only inner flicks flip
-      const effectiveOuterDir = outerDir * (1 - flipAmount * 2); // blend toward opposite
-      // Inner-corner fade: lashes near the nose on the far eye fade out
-      const fadeFactor = tuck > 0.05
-        ? 1 - Math.max(0, (u - 0.55) / 0.45) * Math.min(1, tuck * 0.9)
-        : 1;
-      // curl: tip endpoint is curled outward/upward using quadratic bezier
-      const tipX = x + effectiveOuterDir * lashLen * (0.45 + curl * 0.35);
-      const tipY = y - lashLen;
-      // control point: pulled outward for curl arc
-      const ctrlX = x + effectiveOuterDir * lashLen * 0.25;
-      const ctrlY = y - lashLen * (0.5 + curl * 0.35);
-      m.strokeStyle = `rgba(255,255,255,${fadeFactor.toFixed(3)})`;
-      m.beginPath();
-      m.moveTo(x, y);
-      m.quadraticCurveTo(ctrlX, ctrlY, tipX, tipY);
-      m.stroke();
+    // Deterministic pseudo-random — stable across frames, no flicker
+    const hash = (seed) => {
+      let h = seed * 2654435761 >>> 0;
+      h = ((h >>> 16) ^ h) * 45679 >>> 0;
+      return (h & 0xffff) / 0xffff;  // 0..1
+    };
+    const baseCurl = CFG.lashes.curl ?? 0.25;
+    // Perspective factor: far eye → inner flicks shorter & curl inward
+    const perspShorten = Math.max(0.4, persp);
+    const perspCurlFlip = Math.max(0, (1 - persp) * 0.6);
+
+    // Generate clusters. Each cluster has 2-3 lashes fanning from one root zone.
+    // ~11-13 clusters across the lash line, giving 28-38 individual lashes.
+    const CLUSTERS = 12;
+    const clusterSpacing = CFG.lashes.reachT / CLUSTERS;
+    for (let ci = 0; ci < CLUSTERS; ci++) {
+      const clusterU = (ci + 0.5) * clusterSpacing;
+      if (clusterU > CFG.lashes.reachT) continue;
+      // Number of lashes per cluster: 2-3, with outer clusters getting 3
+      const clusterSize = ci < 4 ? 3 : (hash(ci * 97) > 0.5 ? 3 : 2);
+      // Cluster spread: how far apart the roots are (narrower toward inner corner)
+      const spreadFactor = (1 - clusterU / CFG.lashes.reachT) * 0.6 + 0.4;
+      const clusterSpread = clusterSpacing * 0.35 * spreadFactor;
+
+      for (let li = 0; li < clusterSize; li++) {
+        // Each lash within the cluster is offset slightly from cluster centre
+        const lashOffset = (li - (clusterSize - 1) / 2) * clusterSpread / clusterSize;
+        const u = Math.max(0, Math.min(CFG.lashes.reachT, clusterU + lashOffset));
+        const seed = ci * 31 + li * 7;
+
+        // ── Length envelope ──
+        // Bell-shaped: peaks at u≈0.2 (outer third), not at u=0
+        const bellPeak = 0.18;
+        const bellWidth = 0.55;
+        const bellDist = (u - bellPeak) / bellWidth;
+        const envelope = Math.exp(-bellDist * bellDist * 2.5);
+        // Minimum: inner corner still gets short lashes (not zero)
+        const envClamp = 0.25 + envelope * 0.75;
+        // Per-lash length jitter ±20%, deterministic
+        const lenJitter = 0.80 + 0.40 * hash(seed + 1);
+        // Perspective: inner flicks on far eye scale down
+        const innerPerspScale = 1 - (1 - perspShorten) * u;
+        const lashLen = baseLen * envClamp * lenJitter * innerPerspScale;
+        // Very short lashes are invisible noise — skip
+        if (lashLen < 1.2) continue;
+
+        // ── Thickness variation ──
+        // Outer lashes thicker, inner thinner; variation within cluster
+        const thickEnv = 0.55 + 0.45 * (1 - u / CFG.lashes.reachT);
+        const thickJitter = 0.75 + 0.50 * hash(seed + 2);
+        m.lineWidth = Math.max(0.6, thin * 0.65 * thickEnv * thickJitter);
+
+        // ── Curl variation ──
+        // Each lash curls differently: outer lashes curl more, centres medium,
+        // inner lashes flatter. ±30% random variation on top.
+        const curlPos = baseCurl * (0.8 + 0.4 * (1 - u / CFG.lashes.reachT));
+        const curlJitter = 0.70 + 0.60 * hash(seed + 3);
+        const curl = curlPos * curlJitter;
+
+        // ── Angular fan ──
+        // Lashes fan outward from centre: outer lashes lean outward,
+        // inner lashes lean slightly inward, creating a natural fan shape
+        const fanAngle = (0.5 - u / CFG.lashes.reachT) * 0.35;  // radians
+
+        const [x, y] = at(u);
+        // Perspective curl flip on far eye
+        const flipAmount = perspCurlFlip * u;
+        const effectiveOuterDir = outerDir * (1 - flipAmount * 2);
+
+        // Inner-corner fade
+        const fadeFactor = tuck > 0.05
+          ? 1 - Math.max(0, (u - 0.55) / 0.45) * Math.min(1, tuck * 0.9)
+          : 1;
+        if (fadeFactor < 0.02) continue;
+
+        // ── Bezier lash stroke ──
+        // tip: curled outward/upward with fan angle applied
+        const baseAngle = -Math.PI / 2;  // straight up
+        const lashAngle = baseAngle + fanAngle;
+        const tipX = x + Math.cos(lashAngle) * lashLen + effectiveOuterDir * lashLen * curl * 0.45;
+        const tipY = y + Math.sin(lashAngle) * lashLen;
+        // control point: creates the curl arc — offset outward from the line
+        const ctrlT = 0.45 + curl * 0.15;  // how far up the control sits
+        const ctrlX = x + Math.cos(lashAngle) * lashLen * ctrlT + effectiveOuterDir * lashLen * curl * 0.25;
+        const ctrlY = y + Math.sin(lashAngle) * lashLen * (0.5 + curl * 0.3);
+
+        m.strokeStyle = `rgba(255,255,255,${fadeFactor.toFixed(3)})`;
+        m.beginPath();
+        m.moveTo(x, y);
+        m.quadraticCurveTo(ctrlX, ctrlY, tipX, tipY);
+        m.stroke();
+      }
     }
   }
   // Protect: cut nose region so lashes don't bleed onto the bridge at profile angles
@@ -659,7 +718,8 @@ export function buildBlushMask(w, h, landmarks) {
   const m = blushMaskCv.getContext('2d');
   m.setTransform(1, 0, 0, 1, 0, 0);
   m.clearRect(0, 0, MW, MH);
-  m.filter = `blur(${Math.max(2, MW * CFG.blush.blur)}px)`; // diffuse edges
+  const blushBlur = Math.max(2, MW * CFG.blush.blur);
+  m.filter = `blur(${blushBlur}px)`; // diffuse edges
   const faceW = Math.abs(landmarks[FACE_SIDE_R].x - landmarks[FACE_SIDE_L].x) * MW;
   const half = Math.max(1, faceW * CFG.blush.half);   // sweep length (semi-major)
   const width = Math.max(1, faceW * CFG.blush.width); // sweep width  (semi-minor)
@@ -674,33 +734,51 @@ export function buildBlushMask(w, h, landmarks) {
     const by = cy + Math.sin(ang) * half * 0.35 - width * 0.18;
 
     // 1. Wide diffuse halo — the outer glow that blends into skin
+    //    Smoother 5-stop gradient for invisible edge falloff
     m.save();
     m.translate(bx, by);
     m.rotate(ang);
     m.scale(half * cfg.haloRatio / (width * cfg.haloRatio), 1);
-    const halo = m.createRadialGradient(0, 0, 0, 0, 0, width * cfg.haloRatio);
+    const hr = width * cfg.haloRatio;
+    const halo = m.createRadialGradient(0, 0, 0, 0, 0, hr);
     halo.addColorStop(0,    `rgba(255,255,255,${cfg.haloAlpha})`);
-    halo.addColorStop(0.55, `rgba(255,255,255,${cfg.haloAlpha * 0.45})`);
+    halo.addColorStop(0.30, `rgba(255,255,255,${cfg.haloAlpha * 0.65})`);
+    halo.addColorStop(0.55, `rgba(255,255,255,${cfg.haloAlpha * 0.30})`);
+    halo.addColorStop(0.80, `rgba(255,255,255,${cfg.haloAlpha * 0.08})`);
     halo.addColorStop(1,    'rgba(255,255,255,0)');
     m.fillStyle = halo;
-    m.beginPath(); m.arc(0, 0, width * cfg.haloRatio, 0, Math.PI * 2); m.fill();
+    m.beginPath(); m.arc(0, 0, hr, 0, Math.PI * 2); m.fill();
     m.restore();
 
     // 2. Tight pigment core — where the brush deposited most colour
+    //    Smoother 6-stop gradient mimics powder deposition
     m.save();
     m.translate(bx, by);
     m.rotate(ang);
     m.scale(half / width, 1);
     const core = m.createRadialGradient(0, 0, 0, 0, 0, width);
     core.addColorStop(0,    `rgba(255,255,255,${cfg.coreAlpha})`);
-    core.addColorStop(0.42, `rgba(255,255,255,${cfg.coreAlpha * 0.55})`);
-    core.addColorStop(0.78, `rgba(255,255,255,${cfg.coreAlpha * 0.15})`);
+    core.addColorStop(0.25, `rgba(255,255,255,${cfg.coreAlpha * 0.80})`);
+    core.addColorStop(0.45, `rgba(255,255,255,${cfg.coreAlpha * 0.50})`);
+    core.addColorStop(0.65, `rgba(255,255,255,${cfg.coreAlpha * 0.22})`);
+    core.addColorStop(0.85, `rgba(255,255,255,${cfg.coreAlpha * 0.06})`);
     core.addColorStop(1,    'rgba(255,255,255,0)');
     m.fillStyle = core;
     m.beginPath(); m.arc(0, 0, width, 0, Math.PI * 2); m.fill();
     m.restore();
   }
   m.filter = 'none';
+
+  // Second softer blur pass — eliminates any banding from the gradient stops.
+  // Copy → clear → re-draw blurred. This costs ~0.3ms but dissolves edges.
+  const r = refineCv.getContext('2d');
+  r.setTransform(1, 0, 0, 1, 0, 0);
+  r.clearRect(0, 0, MW, MH);
+  r.filter = `blur(${Math.max(1, blushBlur * 0.6)}px)`;
+  r.drawImage(blushMaskCv, 0, 0, MW, MH);
+  r.filter = 'none';
+  m.clearRect(0, 0, MW, MH);
+  m.drawImage(refineCv, 0, 0, MW, MH);
   cutFeatures(m, landmarks);
   return blushMaskCv;
 }
@@ -715,7 +793,8 @@ export function buildContourMask(w, h, landmarks) {
   m.clearRect(0, 0, MW, MH);
   m.lineCap = 'round';
   m.lineJoin = 'round';
-  m.filter = `blur(${Math.max(3, MW * CFG.contour.blur)}px)`;
+  const contourBlur = Math.max(3, MW * CFG.contour.blur);
+  m.filter = `blur(${contourBlur}px)`;
   const faceW = Math.abs(landmarks[FACE_SIDE_R].x - landmarks[FACE_SIDE_L].x) * MW;
   const drop = faceW * CFG.contour.drop;
   const base = faceW * CFG.contour.width;
@@ -740,6 +819,17 @@ export function buildContourMask(w, h, landmarks) {
     m.stroke();
   }
   m.filter = 'none';
+
+  // Second blur pass — smooth any stroke aliasing for seamless skin blend
+  const rc = refineCv.getContext('2d');
+  rc.setTransform(1, 0, 0, 1, 0, 0);
+  rc.clearRect(0, 0, MW, MH);
+  rc.filter = `blur(${Math.max(1, contourBlur * 0.5)}px)`;
+  rc.drawImage(contourMaskCv, 0, 0, MW, MH);
+  rc.filter = 'none';
+  m.clearRect(0, 0, MW, MH);
+  m.drawImage(refineCv, 0, 0, MW, MH);
+
   cutFeatures(m, landmarks);
   return contourMaskCv;
 }
@@ -1176,6 +1266,115 @@ function compositeLight(ctx, w, h, maskSrc, color, intensity) {
 }
 
 /**
+ * Frequency-separation foundation: colour-correct the low-frequency (tone/hue)
+ * while preserving the high-frequency detail (pores, freckles, fine lines).
+ *
+ * 1. Blur the face region → low-freq
+ * 2. Subtract: original − blurred = high-freq (skin texture)
+ * 3. Tint the low-freq with foundation colour (via 'color' blend)
+ * 4. Recombine: tinted low-freq + high-freq
+ * 5. Composite through the face mask at the requested intensity
+ *
+ * The result looks like real foundation: the skin tone shifts but every pore,
+ * scar and freckle remains intact, not smeared or airbrushed.
+ */
+function compositeFoundation(ctx, w, h, maskSrc, opts) {
+  const { color, intensity } = opts;
+  const finish = opts.finish ?? 'natural';
+
+  // Blur radius: roughly 1.5% of face width — large enough to capture tone,
+  // small enough to not bleed across face boundaries.
+  const blurPx = Math.max(3, Math.round(w * 0.015));
+
+  const lo = freqLoCv.getContext('2d');
+  const hi = freqHiCv.getContext('2d');
+
+  // Step 1: blurred version of the face → low frequency
+  lo.setTransform(1, 0, 0, 1, 0, 0);
+  lo.filter = `blur(${blurPx}px)`;
+  lo.drawImage(ctx.canvas, 0, 0, w, h);
+  lo.filter = 'none';
+
+  // Step 2: high-freq = original − low.  Canvas can't subtract directly, but
+  // we can approximate with two complementary soft-light passes. The approach:
+  // draw the original on hi, then use 'difference' with the blurred version.
+  // This gives us an unsigned difference — add it back later as 'overlay'.
+  hi.setTransform(1, 0, 0, 1, 0, 0);
+  hi.clearRect(0, 0, w, h);
+  hi.drawImage(ctx.canvas, 0, 0, w, h);
+  hi.globalCompositeOperation = 'difference';
+  hi.drawImage(freqLoCv, 0, 0, w, h);
+  hi.globalCompositeOperation = 'source-over';
+
+  // Step 3: tint the low-freq with the foundation colour (shift skin tone)
+  lo.globalCompositeOperation = 'color';
+  lo.globalAlpha = Math.min(1.0, intensity * 1.2);
+  lo.fillStyle = color;
+  lo.fillRect(0, 0, w, h);
+  lo.globalAlpha = 1;
+  lo.globalCompositeOperation = 'source-over';
+
+  // Finish adjustments on low-freq
+  if (finish === 'matte') {
+    // Matte: slightly desaturate highlights → flatten shine
+    lo.globalCompositeOperation = 'saturation';
+    lo.globalAlpha = 0.15;
+    lo.fillStyle = '#888';
+    lo.fillRect(0, 0, w, h);
+    lo.globalAlpha = 1;
+    lo.globalCompositeOperation = 'source-over';
+  } else if (finish === 'dewy') {
+    // Dewy: boost luminance slightly → subtle glow
+    lo.globalCompositeOperation = 'screen';
+    lo.globalAlpha = 0.06;
+    lo.fillStyle = '#fff';
+    lo.fillRect(0, 0, w, h);
+    lo.globalAlpha = 1;
+    lo.globalCompositeOperation = 'source-over';
+  }
+
+  // Step 4: mask the tinted low-freq to face area only
+  lo.globalCompositeOperation = 'destination-in';
+  lo.drawImage(maskSrc, 0, 0, w, h);
+  lo.globalCompositeOperation = 'source-over';
+
+  // Step 5: composite onto frame.
+  // a) Replace skin tone with tinted version within the mask
+  ctx.save();
+  ctx.globalAlpha = intensity;
+  ctx.globalCompositeOperation = 'color';
+  ctx.drawImage(freqLoCv, 0, 0);
+
+  // b) Add a subtle pigment layer (multiply) for coverage depth
+  ctx.globalCompositeOperation = 'multiply';
+  ctx.globalAlpha = intensity * 0.08;
+  ctx.drawImage(freqLoCv, 0, 0);
+  ctx.restore();
+
+  // Step 6: restore high-frequency texture on top.
+  // Mask the texture to the face mask so we only boost skin-area detail.
+  hi.globalCompositeOperation = 'destination-in';
+  hi.drawImage(maskSrc, 0, 0, w, h);
+  hi.globalCompositeOperation = 'source-over';
+
+  // 'overlay' recombines the detail: dark pores darken, light freckles lighten —
+  // the texture snaps back onto the tinted base.
+  ctx.save();
+  ctx.globalCompositeOperation = 'overlay';
+  ctx.globalAlpha = 1.6; // > 1 clamped to 1 by spec, but some impl allow boost; fallback fine
+  ctx.drawImage(freqHiCv, 0, 0);
+  ctx.restore();
+
+  // A final soft-light pass of the high-freq at reduced alpha gives extra
+  // texture recovery without blowing contrast (pores stay visible but subtle).
+  ctx.save();
+  ctx.globalCompositeOperation = 'soft-light';
+  ctx.globalAlpha = 0.5;
+  ctx.drawImage(freqHiCv, 0, 0);
+  ctx.restore();
+}
+
+/**
  * Full makeup pass (Canvas). True MUA order — each product goes on in the
  * sequence it would at a counter, because what sits under what changes the
  * result: base (foundation → concealer), sculpt (contour → blush → highlight),
@@ -1186,7 +1385,7 @@ export function renderMakeup(ctx, w, h, landmarks, opts) {
   if (!landmarks || landmarks.length < 468) return;
   if (opts.foundation) {
     buildFaceMask(w, h, landmarks);
-    compositeRegion(ctx, w, h, faceMaskCv, { ...opts.foundation, finish: 'none', pigment: 0.1, lightResponse: 0 });
+    compositeFoundation(ctx, w, h, faceMaskCv, opts.foundation);
   }
   if (opts.underEye) {
     buildUnderEyeMask(w, h, landmarks);

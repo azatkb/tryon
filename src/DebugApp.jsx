@@ -318,17 +318,22 @@ export default function DebugApp() {
 
       <div className="dbg-stage">
         {photoMode && photoUrl ? (
-          /* Side-by-side: original | processed */
-          <div style={{ display: 'flex', gap: 2, width: '100%', height: '100%', alignItems: 'center', justifyContent: 'center' }}>
-            <div style={{ flex: 1, position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <canvas ref={origCanvasRef} className="mir" style={{ maxWidth: '100%', maxHeight: '100%' }} />
-              <span style={{ position: 'absolute', bottom: 8, left: 10, fontSize: '.7rem', color: 'rgba(255,255,255,0.7)',
-                textShadow: '0 1px 3px rgba(0,0,0,0.8)', fontWeight: 600 }}>Original</span>
+          /* Side-by-side: full width, padding top/bottom, no mirror */
+          <div style={{ display: 'flex', gap: 4, width: '100%', height: '100%',
+            padding: '24px 0', boxSizing: 'border-box',
+            alignItems: 'center', justifyContent: 'center' }}>
+            <div style={{ flex: 1, height: '100%', position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <canvas ref={origCanvasRef}
+                style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }} />
+              <span style={{ position: 'absolute', bottom: 28, left: 10, fontSize: '.75rem', color: 'rgba(255,255,255,0.75)',
+                textShadow: '0 1px 4px rgba(0,0,0,0.9)', fontWeight: 600, letterSpacing: '.5px' }}>Original</span>
             </div>
-            <div style={{ flex: 1, position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <canvas ref={canvasRef} className="mir" style={{ maxWidth: '100%', maxHeight: '100%' }} />
-              <span style={{ position: 'absolute', bottom: 8, left: 10, fontSize: '.7rem', color: 'rgba(255,255,255,0.7)',
-                textShadow: '0 1px 3px rgba(0,0,0,0.8)', fontWeight: 600 }}>REESOLVE</span>
+            <div style={{ width: 2, alignSelf: 'stretch', margin: '24px 0', background: 'rgba(255,255,255,0.12)', borderRadius: 1 }} />
+            <div style={{ flex: 1, height: '100%', position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <canvas ref={canvasRef}
+                style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }} />
+              <span style={{ position: 'absolute', bottom: 28, left: 10, fontSize: '.75rem', color: 'rgba(255,255,255,0.75)',
+                textShadow: '0 1px 4px rgba(0,0,0,0.9)', fontWeight: 600, letterSpacing: '.5px' }}>REESOLVE</span>
             </div>
           </div>
         ) : (

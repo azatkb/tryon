@@ -80,6 +80,7 @@ export default function App() {
   const segMaskRef = useRef(null);
   const faceBoxRef = useRef(null);
   const pipRef = useRef(null);  // small processed preview (top-right)
+  const [pipExpanded, setPipExpanded] = useState(false);
   const cropRef = useRef(null); // smoothed portrait crop rect on the face
   const skinDepthRef = useRef('');
   const hairMaskRef = useRef(null); // latest hair segmentation mask (full frame)
@@ -191,7 +192,10 @@ export default function App() {
 
     const pip = pipRef.current;
     if (pip) {
-      const pw = Math.max(2, Math.round(outW * 0.42)), ph = Math.max(2, Math.round(outH * 0.42));
+      // When expanded: 65% of main canvas height, preserving 3:4 aspect
+      const expanded = pip.dataset.expanded === '1';
+      const ph = Math.max(2, Math.round(outH * (expanded ? 0.65 : 0.42)));
+      const pw = Math.max(2, Math.round(ph * 0.75));
       if (pip.width !== pw || pip.height !== ph) { pip.width = pw; pip.height = ph; }
       pip.getContext('2d').drawImage(processed, sx, sy, sw, sh, 0, 0, pw, ph);
     }
@@ -391,9 +395,13 @@ export default function App() {
         <div className={`viewport${mirrored ? ' mir' : ''}`}>
           <img ref={imgRef} alt="" style={{ display: 'none' }} />
           <canvas ref={canvasRef} />
-          <div className={`pip${lessonOn ? ' live' : ''}`}>
+          <div className={`pip${lessonOn ? ' live' : ''}${pipExpanded ? ' expanded' : ''}`}>
             {lessonOn && <span className="pip-top">Live</span>}
-            <canvas ref={pipRef} />
+            <canvas ref={pipRef} data-expanded={pipExpanded ? '1' : '0'} />
+            <button className="pip-toggle" onClick={() => setPipExpanded(v => !v)}
+              aria-label={pipExpanded ? 'Shrink preview' : 'Expand preview'}>
+              {pipExpanded ? '▿' : '▹'}
+            </button>
             <span className="pip-label">{lessonOn ? '✦ Live preview' : 'with makeup'}</span>
           </div>
           {lessonOn && <span className="cam-label">Your live camera</span>}

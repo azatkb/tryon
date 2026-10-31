@@ -113,11 +113,11 @@ const CFG = {
 
   eyeliner: { width: 0.005,
               wing: 0.45,        // wing length, relative to eye opening
-              wingReach: 1.25,   // how far the flick travels ALONG the eye axis
-              wingLift: 0.30,    // how far it rises across that axis (keep well
-                                 // under wingReach — a wing goes out, not up)
+              wingReach: 1.40,   // how far the flick travels ALONG the eye axis
+              wingLift: 0.08,    // almost no lift — sharp straight-down wing
               blur: 0.0012,
-              taper: true },     // taper = thin at inner corner
+              taper: true,       // taper = thin at inner corner
+              wingTaper: 0.30 }, // wing tip narrows to this fraction of base width
 
   brows: { blur: 0.004 }, // brow fill edge softness
 
@@ -133,7 +133,13 @@ const CFG = {
             len: 0.40,     // slightly longer for drama
             reachT: 0.62,  // reach further across the lid
             curl: 0.28,    // curl arc — 0=straight, 1=full curl
-            blur: 0.0006 },
+            blur: 0.0006,
+            depth3d: true,       // 3D shadow layer for volume
+            shadowOffset: 0.12,  // shadow offset as fraction of lash length
+            shadowAlpha: 0.35,   // shadow layer opacity
+            taperSteps: 2,       // segments per lash for root-to-tip tapering
+            taperEnd: 0.25,      // tip width as fraction of root width
+            crossFreq: 0.18 },   // fraction of lashes that cross a neighbour
 
   face:  { blur: 0.017 },  // foundation edge softness
 
@@ -528,6 +534,14 @@ export function buildFaceMask(w, h, landmarks) {
   return faceMaskCv;
 }
 
+// Deterministic pseudo-random — stable across frames, no flicker.
+// Module-level so both lash and eyeliner builders can use it.
+const hash = (seed) => {
+  let h = seed * 2654435761 >>> 0;
+  h = ((h >>> 16) ^ h) * 45679 >>> 0;
+  return (h & 0xffff) / 0xffff;  // 0..1
+};
+
 // Lash mask: a thin line along the upper lash line plus a few fine flicks at the
 // outer corner — delicate, like real lashes (not a thick liner).
 // Built at FULL resolution (LW×LH, not MW×MH) so lines stay crisp.
@@ -591,6 +605,13 @@ export function buildLashMask(w, h, landmarks) {
     //    Real lashes grow in clusters of 2-4 from follicle groups, not evenly
     //    spaced. Each cluster fans slightly and individual lashes within it vary
     //    in length and curl. Longest at the outer third, tapering inward.
+    //
+    //    3D depth: two passes — first a soft, thicker shadow layer offset
+    //    slightly downward (simulating the shadow lashes cast on the lid),
+    //    then the crisp main lashes on top. This gives visible volume.
+    const do3d = CFG.lashes.depth3d;
+    const shadowOffFrac = CFG.lashes.shadowOffset ?? 0.12;
+    const shadowAlpha = CFG.lashes.shadowAlpha ?? 0.35;
     const baseLen = eyeH * CFG.lashes.len;
     // arc-length sampler along the polyline (u: 0 = outer corner, 1 = inner)
     const seg = []; let total = 0;
@@ -605,99 +626,162 @@ export function buildLashMask(w, h, landmarks) {
       const f = seg[k] ? d / seg[k] : 0;
       return [pts[k][0] + (pts[k + 1][0] - pts[k][0]) * f, pts[k][1] + (pts[k + 1][1] - pts[k][1]) * f];
     };
-    // Deterministic pseudo-random — stable across frames, no flicker
-    const hash = (seed) => {
-      let h = seed * 2654435761 >>> 0;
-      h = ((h >>> 16) ^ h) * 45679 >>> 0;
-      return (h & 0xffff) / 0xffff;  // 0..1
-    };
     const baseCurl = CFG.lashes.curl ?? 0.25;
     // Perspective factor: far eye → inner flicks shorter & curl inward
     const perspShorten = Math.max(0.4, persp);
     const perspCurlFlip = Math.max(0, (1 - persp) * 0.6);
 
-    // Generate clusters. Each cluster has 2-3 lashes fanning from one root zone.
-    // ~11-13 clusters across the lash line, giving 28-38 individual lashes.
-    const CLUSTERS = 12;
-    const clusterSpacing = CFG.lashes.reachT / CLUSTERS;
-    for (let ci = 0; ci < CLUSTERS; ci++) {
-      const clusterU = (ci + 0.5) * clusterSpacing;
-      if (clusterU > CFG.lashes.reachT) continue;
-      // Number of lashes per cluster: 2-3, with outer clusters getting 3
-      const clusterSize = ci < 4 ? 3 : (hash(ci * 97) > 0.5 ? 3 : 2);
-      // Cluster spread: how far apart the roots are (narrower toward inner corner)
-      const spreadFactor = (1 - clusterU / CFG.lashes.reachT) * 0.6 + 0.4;
-      const clusterSpread = clusterSpacing * 0.35 * spreadFactor;
+    // Draw one pass of clustered lashes. `pass` controls shadow vs main:
+    //   pass='shadow': thicker, offset downward, lower alpha — lid shadow
+    //   pass='main': crisp strokes at full alpha — the actual lashes
+    //
+    // Each lash is drawn as multiple short segments with decreasing lineWidth
+    // (root-to-tip tapering), using a cubic bezier evaluated at regular intervals.
+    // This gives each lash a natural tapered shape instead of a uniform-width stroke.
+    const taperSteps = CFG.lashes.taperSteps ?? 6;
+    const taperEnd = CFG.lashes.taperEnd ?? 0.20;
+    const crossFreq = CFG.lashes.crossFreq ?? 0.18;
 
-      for (let li = 0; li < clusterSize; li++) {
-        // Each lash within the cluster is offset slightly from cluster centre
-        const lashOffset = (li - (clusterSize - 1) / 2) * clusterSpread / clusterSize;
-        const u = Math.max(0, Math.min(CFG.lashes.reachT, clusterU + lashOffset));
-        const seed = ci * 31 + li * 7;
+    const drawLashPass = (pass) => {
+      const isShadow = pass === 'shadow';
+      const offY = isShadow ? baseLen * shadowOffFrac : 0;
+      const offX = isShadow ? baseLen * shadowOffFrac * outerDir * 0.3 : 0;
+      const alphaScale = isShadow ? shadowAlpha : 1;
+      const widthScale = isShadow ? 1.8 : 1;  // shadow is softer/wider
+      const lenScale = isShadow ? 0.85 : 1;    // shadow slightly shorter
 
-        // ── Length envelope ──
-        // Bell-shaped: peaks at u≈0.2 (outer third), not at u=0
-        const bellPeak = 0.18;
-        const bellWidth = 0.55;
-        const bellDist = (u - bellPeak) / bellWidth;
-        const envelope = Math.exp(-bellDist * bellDist * 2.5);
-        // Minimum: inner corner still gets short lashes (not zero)
-        const envClamp = 0.25 + envelope * 0.75;
-        // Per-lash length jitter ±20%, deterministic
-        const lenJitter = 0.80 + 0.40 * hash(seed + 1);
-        // Perspective: inner flicks on far eye scale down
-        const innerPerspScale = 1 - (1 - perspShorten) * u;
-        const lashLen = baseLen * envClamp * lenJitter * innerPerspScale;
-        // Very short lashes are invisible noise — skip
-        if (lashLen < 1.2) continue;
+      const CLUSTERS = 12;
+      const clusterSpacing = CFG.lashes.reachT / CLUSTERS;
 
-        // ── Thickness variation ──
-        // Outer lashes thicker, inner thinner; variation within cluster
-        const thickEnv = 0.55 + 0.45 * (1 - u / CFG.lashes.reachT);
-        const thickJitter = 0.75 + 0.50 * hash(seed + 2);
-        m.lineWidth = Math.max(0.6, thin * 0.65 * thickEnv * thickJitter);
+      // Collect lash data for cross-lash layering (main pass only)
+      const lashData = [];
 
-        // ── Curl variation ──
-        // Each lash curls differently: outer lashes curl more, centres medium,
-        // inner lashes flatter. ±30% random variation on top.
-        const curlPos = baseCurl * (0.8 + 0.4 * (1 - u / CFG.lashes.reachT));
-        const curlJitter = 0.70 + 0.60 * hash(seed + 3);
-        const curl = curlPos * curlJitter;
+      for (let ci = 0; ci < CLUSTERS; ci++) {
+        const clusterU = (ci + 0.5) * clusterSpacing;
+        if (clusterU > CFG.lashes.reachT) continue;
+        const clusterSize = ci < 4 ? 3 : (hash(ci * 97) > 0.5 ? 3 : 2);
+        const spreadFactor = (1 - clusterU / CFG.lashes.reachT) * 0.6 + 0.4;
+        const clusterSpread = clusterSpacing * 0.35 * spreadFactor;
 
-        // ── Angular fan ──
-        // Lashes fan outward from centre: outer lashes lean outward,
-        // inner lashes lean slightly inward, creating a natural fan shape
-        const fanAngle = (0.5 - u / CFG.lashes.reachT) * 0.35;  // radians
+        for (let li = 0; li < clusterSize; li++) {
+          const lashOffset = (li - (clusterSize - 1) / 2) * clusterSpread / clusterSize;
+          const u = Math.max(0, Math.min(CFG.lashes.reachT, clusterU + lashOffset));
+          const seed = ci * 31 + li * 7;
 
-        const [x, y] = at(u);
-        // Perspective curl flip on far eye
-        const flipAmount = perspCurlFlip * u;
-        const effectiveOuterDir = outerDir * (1 - flipAmount * 2);
+          // ── Length envelope ──
+          const bellPeak = 0.18;
+          const bellWidth = 0.55;
+          const bellDist = (u - bellPeak) / bellWidth;
+          const envelope = Math.exp(-bellDist * bellDist * 2.5);
+          const envClamp = 0.25 + envelope * 0.75;
+          const lenJitter = 0.80 + 0.40 * hash(seed + 1);
+          const innerPerspScale = 1 - (1 - perspShorten) * u;
+          const lashLen = baseLen * envClamp * lenJitter * innerPerspScale * lenScale;
+          if (lashLen < 1.2) continue;
 
-        // Inner-corner fade
-        const fadeFactor = tuck > 0.05
-          ? 1 - Math.max(0, (u - 0.55) / 0.45) * Math.min(1, tuck * 0.9)
-          : 1;
-        if (fadeFactor < 0.02) continue;
+          // ── Thickness ──
+          const thickEnv = 0.55 + 0.45 * (1 - u / CFG.lashes.reachT);
+          const thickJitter = 0.75 + 0.50 * hash(seed + 2);
+          const rootWidth = Math.max(0.6, thin * 0.65 * thickEnv * thickJitter * widthScale);
 
-        // ── Bezier lash stroke ──
-        // tip: curled outward/upward with fan angle applied
-        const baseAngle = -Math.PI / 2;  // straight up
-        const lashAngle = baseAngle + fanAngle;
-        const tipX = x + Math.cos(lashAngle) * lashLen + effectiveOuterDir * lashLen * curl * 0.45;
-        const tipY = y + Math.sin(lashAngle) * lashLen;
-        // control point: creates the curl arc — offset outward from the line
-        const ctrlT = 0.45 + curl * 0.15;  // how far up the control sits
-        const ctrlX = x + Math.cos(lashAngle) * lashLen * ctrlT + effectiveOuterDir * lashLen * curl * 0.25;
-        const ctrlY = y + Math.sin(lashAngle) * lashLen * (0.5 + curl * 0.3);
+          // ── Curl — per-lash curl TYPE variation ──
+          // J-curl (gentle), C-curl (standard), L-curl (sharp bend at base)
+          const curlType = hash(seed + 10); // 0..1 selects type
+          const curlPos = baseCurl * (0.8 + 0.4 * (1 - u / CFG.lashes.reachT));
+          const curlJitter = 0.70 + 0.60 * hash(seed + 3);
+          const curl = curlPos * curlJitter;
 
-        m.strokeStyle = `rgba(255,255,255,${fadeFactor.toFixed(3)})`;
-        m.beginPath();
-        m.moveTo(x, y);
-        m.quadraticCurveTo(ctrlX, ctrlY, tipX, tipY);
-        m.stroke();
+          // ── Angular fan ──
+          // Cross-lash: occasionally tilt a lash toward its neighbour
+          let fanAngle = (0.5 - u / CFG.lashes.reachT) * 0.35;
+          const doCross = !isShadow && hash(seed + 20) < crossFreq;
+          if (doCross) {
+            // Tilt 10-25° toward the outer or inner neighbour
+            const crossDir = hash(seed + 21) > 0.5 ? 1 : -1;
+            fanAngle += crossDir * (0.15 + hash(seed + 22) * 0.12);
+          }
+
+          const [x, y] = at(u);
+          const flipAmount = perspCurlFlip * u;
+          const effectiveOuterDir = outerDir * (1 - flipAmount * 2);
+
+          // Inner-corner fade
+          const fadeFactor = tuck > 0.05
+            ? 1 - Math.max(0, (u - 0.55) / 0.45) * Math.min(1, tuck * 0.9)
+            : 1;
+          if (fadeFactor < 0.02) continue;
+
+          // ── Cubic bezier lash curve ──
+          // Two control points for more natural curl shapes:
+          //   curlType < 0.33 → J-curl: gentle, control points close together
+          //   curlType < 0.66 → C-curl: standard even arc
+          //   curlType >= 0.66 → L-curl: sharp bend near base, straighter tip
+          const baseAngle = -Math.PI / 2;
+          const lashAngle = baseAngle + fanAngle;
+          const cosA = Math.cos(lashAngle), sinA = Math.sin(lashAngle);
+          const bx = x + offX, by = y + offY;
+          const tipX = bx + cosA * lashLen + effectiveOuterDir * lashLen * curl * 0.45;
+          const tipY = by + sinA * lashLen;
+
+          let c1t, c1curl, c2t, c2curl;
+          if (curlType < 0.33) {
+            // J-curl: gentle arc, curl concentrated at tip
+            c1t = 0.30; c1curl = 0.10;
+            c2t = 0.70; c2curl = 0.35;
+          } else if (curlType < 0.66) {
+            // C-curl: even arc throughout
+            c1t = 0.35; c1curl = 0.22;
+            c2t = 0.65; c2curl = 0.28;
+          } else {
+            // L-curl: sharp bend at base, straighter tip
+            c1t = 0.20; c1curl = 0.35;
+            c2t = 0.55; c2curl = 0.15;
+          }
+          const cp1x = bx + cosA * lashLen * c1t + effectiveOuterDir * lashLen * curl * c1curl;
+          const cp1y = by + sinA * lashLen * (c1t + curl * 0.3);
+          const cp2x = bx + cosA * lashLen * c2t + effectiveOuterDir * lashLen * curl * c2curl;
+          const cp2y = by + sinA * lashLen * (c2t + curl * 0.2);
+
+          const a = Math.min(1, fadeFactor * alphaScale);
+
+          // Draw as tapered segments: evaluate cubic bezier at intervals,
+          // decreasing lineWidth from root to tip
+          m.strokeStyle = `rgba(255,255,255,${a.toFixed(3)})`;
+          const steps = isShadow ? 2 : taperSteps; // fewer steps for shadow (perf)
+          for (let si = 0; si < steps; si++) {
+            const t0 = si / steps;
+            const t1 = (si + 1) / steps;
+            // Cubic bezier evaluation: B(t) = (1-t)^3·P0 + 3(1-t)^2·t·P1 + 3(1-t)·t^2·P2 + t^3·P3
+            const bez = (t) => {
+              const it = 1 - t, it2 = it * it, it3 = it2 * it;
+              const t2 = t * t, t3 = t2 * t;
+              return [
+                it3 * bx + 3 * it2 * t * cp1x + 3 * it * t2 * cp2x + t3 * tipX,
+                it3 * by + 3 * it2 * t * cp1y + 3 * it * t2 * cp2y + t3 * tipY,
+              ];
+            };
+            const [sx, sy] = bez(t0);
+            const [ex, ey] = bez(t1);
+            // Taper: lineWidth decreases root-to-tip
+            const tMid = (t0 + t1) / 2;
+            const taper = 1 - (1 - taperEnd) * tMid; // 1 at root, taperEnd at tip
+            m.lineWidth = Math.max(0.3, rootWidth * taper);
+            m.beginPath();
+            m.moveTo(sx, sy);
+            m.lineTo(ex, ey);
+            m.stroke();
+          }
+        }
       }
+    };
+
+    // 3D: shadow pass first (soft depth underneath), then crisp main lashes
+    if (do3d) {
+      m.filter = `blur(${Math.max(0.8, LW * 0.002)}px)`;
+      drawLashPass('shadow');
+      m.filter = 'none';
     }
+    drawLashPass('main');
   }
   // Protect: cut nose region so lashes don't bleed onto the bridge at profile angles
   if (PROTECT) {
@@ -1043,16 +1127,21 @@ export function buildEyelinerMask(w, h, landmarks) {
     }
 
     if (CFG.eyeliner.taper) {
-      // Draw each segment individually with varying thickness — thin at inner, thick at outer
+      // Draw each segment with varying thickness and subtle alpha variation
+      // for natural edges — no sub-stepping, keeps draw calls low.
       for (let k = 1; k < n; k++) {
         const t = 1 - (k - 1) / (n - 1); // 1 at outer corner, 0 at inner
-        const segW = baseW * (0.35 + t * 0.65); // taper from 35% to 100%
+        const segW = baseW * (0.30 + t * 0.70); // taper from 30% to 100%
         m.lineWidth = segW;
+        // Per-segment alpha variation for natural edge texture
+        const alphaJitter = 0.90 + 0.10 * hash(k * 17 + 3);
+        m.globalAlpha = alphaJitter;
         m.beginPath();
         m.moveTo(pts[k - 1][0], pts[k - 1][1]);
         m.lineTo(pts[k][0], pts[k][1]);
         m.stroke();
       }
+      m.globalAlpha = 1.0;
     } else {
       m.lineWidth = baseW;
       m.beginPath();
@@ -1060,12 +1149,10 @@ export function buildEyelinerMask(w, h, landmarks) {
       m.stroke();
     }
 
-    // Wing: a flick that continues the eye OUTWARD, lifting only a little.
+    // Wing: a sharp flick going mostly outward and slightly downward.
     //
-    // Built in the eye's own frame, not the screen's. Offsetting by screen x/y
-    // made the wing shoot up at ~40 degrees and, worse, kept pointing at the
-    // top of the screen when the head tilted. The two axes below come from the
-    // face itself, so the flick stays glued to the eye at any head angle:
+    // Built in the eye's own frame, not the screen's. The two axes come from
+    // the face itself, so the flick stays glued to the eye at any head angle:
     //   ax = inner corner -> outer corner (the direction a wing travels)
     //   ux = lower lid -> upper lid       (which way is "up" for this eye)
     const wl = eyeH * CFG.eyeliner.wing;
@@ -1086,16 +1173,42 @@ export function buildEyelinerMask(w, h, landmarks) {
     const wx = outer[0], wy = outer[1];
     const tipX = wx + axX * reach + upX * lift;
     const tipY = wy + axY * reach + upY * lift;
-    // Control point sits most of the way along the axis with barely any lift,
-    // so the flick leaves the lash line flat and curves up only at its end.
-    const ctrlX = wx + axX * reach * 0.55 + upX * lift * 0.10;
-    const ctrlY = wy + axY * reach * 0.55 + upY * lift * 0.10;
+    // Control point: almost no lift, so the wing exits nearly straight/downward
+    const ctrlX = wx + axX * reach * 0.45;
+    const ctrlY = wy + axY * reach * 0.45;
 
-    m.lineWidth = baseW;
+    // Tapered wing: cubic bezier filled shape for a smooth, natural flick
+    const wingTaper = CFG.eyeliner.wingTaper ?? 0.30;
+    const tipW = baseW * wingTaper; // thin at the tip
+    // Perpendicular to ax direction for thickness offset
+    const perpX = -axY, perpY = axX;
+
+    // Two control points for cubic bezier — gives a smooth S-curve flick
+    const ctrl1X = wx + axX * reach * 0.30;
+    const ctrl1Y = wy + axY * reach * 0.30;
+    const ctrl2X = wx + axX * reach * 0.70 + upX * lift * 0.6;
+    const ctrl2Y = wy + axY * reach * 0.70 + upY * lift * 0.6;
+
+    m.fillStyle = '#fff';
     m.beginPath();
-    m.moveTo(wx, wy);
-    m.quadraticCurveTo(ctrlX, ctrlY, tipX, tipY);
-    m.stroke();
+    // Base of wing (at outer corner) — full width
+    m.moveTo(wx + perpX * baseW * 0.5, wy + perpY * baseW * 0.5);
+    // Upper edge — smooth cubic bezier curve to sharp tip
+    m.bezierCurveTo(
+      ctrl1X + perpX * baseW * 0.40, ctrl1Y + perpY * baseW * 0.40,
+      ctrl2X + perpX * baseW * 0.20, ctrl2Y + perpY * baseW * 0.20,
+      tipX + perpX * tipW * 0.12, tipY + perpY * tipW * 0.12
+    );
+    // Sharp tip point
+    m.lineTo(tipX - perpX * tipW * 0.12, tipY - perpY * tipW * 0.12);
+    // Lower edge — cubic bezier back to base
+    m.bezierCurveTo(
+      ctrl2X - perpX * baseW * 0.15, ctrl2Y - perpY * baseW * 0.15,
+      ctrl1X - perpX * baseW * 0.30, ctrl1Y - perpY * baseW * 0.30,
+      wx - perpX * baseW * 0.5, wy - perpY * baseW * 0.5
+    );
+    m.closePath();
+    m.fill();
 
     // ── Inner-corner fade on far eye ──
     if (tuck > 0.05) {
@@ -1410,10 +1523,17 @@ export function renderMakeup(ctx, w, h, landmarks, opts) {
     buildBrowMask(w, h, landmarks);
     compositeRegion(ctx, w, h, browMaskCv, { ...opts.brows, finish: 'none', pigment: 0.2, lightResponse: 0 });
   }
-  if (opts.eyes) renderEyes(ctx, w, h, landmarks, opts.eyes);
+  // Blink gating for Canvas2D path: scale eye makeup when eyes are closing
+  const blinkGate = Math.min(opts.blinkL ?? 1, opts.blinkR ?? 1);
+  if (opts.eyes) {
+    const eyeOpts = blinkGate < 0.99
+      ? { ...opts.eyes, intensity: (opts.eyes.intensity ?? 0.5) * blinkGate }
+      : opts.eyes;
+    renderEyes(ctx, w, h, landmarks, eyeOpts);
+  }
   if (opts.eyeliner) {
     buildEyelinerMask(w, h, landmarks);
-    compositeDark(ctx, w, h, eyelinerMaskCv, opts.eyeliner.color || '#0a0a0a', opts.eyeliner.intensity ?? 0.9);
+    compositeDark(ctx, w, h, eyelinerMaskCv, opts.eyeliner.color || '#0a0a0a', (opts.eyeliner.intensity ?? 0.9) * blinkGate);
   }
   if (opts.lashes) {
     // Lashes are thin strokes — even small landmark lag is visible as floating
@@ -1425,9 +1545,10 @@ export function renderMakeup(ctx, w, h, landmarks, opts) {
     const lashFade = lashMotion <= LASH_FADE_START ? 1
       : lashMotion >= LASH_FADE_END ? 0
       : 1 - (lashMotion - LASH_FADE_START) / (LASH_FADE_END - LASH_FADE_START);
-    if (lashFade > 0.01) {
+    const combinedFade = lashFade * blinkGate;
+    if (combinedFade > 0.01) {
       buildLashMask(w, h, landmarks);
-      compositeDark(ctx, w, h, lashMaskCv, '#000000', (opts.lashes.intensity ?? 0.8) * lashFade);
+      compositeDark(ctx, w, h, lashMaskCv, '#000000', (opts.lashes.intensity ?? 0.8) * combinedFade);
     }
   }
   // Lip liner goes DOWN FIRST, lipstick over it — that's the actual sequence.

@@ -347,7 +347,12 @@ void main(){
 
     float depth = smoothstep(0.78, 0.25, shadeL);
     vec3 pigment = mix(mix(col, soft, 0.30), deep, depth * 0.92);
-    outc = mix(outc, pigment, me);
+    // Use reduced opacity for pigment to let skin texture bleed through —
+    // the post-processing pass re-injects high-freq detail proportional to
+    // how much the pixel changed, so keeping some original luminance info
+    // means the texture comes back stronger in the eye zone.
+    float texPreserve = 0.88 + depth * 0.08; // slightly less coverage = more texture
+    outc = mix(outc, pigment, me * texPreserve);
 
     // Finish-specific surface response for eyeshadow
     if (uEyeFinish > 1.5) {
@@ -457,7 +462,11 @@ void main(){
   vec3 detail  = orig - origLow;
   float delta  = clamp(length(outc - orig) * 5.0, 0.0, 1.0);
   float lipZone = feather(softA(uLip, vUv, 2.5)) * uLipInt;
-  float texStr  = mix(0.7, 1.1, lipZone);  // lips get 1.1× texture vs 0.7× elsewhere
+  float eyeZone = feather(softA(uEye, vUv, 4.0)) * uEyeInt;
+  // Lips get 1.1× texture, eyes get 1.2× (eyelid creases/pores under shadow),
+  // everything else gets 0.7×.
+  float texStr  = mix(0.7, 1.1, lipZone);
+  texStr = mix(texStr, 1.2, eyeZone);
   outc += detail * delta * texStr;
 
   // 2. Cinematic look (uCinema 0..1 — off to full)
@@ -659,18 +668,21 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
   gl.uniform1f(loc.uFndInt, foundation ? (foundation.intensity ?? 0.25) : 0);
   gl.uniform1f(loc.uBlushInt, blush ? (blush.intensity ?? 0.4) : 0);
   gl.uniform1f(loc.uHairInt, (hair && hair.mask) ? (hair.intensity ?? 0.7) : 0);
-  gl.uniform1f(loc.uEyeInt, eyes ? (eyes.intensity ?? 0.5) : 0);
+  // Blink gating: scale eye makeup down when eyes are closing. Uses minimum
+  // of both eyes as a conservative gate (both share the same uniform pass).
+  const blinkGate = Math.min(opts.blinkL ?? 1, opts.blinkR ?? 1);
+  gl.uniform1f(loc.uEyeInt, eyes ? (eyes.intensity ?? 0.5) * blinkGate : 0);
   // Fade out lashes during fast head movement — thin strokes lag visibly
   const lashMotion = opts.motion ?? 0;
   const lashFade = lashMotion <= 0.003 ? 1 : lashMotion >= 0.008 ? 0
     : 1 - (lashMotion - 0.003) / (0.008 - 0.003);
-  gl.uniform1f(loc.uLashInt, lashes ? (lashes.intensity ?? 0.8) * lashFade : 0);
+  gl.uniform1f(loc.uLashInt, lashes ? (lashes.intensity ?? 0.8) * lashFade * blinkGate : 0);
   gl.uniform1f(loc.uLipInt, lips ? (lips.intensity ?? 0.7) : 0);
   gl.uniform1f(loc.uContourInt, contour ? (contour.intensity ?? 0.35) : 0);
   gl.uniform1f(loc.uHighlightInt, highlight ? (highlight.intensity ?? 0.5) : 0);
   gl.uniform1f(loc.uUnderEyeInt, underEye ? (underEye.intensity ?? 0.4) : 0);
   gl.uniform1f(loc.uLipLinerInt, lipLiner ? (lipLiner.intensity ?? 0.8) : 0);
-  gl.uniform1f(loc.uEyelinerInt, eyeliner ? (eyeliner.intensity ?? 0.9) : 0);
+  gl.uniform1f(loc.uEyelinerInt, eyeliner ? (eyeliner.intensity ?? 0.9) * blinkGate : 0);
   gl.uniform1f(loc.uBrowInt, brows ? (brows.intensity ?? 0.6) : 0);
 
   gl.uniform1f(loc.uLight, (lips?.lightResponse ?? eyes?.lightResponse ?? 0.5));

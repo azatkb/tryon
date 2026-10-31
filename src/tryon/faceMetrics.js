@@ -250,6 +250,52 @@ export function estimateLightBalance(source, landmarks) {
   return Math.max(-1, Math.min(1, (lr - ll) / total));
 }
 
+// ── Blink detection ─────────────────────────────────────────────────────────
+// MediaPipe upper/lower lid landmark pairs per eye. The vertical distance
+// between them, normalised by eye width, tells us the eye-aperture ratio (EAR).
+// Below a threshold the eye is blinking — we use this to gate eye makeup so
+// lashes/liner/shadow don't paint on a closed lid.
+const EAR_UPPER_R = [159, 158, 157]; // right eye upper lid (inner→outer)
+const EAR_LOWER_R = [145, 153, 154]; // right eye lower lid
+const EAR_CORNER_R = [33, 133];      // right eye outer/inner corners
+const EAR_UPPER_L = [386, 385, 384]; // left eye upper lid
+const EAR_LOWER_L = [374, 380, 381]; // left eye lower lid
+const EAR_CORNER_L = [263, 362];     // left eye outer/inner corners
+
+function eyeAspectRatio(landmarks, upper, lower, corners) {
+  let vSum = 0;
+  for (let i = 0; i < upper.length; i++) {
+    const u = landmarks[upper[i]], l = landmarks[lower[i]];
+    if (!u || !l) return 1; // can't measure — assume open
+    vSum += Math.abs(u.y - l.y);
+  }
+  const vAvg = vSum / upper.length;
+  const c0 = landmarks[corners[0]], c1 = landmarks[corners[1]];
+  if (!c0 || !c1) return 1;
+  const hDist = Math.abs(c0.x - c1.x);
+  return hDist > 0.001 ? vAvg / hDist : 1;
+}
+
+/**
+ * Blink detection: returns { left, right } each in 0..1.
+ *   1 = eye fully open, 0 = eye fully closed (blink).
+ * Smooth the output with EMA for stable fade-in/out of eye makeup.
+ *
+ * BLINK_CLOSE = EAR below which eye is "closed"
+ * BLINK_OPEN  = EAR above which eye is "fully open"
+ */
+const BLINK_CLOSE = 0.06;
+const BLINK_OPEN  = 0.18;
+
+export function detectBlink(landmarks) {
+  if (!landmarks || landmarks.length < 400) return { left: 1, right: 1 };
+  const earR = eyeAspectRatio(landmarks, EAR_UPPER_R, EAR_LOWER_R, EAR_CORNER_R);
+  const earL = eyeAspectRatio(landmarks, EAR_UPPER_L, EAR_LOWER_L, EAR_CORNER_L);
+  const map = (ear) => Math.min(1, Math.max(0,
+    (ear - BLINK_CLOSE) / (BLINK_OPEN - BLINK_CLOSE)));
+  return { left: map(earL), right: map(earR) };
+}
+
 /** Skin depth word (for shade resolution) from a 0..1 luminance. */
 export function depthFromLum(lum) {
   const v = lum * 255;

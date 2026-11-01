@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { useTryOn, glAvailable, faceBBox, depthFromLum, setRegionEdge } from './tryon/index.js';
-import { initSegmenter, segmentLips, segmentHair, segmenterReady, resetSegmenter } from './lipSegmenter.js';
+// import { initSegmenter, segmentLips, segmentHair, segmenterReady, resetSegmenter } from './lipSegmenter.js';
 import { PRODUCTS, EYE_SHADES, FOUNDATION_SHADES, BLUSH_SHADES, HAIR_SHADES } from './products.js';
 import { LESSON, lessonLayers, resolveStep } from './tutorials.js';
 

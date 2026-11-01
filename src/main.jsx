@@ -8,7 +8,7 @@ import './debug.css';
 
 // 'debug' = the mask/entity workbench, 'app' = the lesson app,
 // 'embed' = the bare drop-in component, as a host would use it.
-const VIEW = 'app';
+const VIEW = 'debug';
 
 const VIEWS = {
   debug: <DebugApp />,

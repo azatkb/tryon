@@ -56,8 +56,12 @@ const FAST_SET = new Set([...LIP_RANGE, ...EYE_RANGE]);
 // visible. These points track near-raw so lashes never trail the eye.
 const LASH_IDX = [// upper lid right
                   33, 246, 161, 160, 159, 158, 157, 173, 133,
+                  // lower lid right (blink EAR)
+                  145, 144, 153, 154, 155,
                   // upper lid left
-                  263, 466, 388, 387, 386, 385, 384, 398, 362];
+                  263, 466, 388, 387, 386, 385, 384, 398, 362,
+                  // lower lid left (blink EAR)
+                  374, 373, 380, 381, 382];
 const LASH_SET = new Set(LASH_IDX);
 
 /**
@@ -87,8 +91,10 @@ export function smoothLandmarks(cur, smoothed, motion, opts = {}) {
       // 0.002 normalised ≈ 1-2px on 1080p — meaningful lip/eye movement
       // Lash points get a higher floor (0.72) — thin strokes can't tolerate
       // even small lag without looking like they float off the lid.
-      const floor = LASH_SET.has(i) ? 0.72 : 0.45;
-      const localBoost = Math.min(max, floor + pd * 300);
+      const isLash = LASH_SET.has(i);
+      const floor = isLash ? 1.0 : 0.45;
+      const cap = isLash ? 1.0 : max;   // lash points bypass maxAlpha cap
+      const localBoost = Math.min(cap, floor + pd * 300);
       alpha = Math.max(alpha, localBoost);
     }
     const inv = 1 - alpha;

@@ -29,6 +29,7 @@ export {
 // Renderers, for hosts that paint a frame themselves.
 export { renderMakeupGL, glAvailable } from './webglLips.js';
 export { renderMakeup, drawLandmarks, drawSegMask } from './lipRenderer.js';
+export { lash3dAvailable, renderLashes3D, resetLash3d } from './lashRenderer3D.js';
 
 // Render tuning — module-level switches in the Canvas renderer.
 export { setFeatureProtect, setRegionBlur, setRegionEdge, edgeRangeFor } from './lipRenderer.js';

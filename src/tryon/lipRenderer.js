@@ -102,6 +102,7 @@ function cutFeatures(m, landmarks) {
 // ╚══════════════════════════════════════════════════════════════════════════╝
 const CFG = {
   maskScale: 0.5,          // internal mask resolution (× frame). Lower = faster, softer.
+  lashScale: 0.75,         // lash mask resolution (× frame). 0.75 = good balance of crispness vs perf.
 
   lips:  { blur: 0.006 },  // lip edge softness (ombre needs a little)
 
@@ -128,18 +129,20 @@ const CFG = {
            tail: 0.42 },   // how far it carries PAST the outer corner, toward
                            // the temple — both as multiples of the lift
 
-  lashes: { width: 0.0022, // lash line / flick thickness (× face HEIGHT)
-            count: 32,     // denser flicks
-            len: 0.40,     // slightly longer for drama
-            reachT: 0.62,  // reach further across the lid
-            curl: 0.28,    // curl arc — 0=straight, 1=full curl
+  lashes: { width: 0.001, // lash line / flick thickness (× face HEIGHT)
+            count: 42,     // denser flicks
+            len: 0.30,     // slightly longer for drama
+            reachT: 0.82,  // reach close to inner corner (near nose)
+            curl: 0.58,    // curl arc — 0=straight, 1=full curl
             blur: 0.0006,
             depth3d: true,       // 3D shadow layer for volume
+            depth3dMinW: 800,    // skip shadow pass when lash canvas width < this (perf on mobile)
+            clusters: 12,       // lash clusters per eye (10 on mobile via depth3dMinW heuristic)
             shadowOffset: 0.12,  // shadow offset as fraction of lash length
             shadowAlpha: 0.35,   // shadow layer opacity
             taperSteps: 2,       // segments per lash for root-to-tip tapering
-            taperEnd: 0.25,      // tip width as fraction of root width
-            crossFreq: 0.18 },   // fraction of lashes that cross a neighbour
+            taperEnd: 0.15,      // tip width as fraction of root width
+            crossFreq: 0.3 },   // fraction of lashes that cross a neighbour
 
   face:  { blur: 0.017 },  // foundation edge softness
 
@@ -173,6 +176,27 @@ const CFG = {
                edge: 0.5,    // halo alpha
                core: 1.0 },  // core alpha (bright centre)
 
+  // Bronzer: warm tone on sun-kissed high points — temples, cheekbone TOPS
+  // (not the hollow — that's contour), forehead hairline edges, nose bridge.
+  // Distinct from contour: contour = cool shadow in hollows; bronzer = warm
+  // glow on prominences where the sun would naturally hit.
+  bronzer: { blur: 0.018,       // very soft, diffused warmth
+             templeSize: 0.14,  // temple blob radius (× faceW)
+             cheekSize: 0.10,   // cheekbone-top blob radius
+             foreheadSize: 0.12,// forehead edge blob radius
+             noseSize: 0.04,    // nose bridge blob radius (subtle)
+             alpha: 0.85,       // peak mask alpha — the uniform controls real opacity
+             templeY: -0.12,    // temple vertical offset from cheek (up = negative, fraction of faceW)
+             cheekY: -0.06 },   // cheekbone top offset from cheek centre (above the hollow)
+
+  // Nose contour: two thin shadow lines along the sides of the nose bridge.
+  // Creates the illusion of a slimmer, more defined nose — classic makeup sculpting.
+  noseContour: { width: 0.016,   // shadow line thickness (× faceW)
+                 blur: 0.008,    // soft edges — blend into skin
+                 alpha: 0.9,     // peak mask alpha
+                 offset: 0.025,  // how far from bridge centre the lines sit (× faceW)
+                 taper: 0.4 },   // tip width as fraction of base (thin at nostrils)
+
   // Concealer: a soft down-pointing triangle under the eye (the classic make-up
   // shape) — brightest just under the lid, fading as it reaches down the cheek.
   underEye: { drop: 0.05,     // top edge sits this far below the lower lid
@@ -189,7 +213,7 @@ let MW = 0, MH = 0;
 
 // Reused offscreen canvases (avoid per-frame allocation).
 // lashMaskCv is FULL-RES (no MASK_SCALE) so lash strokes stay crisp.
-let maskCv, eyeMaskCv, faceMaskCv, lashMaskCv, blushMaskCv, contourMaskCv, highlightMaskCv, underEyeMaskCv, lipLinerMaskCv, eyelinerMaskCv, browMaskCv, packCv, colorCv, specCv, refineCv, lumaCv;
+let maskCv, eyeMaskCv, faceMaskCv, lashMaskCv, blushMaskCv, contourMaskCv, highlightMaskCv, underEyeMaskCv, bronzerMaskCv, noseContourMaskCv, lipLinerMaskCv, eyelinerMaskCv, browMaskCv, packCv, extraPackCv, colorCv, specCv, refineCv, lumaCv;
 // Frequency separation scratch canvases (full resolution)
 let freqLoCv, freqHiCv;
 let LW = 0, LH = 0; // full-res dimensions for lash canvas
@@ -199,17 +223,23 @@ function ensure(w, h) {
     faceMaskCv = document.createElement('canvas'); lashMaskCv = document.createElement('canvas');
     blushMaskCv = document.createElement('canvas'); contourMaskCv = document.createElement('canvas');
     highlightMaskCv = document.createElement('canvas'); underEyeMaskCv = document.createElement('canvas');
+    bronzerMaskCv = document.createElement('canvas'); noseContourMaskCv = document.createElement('canvas');
     lipLinerMaskCv = document.createElement('canvas'); eyelinerMaskCv = document.createElement('canvas');
     browMaskCv = document.createElement('canvas'); packCv = document.createElement('canvas');
+    extraPackCv = document.createElement('canvas');
     colorCv = document.createElement('canvas'); specCv = document.createElement('canvas');
     refineCv = document.createElement('canvas'); lumaCv = document.createElement('canvas');
     freqLoCv = document.createElement('canvas'); freqHiCv = document.createElement('canvas');
   }
   MW = Math.max(2, Math.round(w * MASK_SCALE));
   MH = Math.max(2, Math.round(h * MASK_SCALE));
-  LW = w; LH = h; // lash mask at full resolution — crisp lines
+  const ls = CFG.lashScale;
+  const newLW = Math.max(2, Math.round(w * ls));
+  const newLH = Math.max(2, Math.round(h * ls));
+  if (newLW !== LW || newLH !== LH) { _lashCacheValid = false; } // invalidate cache on resize
+  LW = newLW; LH = newLH;
   if (lashMaskCv.width !== LW || lashMaskCv.height !== LH) { lashMaskCv.width = LW; lashMaskCv.height = LH; }
-  for (const c of [maskCv, eyeMaskCv, faceMaskCv, blushMaskCv, contourMaskCv, highlightMaskCv, underEyeMaskCv, lipLinerMaskCv, eyelinerMaskCv, browMaskCv, packCv, refineCv]) { if (c.width !== MW || c.height !== MH) { c.width = MW; c.height = MH; } }
+  for (const c of [maskCv, eyeMaskCv, faceMaskCv, blushMaskCv, contourMaskCv, highlightMaskCv, underEyeMaskCv, bronzerMaskCv, noseContourMaskCv, lipLinerMaskCv, eyelinerMaskCv, browMaskCv, packCv, extraPackCv, refineCv]) { if (c.width !== MW || c.height !== MH) { c.width = MW; c.height = MH; } }
   for (const c of [colorCv, specCv, lumaCv, freqLoCv, freqHiCv]) { if (c.width !== w || c.height !== h) { c.width = w; c.height = h; } }
 }
 
@@ -542,11 +572,55 @@ const hash = (seed) => {
   return (h & 0xffff) / 0xffff;  // 0..1
 };
 
+// Lash geometry cache — skip rebuild when eye landmarks barely moved.
+// Only the eye-region landmarks matter for lashes; checking a handful of key
+// points (outer/inner corners + top/bottom of each eye) is cheaper than
+// comparing all 468 and catches every meaningful shape change.
+const LASH_KEY_PTS = [
+  // right eye outer, inner, top, bottom
+  ...EYE_R_LASH, ...EYE_R_V,
+  // left eye outer, inner, top, bottom
+  ...EYE_L_LASH, ...EYE_L_V,
+];
+const LASH_CACHE_EPS = 0.0003; // ~0.3px at 1000px — sub-pixel stability
+let _lashGeom = null;
+let _lashCacheValid = false;
+
+function lashGeomMoved(landmarks) {
+  if (!_lashGeom) {
+    _lashGeom = new Float32Array(LASH_KEY_PTS.length * 2);
+    for (let i = 0; i < LASH_KEY_PTS.length; i++) {
+      const p = landmarks[LASH_KEY_PTS[i]];
+      _lashGeom[i * 2] = p.x; _lashGeom[i * 2 + 1] = p.y;
+    }
+    return true;
+  }
+  for (let i = 0; i < LASH_KEY_PTS.length; i++) {
+    const p = landmarks[LASH_KEY_PTS[i]];
+    if (Math.abs(p.x - _lashGeom[i * 2]) > LASH_CACHE_EPS) { _storeLashGeom(landmarks); return true; }
+    if (Math.abs(p.y - _lashGeom[i * 2 + 1]) > LASH_CACHE_EPS) { _storeLashGeom(landmarks); return true; }
+  }
+  return false;
+}
+function _storeLashGeom(landmarks) {
+  for (let i = 0; i < LASH_KEY_PTS.length; i++) {
+    const p = landmarks[LASH_KEY_PTS[i]];
+    _lashGeom[i * 2] = p.x; _lashGeom[i * 2 + 1] = p.y;
+  }
+}
+
 // Lash mask: a thin line along the upper lash line plus a few fine flicks at the
 // outer corner — delicate, like real lashes (not a thick liner).
-// Built at FULL resolution (LW×LH, not MW×MH) so lines stay crisp.
+// Built at reduced resolution (LW×LH = 0.75× frame) — thin strokes survive the
+// slight softening, and the 44% fewer pixels make a measurable difference.
 export function buildLashMask(w, h, landmarks) {
   ensure(w, h);
+
+  // Cache: if eye landmarks haven't moved, return the previous mask as-is.
+  if (_lashCacheValid && !lashGeomMoved(landmarks)) return lashMaskCv;
+  lashGeomMoved(landmarks); // ensure _lashGeom is stored for next check
+  _lashCacheValid = true;
+
   const m = lashMaskCv.getContext('2d');
   m.setTransform(1, 0, 0, 1, 0, 0);
   m.clearRect(0, 0, LW, LH);
@@ -642,6 +716,11 @@ export function buildLashMask(w, h, landmarks) {
     const taperEnd = CFG.lashes.taperEnd ?? 0.20;
     const crossFreq = CFG.lashes.crossFreq ?? 0.18;
 
+    // Adaptive cluster count: fewer on small canvases (mobile) where individual
+    // lashes are only 1-2px anyway and the draw overhead is the bottleneck.
+    const isSmall = LW < (CFG.lashes.depth3dMinW ?? 800);
+    const CLUSTERS = isSmall ? 10 : (CFG.lashes.clusters ?? 12);
+
     const drawLashPass = (pass) => {
       const isShadow = pass === 'shadow';
       const offY = isShadow ? baseLen * shadowOffFrac : 0;
@@ -650,7 +729,6 @@ export function buildLashMask(w, h, landmarks) {
       const widthScale = isShadow ? 1.8 : 1;  // shadow is softer/wider
       const lenScale = isShadow ? 0.85 : 1;    // shadow slightly shorter
 
-      const CLUSTERS = 12;
       const clusterSpacing = CFG.lashes.reachT / CLUSTERS;
 
       // Collect lash data for cross-lash layering (main pass only)
@@ -745,38 +823,36 @@ export function buildLashMask(w, h, landmarks) {
           const a = Math.min(1, fadeFactor * alphaScale);
 
           // Draw as tapered segments: evaluate cubic bezier at intervals,
-          // decreasing lineWidth from root to tip
+          // decreasing lineWidth from root to tip.
+          // Bezier B(t) = (1-t)³·P0 + 3(1-t)²t·P1 + 3(1-t)t²·P2 + t³·P3
           m.strokeStyle = `rgba(255,255,255,${a.toFixed(3)})`;
           const steps = isShadow ? 2 : taperSteps; // fewer steps for shadow (perf)
+          const invSteps = 1 / steps;
+          let prevBX = bx, prevBY = by; // start at root
           for (let si = 0; si < steps; si++) {
-            const t0 = si / steps;
-            const t1 = (si + 1) / steps;
-            // Cubic bezier evaluation: B(t) = (1-t)^3·P0 + 3(1-t)^2·t·P1 + 3(1-t)·t^2·P2 + t^3·P3
-            const bez = (t) => {
-              const it = 1 - t, it2 = it * it, it3 = it2 * it;
-              const t2 = t * t, t3 = t2 * t;
-              return [
-                it3 * bx + 3 * it2 * t * cp1x + 3 * it * t2 * cp2x + t3 * tipX,
-                it3 * by + 3 * it2 * t * cp1y + 3 * it * t2 * cp2y + t3 * tipY,
-              ];
-            };
-            const [sx, sy] = bez(t0);
-            const [ex, ey] = bez(t1);
+            const t1 = (si + 1) * invSteps;
+            const it = 1 - t1, it2 = it * it, it3 = it2 * it;
+            const t12 = t1 * t1, t13 = t12 * t1;
+            const nx = it3 * bx + 3 * it2 * t1 * cp1x + 3 * it * t12 * cp2x + t13 * tipX;
+            const ny = it3 * by + 3 * it2 * t1 * cp1y + 3 * it * t12 * cp2y + t13 * tipY;
             // Taper: lineWidth decreases root-to-tip
-            const tMid = (t0 + t1) / 2;
-            const taper = 1 - (1 - taperEnd) * tMid; // 1 at root, taperEnd at tip
-            m.lineWidth = Math.max(0.3, rootWidth * taper);
+            const tMid = (si + 0.5) * invSteps;
+            m.lineWidth = Math.max(0.3, rootWidth * (1 - (1 - taperEnd) * tMid));
             m.beginPath();
-            m.moveTo(sx, sy);
-            m.lineTo(ex, ey);
+            m.moveTo(prevBX, prevBY);
+            m.lineTo(nx, ny);
             m.stroke();
+            prevBX = nx; prevBY = ny;
           }
         }
       }
     };
 
-    // 3D: shadow pass first (soft depth underneath), then crisp main lashes
-    if (do3d) {
+    // 3D: shadow pass first (soft depth underneath), then crisp main lashes.
+    // Skip shadow on small canvases — individual lashes are ~1px, the shadow
+    // blur merges into the stroke and the 2× draw cost isn't worth it.
+    const do3dHere = do3d && !isSmall;
+    if (do3dHere) {
       m.filter = `blur(${Math.max(0.8, LW * 0.002)}px)`;
       drawLashPass('shadow');
       m.filter = 'none';
@@ -970,6 +1046,233 @@ export function buildHighlightMask(w, h, landmarks) {
     m.restore();
   }
   return highlightMaskCv;
+}
+
+// Bronzer: warm sun-kissed tone on prominences — the surfaces that catch direct
+// sunlight. Placed at temples, top of cheekbones (NOT the hollow), forehead
+// hairline edges, and optionally the nose bridge. Uses radial sweep blobs
+// positioned from real landmarks so the warmth tracks the face as it moves.
+// Distinct from contour (cool shadow in hollows) and highlight (specular glow
+// on the brightest points): bronzer is warm COLOUR on sun-exposed skin.
+export function buildBronzerMask(w, h, landmarks) {
+  ensure(w, h);
+  const m = bronzerMaskCv.getContext('2d');
+  m.setTransform(1, 0, 0, 1, 0, 0);
+  m.clearRect(0, 0, MW, MH);
+
+  const cfg = CFG.bronzer;
+  const bronzerBlur = Math.max(3, MW * cfg.blur);
+  m.filter = `blur(${bronzerBlur}px)`;
+
+  const faceW = Math.abs(landmarks[FACE_SIDE_R].x - landmarks[FACE_SIDE_L].x) * MW;
+  const a0 = cfg.alpha;
+
+  // Cheek apples — used as anchors, bronzer goes ABOVE them on the cheekbone top
+  const cheekR = [landmarks[CHEEK_R].x * MW, landmarks[CHEEK_R].y * MH];
+  const cheekL = [landmarks[CHEEK_L].x * MW, landmarks[CHEEK_L].y * MH];
+
+  // Temples: near ears, high up — between ear and outer eye corner
+  const earR = [landmarks[FACE_SIDE_L].x * MW, landmarks[FACE_SIDE_L].y * MH];
+  const earL = [landmarks[FACE_SIDE_R].x * MW, landmarks[FACE_SIDE_R].y * MH];
+  // Outer eye corners for temple positioning
+  const eyeOutR = [landmarks[33].x * MW, landmarks[33].y * MH];
+  const eyeOutL = [landmarks[263].x * MW, landmarks[263].y * MH];
+
+  // Temple: blend between ear and outer eye corner, shifted up
+  const templeRx = earR[0] * 0.45 + eyeOutR[0] * 0.55;
+  const templeRy = earR[1] * 0.35 + eyeOutR[1] * 0.65 + faceW * cfg.templeY;
+  const templeLx = earL[0] * 0.45 + eyeOutL[0] * 0.55;
+  const templeLy = earL[1] * 0.35 + eyeOutL[1] * 0.65 + faceW * cfg.templeY;
+
+  // Cheekbone tops: above the cheek apple, toward the outer edge
+  const cheekTopRx = cheekR[0] * 0.6 + earR[0] * 0.4;
+  const cheekTopRy = cheekR[1] + faceW * cfg.cheekY;
+  const cheekTopLx = cheekL[0] * 0.6 + earL[0] * 0.4;
+  const cheekTopLy = cheekL[1] + faceW * cfg.cheekY;
+
+  // Forehead edges: use top of face oval near the hairline
+  // Landmarks 10 = forehead top centre, 338/109 = forehead sides
+  const fhTop = [landmarks[10].x * MW, landmarks[10].y * MH];
+  const fhR = [landmarks[109].x * MW, landmarks[109].y * MH];
+  const fhL = [landmarks[338].x * MW, landmarks[338].y * MH];
+  // Forehead blobs sit between the side and the centre, near the hairline
+  const fhBlobRx = fhR[0] * 0.55 + fhTop[0] * 0.45;
+  const fhBlobRy = fhR[1] * 0.6 + fhTop[1] * 0.4;
+  const fhBlobLx = fhL[0] * 0.55 + fhTop[0] * 0.45;
+  const fhBlobLy = fhL[1] * 0.6 + fhTop[1] * 0.4;
+
+  // Nose bridge: subtle warmth on the top of the nose
+  const noseBridge = [landmarks[6].x * MW, landmarks[6].y * MH];
+
+  // Draw all bronzer zones as soft radial sweep blobs
+  // Temples — largest, most prominent
+  const tSz = faceW * cfg.templeSize;
+  // angle tilted slightly toward the cheek (rotated ~30° from horizontal)
+  sweep(m, templeRx, templeRy, -0.5, tSz * 1.3, tSz, a0);
+  sweep(m, templeLx, templeLy, 0.5, tSz * 1.3, tSz, a0);
+
+  // Cheekbone tops — medium, softer
+  const cSz = faceW * cfg.cheekSize;
+  sweep(m, cheekTopRx, cheekTopRy, -0.3, cSz * 1.5, cSz, a0 * 0.75);
+  sweep(m, cheekTopLx, cheekTopLy, 0.3, cSz * 1.5, cSz, a0 * 0.75);
+
+  // Forehead hairline edges — medium-soft
+  const fSz = faceW * cfg.foreheadSize;
+  sweep(m, fhBlobRx, fhBlobRy, -0.2, fSz * 1.6, fSz, a0 * 0.6);
+  sweep(m, fhBlobLx, fhBlobLy, 0.2, fSz * 1.6, fSz, a0 * 0.6);
+
+  // Nose bridge — very subtle
+  const nSz = faceW * cfg.noseSize;
+  sweep(m, noseBridge[0], noseBridge[1], 0, nSz, nSz * 2.0, a0 * 0.4);
+
+  m.filter = 'none';
+
+  // Second blur pass for seamless skin blend
+  const rc = refineCv.getContext('2d');
+  rc.setTransform(1, 0, 0, 1, 0, 0);
+  rc.clearRect(0, 0, MW, MH);
+  rc.filter = `blur(${Math.max(2, bronzerBlur * 0.6)}px)`;
+  rc.drawImage(bronzerMaskCv, 0, 0, MW, MH);
+  rc.filter = 'none';
+  m.clearRect(0, 0, MW, MH);
+  m.drawImage(refineCv, 0, 0, MW, MH);
+
+  // Cut features — keep bronzer off eyes, lips, brows, but NOT nose (nose bridge gets warmth)
+  if (PROTECT) {
+    m.save();
+    m.filter = 'none';
+    m.globalCompositeOperation = 'destination-out';
+    for (const poly of [EYE_R_FULL, EYE_L_FULL, LIPS_OUTER, BROW_R, BROW_L]) fillPoly(m, landmarks, poly, MW, MH);
+    m.restore();
+  }
+
+  return bronzerMaskCv;
+}
+
+// Nose contour: two thin shadow strokes along both sides of the nose bridge,
+// from the inner brow area down to the nostrils. Creates the classic "slim nose"
+// sculpt effect. Uses the same darkening shader logic as cheek contour.
+export function buildNoseContourMask(w, h, landmarks) {
+  ensure(w, h);
+  const m = noseContourMaskCv.getContext('2d');
+  m.setTransform(1, 0, 0, 1, 0, 0);
+  m.clearRect(0, 0, MW, MH);
+  m.lineCap = 'round';
+  m.lineJoin = 'round';
+
+  const cfg = CFG.noseContour;
+  const noseBlur = Math.max(2, MW * cfg.blur);
+  m.filter = `blur(${noseBlur}px)`;
+
+  const faceW = Math.abs(landmarks[FACE_SIDE_R].x - landmarks[FACE_SIDE_L].x) * MW;
+  const offset = faceW * cfg.offset;
+  const baseW = faceW * cfg.width;
+
+  // Key nose landmarks (MediaPipe Face Mesh)
+  // 6 = bridge top, 197 = mid-bridge, 195 = lower bridge, 4 = nose tip
+  // 129 = right side, 327 = left side, 98 = right ala, 358 = left ala
+  const P = (i) => [landmarks[i].x * MW, landmarks[i].y * MH];
+
+  const bridgeTop = P(6);
+  const bridgeMid = P(197);
+  const noseTip = P(4);
+  const rightSide = P(129);
+  const leftSide = P(327);
+  const rightAla = P(98);
+  const leftAla = P(358);
+
+  // Compute nose bridge direction vector for proper offset direction
+  const dx = noseTip[0] - bridgeTop[0];
+  const dy = noseTip[1] - bridgeTop[1];
+  const len = Math.sqrt(dx * dx + dy * dy) || 1;
+  // Perpendicular to bridge (points sideways)
+  const nx = -dy / len;
+  const ny = dx / len;
+
+  // Draw shadow lines on each side of the nose
+  for (const side of [-1, 1]) {
+    const ox = nx * offset * side;
+    const oy = ny * offset * side;
+
+    // Start: between brows (bridge top), offset sideways
+    const sx = bridgeTop[0] + ox;
+    const sy = bridgeTop[1] + oy;
+    // Control: mid-bridge, slightly pulled toward the nose side landmark
+    const sideRef = side < 0 ? rightSide : leftSide;
+    const cx = bridgeMid[0] * 0.7 + sideRef[0] * 0.3 + ox * 0.5;
+    const cy = bridgeMid[1] * 0.7 + sideRef[1] * 0.3 + oy * 0.5;
+    // End: near the ala (nostril wing)
+    const alaRef = side < 0 ? rightAla : leftAla;
+    const ex = alaRef[0] * 0.6 + noseTip[0] * 0.4;
+    const ey = alaRef[1] * 0.6 + noseTip[1] * 0.4;
+
+    // Draw tapered stroke: thick at bridge, thin at nostrils
+    m.beginPath();
+    m.moveTo(sx, sy);
+    m.quadraticCurveTo(cx, cy, ex, ey);
+
+    // Halo (wider, softer)
+    m.lineWidth = baseW * 2.2;
+    m.strokeStyle = `rgba(255,255,255,${cfg.alpha * 0.4})`;
+    m.stroke();
+
+    // Core (thin, bright)
+    m.lineWidth = baseW;
+    m.strokeStyle = `rgba(255,255,255,${cfg.alpha})`;
+    m.stroke();
+  }
+
+  m.filter = 'none';
+
+  // Second blur pass for skin-like softness
+  const rc = refineCv.getContext('2d');
+  rc.setTransform(1, 0, 0, 1, 0, 0);
+  rc.clearRect(0, 0, MW, MH);
+  rc.filter = `blur(${Math.max(1, noseBlur * 0.5)}px)`;
+  rc.drawImage(noseContourMaskCv, 0, 0, MW, MH);
+  rc.filter = 'none';
+  m.clearRect(0, 0, MW, MH);
+  m.drawImage(refineCv, 0, 0, MW, MH);
+
+  // Cut eyes and brows only (nose contour IS on the nose, lips are far enough)
+  if (PROTECT) {
+    m.save();
+    m.filter = 'none';
+    m.globalCompositeOperation = 'destination-out';
+    for (const poly of [EYE_R_FULL, EYE_L_FULL, BROW_R, BROW_L]) fillPoly(m, landmarks, poly, MW, MH);
+    m.restore();
+  }
+
+  return noseContourMaskCv;
+}
+
+// Pack bronzer (R) + nose contour (G) into one RGB texture — same technique as
+// buildSculptPack. Keeps texture slot count down (both share slot 11).
+export function buildExtraPack(w, h, landmarks, want) {
+  ensure(w, h);
+  const m = extraPackCv.getContext('2d');
+  m.setTransform(1, 0, 0, 1, 0, 0);
+  m.globalCompositeOperation = 'source-over';
+  m.clearRect(0, 0, MW, MH);
+  // Opaque black base — same premultiply-safe trick as sculpt pack
+  m.fillStyle = '#000';
+  m.fillRect(0, 0, MW, MH);
+  const put = (src, tint) => {
+    const r = refineCv.getContext('2d');
+    r.setTransform(1, 0, 0, 1, 0, 0);
+    r.globalCompositeOperation = 'source-over';
+    r.clearRect(0, 0, MW, MH);
+    r.drawImage(src, 0, 0);
+    r.globalCompositeOperation = 'source-in';
+    r.fillStyle = tint; r.fillRect(0, 0, MW, MH);
+    r.globalCompositeOperation = 'source-over';
+    m.globalCompositeOperation = 'lighter';
+    m.drawImage(refineCv, 0, 0);
+  };
+  if (want.bronzer) put(buildBronzerMask(w, h, landmarks), '#ff0000');
+  if (want.noseContour) put(buildNoseContourMask(w, h, landmarks), '#00ff00');
+  m.globalCompositeOperation = 'source-over';
+  return extraPackCv;
 }
 
 // Under-eye: a soft brighten band that FOLLOWS the lower lid (inner → centre →

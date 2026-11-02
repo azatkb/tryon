@@ -11,7 +11,8 @@
 // texture; an auto white-balance holds the look across warm / side lighting.
 
 import { buildLipMask, buildEyeMask, buildFaceMask, buildLashMask, buildBlushMask, buildSculptPack,
-         buildLipLinerMask, buildEyelinerMask, buildBrowMask } from './lipRenderer.js';
+         buildExtraPack, buildLipLinerMask, buildEyelinerMask, buildBrowMask } from './lipRenderer.js';
+import { lash3dAvailable, renderLashes3D } from './lashRenderer3D.js';
 
 let gl = null, canvas = null, prog = null, quadBuf = null;
 let tex = {}, loc = {};
@@ -59,10 +60,10 @@ void main(){ vUv = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }`;
 const FRAG = `
 precision highp float;
 varying vec2 vUv;
-uniform sampler2D uFrame, uFnd, uBlush, uHair, uEye, uLash, uLip, uSculpt, uLipLiner, uEyeliner, uBrows;
-uniform vec3 uFndShade, uBlushShade, uHairShade, uEyeShade, uLipShade, uWB, uLipLinerShade, uEyelinerShade, uBrowShade;
+uniform sampler2D uFrame, uFnd, uBlush, uHair, uEye, uLash, uLip, uSculpt, uLipLiner, uEyeliner, uBrows, uExtra;
+uniform vec3 uFndShade, uBlushShade, uHairShade, uEyeShade, uLipShade, uWB, uLipLinerShade, uEyelinerShade, uBrowShade, uBronzerShade;
 uniform float uFndInt, uBlushInt, uHairInt, uEyeInt, uLashInt, uLipInt;
-uniform float uContourInt, uHighlightInt, uUnderEyeInt, uLipLinerInt, uEyelinerInt, uBrowInt;
+uniform float uContourInt, uHighlightInt, uUnderEyeInt, uBronzerInt, uNoseContourInt, uLipLinerInt, uEyelinerInt, uBrowInt;
 uniform float uLight, uFinish, uFaceLum, uCinema, uLightBal, uFaceYaw;
 uniform float uEyeFinish;  // 0=matte, 1=satin, 2=shimmer
 uniform float uFndFinish;  // 0=powder/matte, 1=natural, 2=dewy/cream
@@ -203,6 +204,8 @@ void main(){
   // and worse further down). A small extra tap is enough; the canvas blur has
   // already done the feathering.
   vec3 sc = softRGB(uSculpt, vUv, 4.0) * skinGate;
+  // Extra pack: R = bronzer, G = nose contour
+  vec3 ex = softRGB(uExtra, vUv, 4.0) * skinGate;
 
   // Wide secondary tap on the highlight channel — real specular on skin glows
   // a little past its own edge (eye and lens scatter), and that halo is most of
@@ -322,6 +325,36 @@ void main(){
     // Bloom: a faint warm lift spreading past the mask, gated to lit skin only
     specPeak += hiBloom * uHighlightInt * warmGate * vec3(0.05, 0.04, 0.02) * expI;
     outc = clamp(specPeak, 0.0, 1.0);
+  }
+
+  // ── BRONZER: warm sun-kissed tone on prominences ────────────────────────────
+  // Bronzer is warm COLOUR (not shadow, not specular) — it simulates the golden
+  // tone sun-exposed skin develops. Uses soft-light blend for a natural look
+  // that preserves skin texture and sits between contour and highlight in depth.
+  float mbz = ex.r * uBronzerInt * expI;
+  // Reduce bronzer where contour already darkened — they serve different zones
+  mbz *= 1.0 - contourD * 0.6;
+  if (mbz > 0.001) {
+    // Warm colour transfer: the bronzer shade at the skin's own luminance,
+    // blended via soft-light to keep texture and add warmth without opacity.
+    vec3 bronzeColour = recolour(outc, uBronzerShade);
+    vec3 warmed = softLight(outc, bronzeColour);
+    // Mix: more SSS-like on lighter skin, more opaque on deeper tones
+    float depth = smoothstep(0.55, 0.20, uFaceLum);
+    outc = mix(outc, mix(warmed, bronzeColour, depth * 0.3), mbz * 0.85);
+    // Subtle warmth push — bronzer adds a golden cast
+    outc += mbz * vec3(0.03, 0.015, -0.01) * (1.0 - depth * 0.5);
+  }
+
+  // ── NOSE CONTOUR: thin shadow lines along the nose bridge sides ─────────────
+  // Same darkening logic as cheek contour — cool shadow + desaturate.
+  float mnc = ex.g * uNoseContourInt * expI;
+  mnc *= yawFade;  // fade with head turn, same as cheek contour
+  if (mnc > 0.001) {
+    float lum = percL(outc);
+    vec3 shadow = blendMultiply(outc, vec3(0.55, 0.54, 0.58));
+    shadow = mix(shadow, vec3(lum * 0.60), 0.18);
+    outc = mix(outc, shadow, mnc);
   }
 
   // ── HAIR ────────────────────────────────────────────────────────────────────
@@ -546,16 +579,24 @@ function makeTex() {
 }
 
 function initGL() {
-  if (gl) return true;
+  if (gl && prog) return true;
+  // Reset on retry — previous attempt may have set gl but failed before prog was ready
+  gl = null; prog = null; canvas = null; tex = {}; loc = {};
   canvas = document.createElement('canvas');
   gl = canvas.getContext('webgl', { premultipliedAlpha: false, preserveDrawingBuffer: true })
      || canvas.getContext('experimental-webgl');
   if (!gl) return false;
-  prog = gl.createProgram();
-  gl.attachShader(prog, compile(gl.VERTEX_SHADER, VERT));
-  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FRAG));
-  gl.linkProgram(prog);
-  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog) || 'link');
+  try {
+    prog = gl.createProgram();
+    gl.attachShader(prog, compile(gl.VERTEX_SHADER, VERT));
+    gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FRAG));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog) || 'link');
+  } catch (e) {
+    console.error('[REESOLVE] Shader compile/link failed:', e.message);
+    gl = null; prog = null; canvas = null;
+    return false;
+  }
   gl.useProgram(prog);
 
   quadBuf = gl.createBuffer();
@@ -565,14 +606,14 @@ function initGL() {
   gl.enableVertexAttribArray(ap);
   gl.vertexAttribPointer(ap, 2, gl.FLOAT, false, 0, 0);
 
-  for (const u of ['uFrame','uFnd','uBlush','uHair','uEye','uLash','uLip','uSculpt','uLipLiner','uEyeliner','uBrows',
-                   'uFndShade','uBlushShade','uHairShade','uEyeShade','uLipShade','uWB','uLipLinerShade','uEyelinerShade','uBrowShade',
+  for (const u of ['uFrame','uFnd','uBlush','uHair','uEye','uLash','uLip','uSculpt','uLipLiner','uEyeliner','uBrows','uExtra',
+                   'uFndShade','uBlushShade','uHairShade','uEyeShade','uLipShade','uWB','uLipLinerShade','uEyelinerShade','uBrowShade','uBronzerShade',
                    'uFndInt','uBlushInt','uHairInt','uEyeInt','uLashInt','uLipInt',
-                   'uContourInt','uHighlightInt','uUnderEyeInt','uLipLinerInt','uEyelinerInt','uBrowInt',
+                   'uContourInt','uHighlightInt','uUnderEyeInt','uBronzerInt','uNoseContourInt','uLipLinerInt','uEyelinerInt','uBrowInt',
                    'uLight','uFinish','uFaceLum','uCinema','uLightBal','uFaceYaw','uEyeFinish','uFndFinish','uBlushFinish','uTexel']) {
     loc[u] = gl.getUniformLocation(prog, u);
   }
-  tex = { frame: makeTex(), fnd: makeTex(), blush: makeTex(), hair: makeTex(), eye: makeTex(), lash: makeTex(), lip: makeTex(), sculpt: makeTex(), lipLiner: makeTex(), eyeliner: makeTex(), brows: makeTex() };
+  tex = { frame: makeTex(), fnd: makeTex(), blush: makeTex(), hair: makeTex(), eye: makeTex(), lash: makeTex(), lip: makeTex(), sculpt: makeTex(), lipLiner: makeTex(), eyeliner: makeTex(), brows: makeTex(), extra: makeTex() };
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
   return true;
 }
@@ -596,12 +637,12 @@ function upload(unit, t, src) {
 
 /**
  * Render frame + makeup. opts: { foundation, underEye, contour, blush, highlight,
- * hair, eyes, lashes, lips, wb:[r,g,b] } — each region optional.
+ * bronzer, noseContour, hair, eyes, lashes, lips, wb:[r,g,b] } — each region optional.
  */
 export function renderMakeupGL(source, w, h, landmarks, opts) {
   if (!glAvailable() || !initGL()) return null;
   if (!landmarks || landmarks.length < 468) return null;
-  const { foundation, underEye, contour, blush, highlight, hair, eyes, lashes, lips, lipLiner, eyeliner, brows, wb } = opts;
+  const { foundation, underEye, contour, blush, highlight, bronzer, noseContour, hair, eyes, lashes, lips, lipLiner, eyeliner, brows, wb } = opts;
 
   if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
   gl.viewport(0, 0, w, h);
@@ -618,7 +659,7 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
   // never invalidates this cache.
   const key = `${w}x${h}|${!!foundation}${!!blush}${!!eyes}${!!lashes}${!!lips}`
             + `${!!(hair && hair.mask)}${!!lipLiner}${!!eyeliner}${!!brows}`
-            + `${!!contour}${!!highlight}${!!underEye}`;
+            + `${!!contour}${!!highlight}${!!underEye}${!!bronzer}${!!noseContour}`;
   const lipOverride = lips?.overrideMask || null;
 
   // Evaluate the geometry check first, not inside an || chain — it also
@@ -637,7 +678,10 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
     upload(3, tex.hair, (hair && hair.mask) ? hair.mask : blank());
     upload(4, tex.eye, eyes ? buildEyeMask(w, h, landmarks) : blank());
     const lashMot = opts.motion ?? 0;
-    upload(5, tex.lash, (lashes && lashMot < 0.008) ? buildLashMask(w, h, landmarks) : blank());
+    const use3dLash = lashes && lash3dAvailable();
+    // When 3D lash renderer is available, skip the texture-based mask —
+    // lashes are rendered as instanced geometry after the main composite pass.
+    upload(5, tex.lash, (lashes && !use3dLash && lashMot < 0.008) ? buildLashMask(w, h, landmarks) : blank());
     upload(6, tex.lip, lips ? buildLipMask(w, h, landmarks, lips) : blank());
     upload(7, tex.sculpt, sculptOn
       ? buildSculptPack(w, h, landmarks, { contour: !!contour, highlight: !!highlight, underEye: !!underEye })
@@ -645,6 +689,10 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
     upload(8, tex.lipLiner, lipLiner ? buildLipLinerMask(w, h, landmarks) : blank());
     upload(9, tex.eyeliner, eyeliner ? buildEyelinerMask(w, h, landmarks) : blank());
     upload(10, tex.brows, brows ? buildBrowMask(w, h, landmarks) : blank());
+    const extraOn = !!(bronzer || noseContour);
+    upload(11, tex.extra, extraOn
+      ? buildExtraPack(w, h, landmarks, { bronzer: !!bronzer, noseContour: !!noseContour })
+      : blank());
     lastMaskKey = key;
     lastHairMask = hair?.mask || null;
     lastLipOverride = lipOverride;
@@ -654,6 +702,7 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
   gl.uniform1i(loc.uHair, 3); gl.uniform1i(loc.uEye, 4); gl.uniform1i(loc.uLash, 5);
   gl.uniform1i(loc.uLip, 6); gl.uniform1i(loc.uSculpt, 7);
   gl.uniform1i(loc.uLipLiner, 8); gl.uniform1i(loc.uEyeliner, 9); gl.uniform1i(loc.uBrows, 10);
+  gl.uniform1i(loc.uExtra, 11);
 
   gl.uniform3fv(loc.uFndShade, hexToRgb(foundation ? foundation.color : '#000000'));
   gl.uniform3fv(loc.uBlushShade, hexToRgb(blush ? blush.color : '#000000'));
@@ -663,6 +712,7 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
   gl.uniform3fv(loc.uLipLinerShade, hexToRgb(lipLiner ? lipLiner.color : '#000000'));
   gl.uniform3fv(loc.uEyelinerShade, hexToRgb(eyeliner ? eyeliner.color : '#0a0a0a'));
   gl.uniform3fv(loc.uBrowShade, hexToRgb(brows ? brows.color : '#000000'));
+  gl.uniform3fv(loc.uBronzerShade, hexToRgb(bronzer ? bronzer.color : '#000000'));
   gl.uniform3fv(loc.uWB, wb && wb.length === 3 ? wb : [1, 1, 1]);
 
   gl.uniform1f(loc.uFndInt, foundation ? (foundation.intensity ?? 0.25) : 0);
@@ -676,10 +726,15 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
   const lashMotion = opts.motion ?? 0;
   const lashFade = lashMotion <= 0.003 ? 1 : lashMotion >= 0.008 ? 0
     : 1 - (lashMotion - 0.003) / (0.008 - 0.003);
-  gl.uniform1f(loc.uLashInt, lashes ? (lashes.intensity ?? 0.8) * lashFade * blinkGate : 0);
+  // When 3D lash renderer is active, set texture lash intensity to 0 —
+  // lashes are drawn as instanced geometry after the composite pass.
+  const use3dLash = lashes && lash3dAvailable();
+  gl.uniform1f(loc.uLashInt, (lashes && !use3dLash) ? (lashes.intensity ?? 0.8) * lashFade * blinkGate : 0);
   gl.uniform1f(loc.uLipInt, lips ? (lips.intensity ?? 0.7) : 0);
   gl.uniform1f(loc.uContourInt, contour ? (contour.intensity ?? 0.35) : 0);
   gl.uniform1f(loc.uHighlightInt, highlight ? (highlight.intensity ?? 0.5) : 0);
+  gl.uniform1f(loc.uBronzerInt, bronzer ? (bronzer.intensity ?? 0.45) : 0);
+  gl.uniform1f(loc.uNoseContourInt, noseContour ? (noseContour.intensity ?? 0.5) : 0);
   gl.uniform1f(loc.uUnderEyeInt, underEye ? (underEye.intensity ?? 0.4) : 0);
   gl.uniform1f(loc.uLipLinerInt, lipLiner ? (lipLiner.intensity ?? 0.8) : 0);
   gl.uniform1f(loc.uEyelinerInt, eyeliner ? (eyeliner.intensity ?? 0.9) * blinkGate : 0);
@@ -703,5 +758,25 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
   gl.uniform2f(loc.uTexel, 1 / w, 1 / h);
 
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+  // 3D instanced lashes — rendered AFTER the main composite pass so they
+  // blend on top of the fully composited frame (same as real mascara order).
+  if (lashes && lash3dAvailable()) {
+    renderLashes3D(gl, w, h, landmarks, {
+      intensity: lashes.intensity ?? 0.8,
+      color: lashes.color || '#0a0a0a',
+      blinkL: opts.blinkL,
+      blinkR: opts.blinkR,
+      motion: opts.motion,
+      hasEyeliner: !!eyeliner,
+    });
+    // Restore main program state for next frame
+    gl.useProgram(prog);
+    gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+    const ap = gl.getAttribLocation(prog, 'aPos');
+    gl.enableVertexAttribArray(ap);
+    gl.vertexAttribPointer(ap, 2, gl.FLOAT, false, 0, 0);
+  }
+
   return canvas;
 }

@@ -201,7 +201,7 @@ export default function DebugApp() {
 
   // The engine owns camera, detection, smoothing, exposure and the makeup pass.
   // All this workbench does is blit the processed frame and draw its overlays.
-  const onFrame = useCallback(({ processed, landmarks, w, h }) => {
+  const onFrame = useCallback(({ processed, source, landmarks, w, h }) => {
     const cv = canvasRef.current;
     if (!cv) return;
     if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }

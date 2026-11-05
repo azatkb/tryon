@@ -10,6 +10,7 @@
 // a high point. Luminance-preserving colour transfer keeps each region's
 // texture; an auto white-balance holds the look across warm / side lighting.
 
+import { initLipMesh, renderLipMesh, lipMesh3DAvailable } from './lipMesh3D.js';
 import { buildLipMask, buildEyeMask, buildFaceMask, buildLashMask, buildBlushMask, buildSculptPack,
          buildExtraPack, buildLipLinerMask, buildEyelinerMask, buildBrowMask, CFG } from './lipRenderer.js';
 import { lash3dAvailable, renderLashes3D } from './lashRenderer3D.js';
@@ -669,6 +670,11 @@ function initGL() {
   }
   tex = { frame: makeTex(), fnd: makeTex(), blush: makeTex(), hair: makeTex(), eye: makeTex(), lash: makeTex(), lip: makeTex(), sculpt: makeTex(), lipLiner: makeTex(), eyeliner: makeTex(), brows: makeTex(), extra: makeTex() };
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+
+  // Initialise the 3D lip mesh renderer (separate shader + FBO).
+  // Falls back to canvas-drawn buildLipMask if this fails.
+  initLipMesh(gl);
+
   return true;
 }
 
@@ -738,7 +744,24 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
     // When 3D lash renderer is available, skip the texture-based mask —
     // lashes are rendered as instanced geometry after the main composite pass.
     upload(5, tex.lash, (lashes && !use3dLash && lashMot < 0.008) ? buildLashMask(w, h, landmarks) : blank());
-    upload(6, tex.lip, lips ? buildLipMask(w, h, landmarks, lips) : blank());
+    // 3D lip mesh: render directly into a GL texture via FBO — z-depth gives
+    // correct foreshortening on head turns.  Falls back to 2D canvas mask.
+    if (lips && lipMesh3DAvailable()) {
+      const lipTex = renderLipMesh(gl, w, h, landmarks, lips);
+      if (lipTex) {
+        // renderLipMesh wrote into its own FBO texture — bind it to unit 6.
+        // We need to restore the main quad VBO+attribs after lipMesh touched them.
+        gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+        const ap = gl.getAttribLocation(prog, 'aPos');
+        gl.vertexAttribPointer(ap, 2, gl.FLOAT, false, 0, 0);
+        gl.activeTexture(gl.TEXTURE0 + 6);
+        gl.bindTexture(gl.TEXTURE_2D, lipTex);
+      } else {
+        upload(6, tex.lip, buildLipMask(w, h, landmarks, lips));
+      }
+    } else {
+      upload(6, tex.lip, lips ? buildLipMask(w, h, landmarks, lips) : blank());
+    }
     upload(7, tex.sculpt, sculptOn
       ? buildSculptPack(w, h, landmarks, { contour: !!contour, highlight: !!highlight, underEye: !!underEye })
       : blank());

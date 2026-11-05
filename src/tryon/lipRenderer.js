@@ -1571,7 +1571,15 @@ export function buildLipLinerMask(w, h, landmarks) {
   let upY = (landmarks[0].y - landmarks[17].y) * MH;
   const lipH = Math.hypot(upX, upY) || 1;
   upX /= lipH; upY /= lipH;
-  const lift = lipH * CFG.lipLiner.lowerLift;
+  // When the mouth opens, the lower lip pulls away from the upper —
+  // lipH grows.  The lift (which tucks the lower liner inward) should
+  // DECREASE as the mouth opens, otherwise the liner detaches from the
+  // lower-lip edge.  Use closed-mouth lip height (~lip width * 0.35)
+  // as reference; fade lift to 0 as the gap grows.
+  const mouthW = Math.abs(landmarks[291].x - landmarks[61].x) * MW;
+  const closedH = mouthW * 0.35;  // approximate closed-lip height
+  const openFade = Math.max(0, 1 - Math.max(0, lipH - closedH) / (closedH * 0.6));
+  const lift = closedH * CFG.lipLiner.lowerLift * openFade;
 
   // LIPS_OUTER runs upper-left -> upper-right (0..10), then lower-right ->
   // lower-left (11..19). Only that second run is lifted, fading to nothing at
@@ -1599,6 +1607,43 @@ export function buildLipLinerMask(w, h, landmarks) {
   m.stroke();
 
   m.restore();
+
+  // ── Mouth-opening cutout ──────────────────────────────────────────────
+  // Same logic as buildLipMask: when the mouth opens, erase the inner area
+  // so the liner doesn't paint over teeth/tongue.
+  const gap = Math.abs(landmarks[14].y - landmarks[13].y);
+  const lipWd = Math.abs(landmarks[291].x - landmarks[61].x);
+  const ratio = lipWd > 0 ? gap / lipWd : 0;
+  if (ratio > 0.06) {
+    const tc = refineCv.getContext('2d');
+    tc.setTransform(1, 0, 0, 1, 0, 0);
+    tc.clearRect(0, 0, MW, MH);
+    tc.fillStyle = '#fff';
+    tc.filter = 'none';
+    tracePath(tc, landmarks, LIPS_INNER, MW, MH);
+    tc.fill();
+
+    // Intersect with shrunk LIPS_OUTER — guarantees minimum lip-liner band
+    const outerPts = LIPS_OUTER.map((i) => [landmarks[i].x * MW, landmarks[i].y * MH]);
+    let ocx = 0, ocy = 0;
+    for (const [x, y] of outerPts) { ocx += x; ocy += y; }
+    ocx /= outerPts.length; ocy /= outerPts.length;
+    const safeInset = 0.30; // slightly more than lips (0.25) — keep liner ring intact
+    const safePts = outerPts.map(([x, y]) => [
+      x + (ocx - x) * safeInset,
+      y + (ocy - y) * safeInset,
+    ]);
+    tc.globalCompositeOperation = 'destination-in';
+    tc.filter = 'none';
+    traceSmooth(tc, safePts);
+    tc.fill();
+    tc.globalCompositeOperation = 'source-over';
+
+    m.globalCompositeOperation = 'destination-out';
+    m.drawImage(refineCv, 0, 0);
+    m.globalCompositeOperation = 'source-over';
+  }
+
   return lipLinerMaskCv;
 }
 

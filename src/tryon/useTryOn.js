@@ -30,7 +30,7 @@ export const DEFAULT_RESOLUTION = { width: 1920, height: 1080 };
 export const MOVE_THRESH = 0.0015;
 
 /** Render every Nth fresh frame (1 = every frame, 2 = every 2nd, 3 = every 3rd). */
-export let RENDER_EVERY = 1;
+export let RENDER_EVERY = 2;
 
 export function useTryOn(options = {}) {
   const {

@@ -374,7 +374,7 @@ void main(){
   }
 
   // ── EYESHADOW: colour blend + finish-aware surface (matte/satin/shimmer) ────
-  float me = feather(softA(uEye, vUv, 2.0)) * uEyeInt * expI;
+  float me = texture2D(uEye, vUv).a * uEyeInt * expI;
   if (me > 0.001) {
     float shadeL = percL(uEyeShade);
     vec3 col  = blendColor(outc, uEyeShade);

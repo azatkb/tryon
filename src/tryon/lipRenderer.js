@@ -371,16 +371,30 @@ function applyBlurRGBA(canvas, radiusPx) {
   }
 }
 
-// Test once whether ctx.filter = 'blur(...)' actually works (Safari: no).
+// Test once whether ctx.filter = 'blur(...)' actually works by checking pixels.
+// Safari 16.4+ accepts the property but may not apply the effect.
 let _filterWorks = null;
 function canvasFilterSupported() {
   if (_filterWorks !== null) return _filterWorks;
   try {
     const tc = document.createElement('canvas');
-    tc.width = 4; tc.height = 4;
+    tc.width = 8; tc.height = 8;
     const c = tc.getContext('2d');
-    c.filter = 'blur(1px)';
-    _filterWorks = c.filter === 'blur(1px)';
+    // Draw a sharp 2×2 white square in the centre
+    c.fillStyle = '#fff';
+    c.fillRect(3, 3, 2, 2);
+    // Read a pixel that should be black (outside the square)
+    const before = c.getImageData(1, 1, 1, 1).data[3]; // alpha at (1,1)
+    // Redraw through blur filter onto a second canvas
+    const tc2 = document.createElement('canvas');
+    tc2.width = 8; tc2.height = 8;
+    const c2 = tc2.getContext('2d');
+    c2.filter = 'blur(2px)';
+    c2.drawImage(tc, 0, 0);
+    c2.filter = 'none';
+    // If blur worked, (1,1) should now have some alpha spread from the centre
+    const after = c2.getImageData(1, 1, 1, 1).data[3];
+    _filterWorks = after > before + 2; // at least a few alpha units of spread
   } catch (_) { _filterWorks = false; }
   return _filterWorks;
 }

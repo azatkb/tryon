@@ -29,6 +29,9 @@ export const DEFAULT_RESOLUTION = { width: 1920, height: 1080 };
 /** Face motion above this counts as "moving" — hosts use it to gate heavy work. */
 export const MOVE_THRESH = 0.0015;
 
+/** Render every Nth fresh frame (1 = every frame, 2 = every 2nd, 3 = every 3rd). */
+export let RENDER_EVERY = 2;
+
 export function useTryOn(options = {}) {
   const {
     layers = {},
@@ -194,6 +197,7 @@ export function useTryOn(options = {}) {
 
     let stopped = false;
     let lastTime = -1;
+    let renderCount = 0;  // counts fresh frames; render when it hits RENDER_EVERY
 
     (async () => {
       try {
@@ -254,9 +258,27 @@ export function useTryOn(options = {}) {
             src = snap;
           }
 
+          // Detect on every fresh frame (accumulates smoother landmarks),
+          // but render makeup only every RENDER_EVERY-th fresh frame —
+          // texture uploads + shader are the expensive part.
           const lms = trackFrame(src, isFresh);
           setFaceSeen(!!lms);
-          processFrame(src, w, h, lms);
+          if (isFresh) renderCount++;
+          if (renderCount >= RENDER_EVERY) {
+            renderCount = 0;
+            processFrame(src, w, h, lms);
+          } else if (procRef.current) {
+            // Skip render — reuse previous frame, just notify host
+            cfg.onFrame?.({
+              processed: procRef.current, source: src, landmarks: lms,
+              w, h,
+              faceLum: metricsRef.current.faceLum,
+              lightBal: metricsRef.current.lightBal,
+              faceYaw: metricsRef.current.faceYaw,
+              motion: metricsRef.current.motion,
+              moving: metricsRef.current.moving,
+            });
+          }
         };
         cancelAnimationFrame(rafRef.current);
         tick();

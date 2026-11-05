@@ -11,7 +11,7 @@
 // texture; an auto white-balance holds the look across warm / side lighting.
 
 import { buildLipMask, buildEyeMask, buildFaceMask, buildLashMask, buildBlushMask, buildSculptPack,
-         buildExtraPack, buildLipLinerMask, buildEyelinerMask, buildBrowMask } from './lipRenderer.js';
+         buildExtraPack, buildLipLinerMask, buildEyelinerMask, buildBrowMask, CFG } from './lipRenderer.js';
 import { lash3dAvailable, renderLashes3D } from './lashRenderer3D.js';
 
 let gl = null, canvas = null, prog = null, quadBuf = null;
@@ -61,10 +61,10 @@ const FRAG = `
 precision highp float;
 varying vec2 vUv;
 uniform sampler2D uFrame, uFnd, uBlush, uHair, uEye, uLash, uLip, uSculpt, uLipLiner, uEyeliner, uBrows, uExtra;
-uniform vec3 uFndShade, uBlushShade, uHairShade, uEyeShade, uLipShade, uWB, uLipLinerShade, uEyelinerShade, uBrowShade, uBronzerShade;
+uniform vec3 uFndShade, uBlushShade, uHairShade, uEyeShade, uLipShade, uWB, uLipLinerShade, uEyelinerShade, uBrowShade, uBronzerShade, uUnderEyeShade;
 uniform float uFndInt, uBlushInt, uHairInt, uEyeInt, uLashInt, uLipInt;
 uniform float uContourInt, uHighlightInt, uUnderEyeInt, uBronzerInt, uNoseContourInt, uLipLinerInt, uEyelinerInt, uBrowInt;
-uniform float uLight, uFinish, uFaceLum, uCinema, uLightBal, uFaceYaw;
+uniform float uLight, uFinish, uFaceLum, uCinema, uGrain, uGlamour, uLightBal, uFaceYaw;
 uniform float uEyeFinish;  // 0=matte, 1=satin, 2=shimmer
 uniform float uFndFinish;  // 0=powder/matte, 1=natural, 2=dewy/cream
 uniform float uBlushFinish; // 0=powder, 1=cream
@@ -216,7 +216,7 @@ void main(){
   // Intensity drives coverage:  low (0.1-0.2) = sheer tint — lets almost all
   // skin through; mid (0.25-0.4) = medium — evens tone, pores still visible;
   // high (0.5+) = full — covers blemishes, only the deepest texture survives.
-  float mf = feather(softA(uFnd, vUv, 7.0)) * uFndInt * skinGate * expI;
+  float mf = feather(texture2D(uFnd, vUv).a) * uFndInt * skinGate * expI;
   if (mf > 0.001) {
     vec3 tinted = blendColor(outc, uFndShade);
     vec3 texd   = softLight(outc, uFndShade * 0.5 + 0.25);
@@ -247,10 +247,13 @@ void main(){
   float mu = sc.b * uUnderEyeInt * expI;
   if (mu > 0.001) {
     float lum = percL(outc);
-    // Kill cool cast first (blue-grey under-eye circles have low R, high B)
-    vec3 warmShift = outc + vec3(0.04, 0.02, -0.03) * mu;
-    // Then lift darkness via screen with warm ivory
-    vec3 lifted = blendScreen(warmShift, vec3(0.98, 0.94, 0.88) * 0.22 * mu);
+    // Shade defaults to warm ivory when colour is zero (backwards compat)
+    vec3 ueShade = (uUnderEyeShade.r + uUnderEyeShade.g + uUnderEyeShade.b < 0.01)
+                   ? vec3(0.98, 0.94, 0.88) : uUnderEyeShade;
+    // Kill cool cast — shift toward the chosen shade's warmth
+    vec3 warmShift = outc + (ueShade - vec3(0.5)) * 0.12 * mu;
+    // Then lift darkness via screen with the shade
+    vec3 lifted = blendScreen(warmShift, ueShade * 0.22 * mu);
     outc = mix(outc, lifted, mu * 0.85);
   }
 
@@ -287,7 +290,7 @@ void main(){
   }
 
   // ── BLUSH: SSS warm flush, powder vs cream, reduces where skin is red ───────
-  float mb = softA(uBlush, vUv, 9.0) * uBlushInt * skinGate;
+  float mb = texture2D(uBlush, vUv).a * uBlushInt * skinGate;
   mb *= 1.0 - contourD * 0.5;
   if (mb > 0.001) {
     float redness = smoothstep(0.02, 0.30, outc.r - (outc.g + outc.b) * 0.5);
@@ -358,7 +361,7 @@ void main(){
   }
 
   // ── HAIR ────────────────────────────────────────────────────────────────────
-  float mh = feather(softA(uHair, vUv, 4.0)) * uHairInt * expI;
+  float mh = feather(texture2D(uHair, vUv).a) * uHairInt * expI;
   if (mh > 0.001) outc = mix(outc, recolour(outc, uHairShade), mh);
 
   // ── BROWS: tint with texture preservation ───────────────────────────────────
@@ -371,7 +374,7 @@ void main(){
   }
 
   // ── EYESHADOW: colour blend + finish-aware surface (matte/satin/shimmer) ────
-  float me = softA(uEye, vUv, 6.0) * uEyeInt * expI;
+  float me = texture2D(uEye, vUv).a * uEyeInt * expI;
   if (me > 0.001) {
     float shadeL = percL(uEyeShade);
     vec3 col  = blendColor(outc, uEyeShade);
@@ -447,12 +450,23 @@ void main(){
     outc = mix(outc, liner, mll);
   }
 
-  // ── LIPS: finish-aware colour with ombre edge and SSS ───────────────────────
-  float lipA = feather(softA(uLip, vUv, 2.5));
+  // ── LIPS: translucent pigment over skin — colour, relief and tone show through
+  float lipA = feather(texture2D(uLip, vUv).a);
   float ml = lipA * uLipInt * expI;
   if (ml > 0.001) {
     float lum = percL(outc);
-    vec3 mk = recolour(outc, uLipShade);
+    // The skin's own hue/sat bleeds through — real pigment is translucent.
+    // Multiply blend lets dark lip lines stay visible; blendColor transfers
+    // the shade's hue at the skin's luminance.  Mix the two so the skin
+    // undertone isn't completely erased.
+    vec3 colorLayer = blendColor(outc, uLipShade);        // hue transfer
+    vec3 multiLayer = blendMultiply(outc, uLipShade + 0.3); // darken, keep relief
+    // 60% colour + 40% multiply — preserves skin warmth/coolness underneath
+    vec3 mk = mix(multiLayer, colorLayer, 0.6);
+
+    // Exposure-normalise so brightness tracks the face, not the shade swatch
+    float targetLum = clamp(lum + (0.5 - uFaceLum) * 0.25, 0.0, 1.0);
+    mk = setLum(mk, mix(percL(mk), targetLum, 0.5));
 
     // Ombre: edges are slightly deeper/cooler than centre (natural lip anatomy)
     float edgeFactor = 1.0 - smoothstep(0.04, 0.82, lipA);
@@ -462,17 +476,16 @@ void main(){
     // Finish-specific surface response
     if (uFinish < 0.5) {
       // MATTE: flatten specular, slightly desaturate highlights
-      mk = setLum(mk, clamp(0.45 + (lum - 0.5) * 0.65, 0.0, 1.0));
-      mk = mix(mk, vec3(percL(mk)), smoothstep(0.6, 0.9, lum) * 0.2);
+      mk = setLum(mk, clamp(percL(mk) + (lum - 0.5) * 0.15, 0.0, 1.0));
+      mk = mix(mk, vec3(percL(mk)), smoothstep(0.6, 0.9, lum) * 0.15);
     } else if (uFinish < 1.5) {
       // SATIN: soft-light warmth lifts mid-tones, subtle sheen
-      float sheen = smoothstep(0.5, 0.85, lum) * 0.22;
-      mk = mix(mk, mk + sheen, 0.6);
+      float sheen = smoothstep(0.5, 0.85, lum) * 0.18;
+      mk = mix(mk, mk + sheen, 0.5);
     } else {
-      // GLOSS: strong specular + SSS warmth at the cupid's bow
+      // GLOSS: specular + SSS warmth at the cupid's bow
       float gloss = smoothstep(0.55, 0.95, lum);
-      mk += gloss * gloss * vec3(0.55, 0.50, 0.45);
-      // SSS warmth through the lip body
+      mk += gloss * gloss * vec3(0.40, 0.36, 0.30);
       mk = mix(mk, sssBlend(mk, uLipShade * 1.1, 0.3), 0.25);
     }
     outc = mix(outc, mk, ml);
@@ -494,8 +507,8 @@ void main(){
   vec3 origLow = clamp(softRGB(uFrame, vUv, 3.0) * uWB, 0.0, 1.0);
   vec3 detail  = orig - origLow;
   float delta  = clamp(length(outc - orig) * 5.0, 0.0, 1.0);
-  float lipZone = feather(softA(uLip, vUv, 2.5)) * uLipInt;
-  float eyeZone = feather(softA(uEye, vUv, 4.0)) * uEyeInt;
+  float lipZone = feather(texture2D(uLip, vUv).a) * uLipInt;
+  float eyeZone = feather(texture2D(uEye, vUv).a) * uEyeInt;
   // Lips get 1.1× texture, eyes get 1.2× (eyelid creases/pores under shadow),
   // everything else gets 0.7×.
   float texStr  = mix(0.7, 1.1, lipZone);
@@ -536,17 +549,58 @@ void main(){
     outc *= mix(1.0, vignette, 0.35 * ci);
   }
 
-  // 3. Camera-matched grain
-  //    Sensor noise is heavier in shadows (high ISO / low-light regions).
-  //    The hash seed includes uFaceLum, which shifts slightly each frame,
-  //    so the grain pattern never freezes into a static texture.
-  //    With cinema on, grain is scaled up toward a 35mm film look.
+  // 3. Camera-matched grain + unifying film grain
+  //    Two layers of noise at different spatial frequencies:
+  //    a) Fine sensor grain (high freq) — always on, matches camera noise
+  //    b) Unifying grain (medium freq, brighter) — controlled by uGrain,
+  //       bonds makeup masks to skin so everything reads as one surface.
+  //    Both shift each frame via uFaceLum to avoid frozen patterns.
   float grain    = hash21(vUv * 768.0 + fract(uFaceLum * 137.0)) - 0.5;
   float grainBase = mix(0.010, 0.003, clamp(skinL * 1.5, 0.0, 1.0));
-  float grainAmt  = grainBase * (1.0 + uCinema * 1.2);   // heavier grain in cinema mode
+  float grainAmt  = grainBase * (1.0 + uCinema * 1.2);
   outc += grain * grainAmt;
 
-  // 4. Anti-banding dither (targets gradient quantisation steps, not film
+  // Unifying grain: fine-grained (high spatial freq), luminance-only,
+  // stronger where makeup was applied (delta > 0). This makes synthetic
+  // masks share the same micro-texture as the camera feed.
+  if (uGrain > 0.001) {
+    float g2 = hash21(vUv * 1400.0 + fract(uFaceLum * 211.0)) - 0.5;
+    // Heavier in shadows, lighter in highlights (like real sensor noise)
+    float lumGate = mix(1.3, 0.5, clamp(percL(outc) * 1.8, 0.0, 1.0));
+    // Boost on makeup-covered pixels so masks blend into skin texture
+    float mkGate = 1.0 + delta * 1.5;
+    float gStr = uGrain * 0.12 * lumGate * mkGate;
+    outc += g2 * gStr;
+  }
+
+  // 4. Glamour grade — luxury beauty-campaign look.  Boolean: on/off.
+  if (uGlamour > 0.5) {
+
+    // a) Soft glow: screen-blend a blurred bright version over the image.
+    vec3 glow = clamp(softRGB(uFrame, vUv, 24.0) * uWB, 0.0, 1.0);
+    float glowGate = smoothstep(0.35, 0.75, percL(glow));
+    outc = 1.0 - (1.0 - outc) * (1.0 - glow * glowGate * 0.35);
+
+    // b) Lift shadows — blacks become rich dark brown, not crushed.
+    outc = outc * 0.975 + 0.025;
+
+    // c) Split toning: warm highlights, cool shadows.
+    float pL = percL(outc);
+    outc *= mix(vec3(1.0), vec3(1.02, 0.98, 0.92), smoothstep(0.45, 0.85, pL) * 0.6);
+    outc *= mix(vec3(1.0), vec3(0.95, 0.97, 1.04), (1.0 - smoothstep(0.20, 0.55, pL)) * 0.4);
+
+    // d) S-curve contrast — punchy mids without clipping extremes.
+    //    Cubic hermite: pulls darks down, lifts lights up.
+    vec3 curved = outc * outc * (3.0 - 2.0 * outc);  // smoothstep per channel
+    outc = mix(outc, curved, 0.3);
+
+    // e) Subtle saturation boost on mid-tones.
+    float gray = percL(outc);
+    float midGate = 1.0 - abs(gray - 0.5) * 2.0;
+    outc = mix(vec3(gray), outc, 1.0 + 0.15 * midGate);
+  }
+
+  // 5. Anti-banding dither (targets gradient quantisation steps, not film
   //    grain — the two operate at different spatial frequencies).
   float d = (hash21(vUv * 1024.0 + fract(uFaceLum * 97.0)) - 0.5) * 0.0039;
   gl_FragColor = vec4(clamp(outc + d, 0.0, 1.0), 1.0);
@@ -607,10 +661,10 @@ function initGL() {
   gl.vertexAttribPointer(ap, 2, gl.FLOAT, false, 0, 0);
 
   for (const u of ['uFrame','uFnd','uBlush','uHair','uEye','uLash','uLip','uSculpt','uLipLiner','uEyeliner','uBrows','uExtra',
-                   'uFndShade','uBlushShade','uHairShade','uEyeShade','uLipShade','uWB','uLipLinerShade','uEyelinerShade','uBrowShade','uBronzerShade',
+                   'uFndShade','uBlushShade','uHairShade','uEyeShade','uLipShade','uWB','uLipLinerShade','uEyelinerShade','uBrowShade','uBronzerShade','uUnderEyeShade',
                    'uFndInt','uBlushInt','uHairInt','uEyeInt','uLashInt','uLipInt',
                    'uContourInt','uHighlightInt','uUnderEyeInt','uBronzerInt','uNoseContourInt','uLipLinerInt','uEyelinerInt','uBrowInt',
-                   'uLight','uFinish','uFaceLum','uCinema','uLightBal','uFaceYaw','uEyeFinish','uFndFinish','uBlushFinish','uTexel']) {
+                   'uLight','uFinish','uFaceLum','uCinema','uGrain','uGlamour','uLightBal','uFaceYaw','uEyeFinish','uFndFinish','uBlushFinish','uTexel']) {
     loc[u] = gl.getUniformLocation(prog, u);
   }
   tex = { frame: makeTex(), fnd: makeTex(), blush: makeTex(), hair: makeTex(), eye: makeTex(), lash: makeTex(), lip: makeTex(), sculpt: makeTex(), lipLiner: makeTex(), eyeliner: makeTex(), brows: makeTex(), extra: makeTex() };
@@ -637,7 +691,9 @@ function upload(unit, t, src) {
 
 /**
  * Render frame + makeup. opts: { foundation, underEye, contour, blush, highlight,
- * bronzer, noseContour, hair, eyes, lashes, lips, wb:[r,g,b] } — each region optional.
+ * bronzer, noseContour, hair, eyes, lashes, lips, wb:[r,g,b],
+ * grain:0..1 (unifying film grain, default 0.5),
+ * glamour:0..1 (luxury beauty grade — glow, split tone, S-curve) } — each region optional.
  */
 export function renderMakeupGL(source, w, h, landmarks, opts) {
   if (!glAvailable() || !initGL()) return null;
@@ -713,6 +769,7 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
   gl.uniform3fv(loc.uEyelinerShade, hexToRgb(eyeliner ? eyeliner.color : '#0a0a0a'));
   gl.uniform3fv(loc.uBrowShade, hexToRgb(brows ? brows.color : '#000000'));
   gl.uniform3fv(loc.uBronzerShade, hexToRgb(bronzer ? bronzer.color : '#000000'));
+  gl.uniform3fv(loc.uUnderEyeShade, hexToRgb((underEye && underEye.color) || '#000000'));
   gl.uniform3fv(loc.uWB, wb && wb.length === 3 ? wb : [1, 1, 1]);
 
   gl.uniform1f(loc.uFndInt, foundation ? (foundation.intensity ?? 0.25) : 0);
@@ -746,6 +803,8 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
   gl.uniform1f(loc.uLightBal, typeof opts.lightBal === 'number' ? opts.lightBal : 0);
   gl.uniform1f(loc.uFaceYaw, typeof opts.faceYaw === 'number' ? opts.faceYaw : 0);
   gl.uniform1f(loc.uCinema, typeof opts.cinema === 'number' ? opts.cinema : 0);
+  gl.uniform1f(loc.uGrain, typeof opts.grain === 'number' ? opts.grain : CFG.grain.intensity);
+  gl.uniform1f(loc.uGlamour, opts.glamour ? 1.0 : 0.0);
 
   // Per-region finish codes: 0=matte/powder, 1=satin/natural, 2=shimmer/dewy/cream
   const EYE_FINISH = { matte: 0, satin: 1, shimmer: 2 };

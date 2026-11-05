@@ -100,11 +100,11 @@ function cutFeatures(m, landmarks) {
 // ║  of mask width (MW). Per-step STRENGTH lives in tutorials.js (intensity),  ║
 // ║  and shader colour math (contour darkness, highlight colour) in webglLips.js. ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
-const CFG = {
-  maskScale: 0.5,          // internal mask resolution (× frame). Lower = faster, softer.
-  lashScale: 0.75,         // lash mask resolution (× frame). 0.75 = good balance of crispness vs perf.
+export const CFG = {
+  maskScale: 0.5,           // internal mask resolution (× frame). Lower = cheaper, GL_LINEAR softens edges.
+  lashScale: 1.0,           // lash mask resolution (× frame). 1.0 = crisp individual lash strokes.
 
-  lips:  { blur: 0.006 },  // lip edge softness (ombre needs a little)
+  lips:  { blur: 0.003 },  // lip edge softness — tight, shader softA handles the rest
 
   lipLiner: { width: 0.003,      // liner ring thickness
               blur: 0.0015,      // softness (thin)
@@ -129,11 +129,11 @@ const CFG = {
            tail: 0.42 },   // how far it carries PAST the outer corner, toward
                            // the temple — both as multiples of the lift
 
-  lashes: { width: 0.001, // lash line / flick thickness (× face HEIGHT)
-            count: 42,     // denser flicks
-            len: 0.30,     // slightly longer for drama
+  lashes: { width: 0.0022, // lash line / flick thickness (× face HEIGHT)
+            count: 32,     // denser flicks
+            len: 0.40,     // slightly longer for drama
             reachT: 0.82,  // reach close to inner corner (near nose)
-            curl: 0.58,    // curl arc — 0=straight, 1=full curl
+            curl: 0.28,    // curl arc — 0=straight, 1=full curl
             blur: 0.0006,
             depth3d: true,       // 3D shadow layer for volume
             depth3dMinW: 800,    // skip shadow pass when lash canvas width < this (perf on mobile)
@@ -141,8 +141,8 @@ const CFG = {
             shadowOffset: 0.12,  // shadow offset as fraction of lash length
             shadowAlpha: 0.35,   // shadow layer opacity
             taperSteps: 2,       // segments per lash for root-to-tip tapering
-            taperEnd: 0.15,      // tip width as fraction of root width
-            crossFreq: 0.3 },   // fraction of lashes that cross a neighbour
+            taperEnd: 0.25,      // tip width as fraction of root width
+            crossFreq: 0.18 },   // fraction of lashes that cross a neighbour
 
   face:  { blur: 0.017 },  // foundation edge softness
 
@@ -205,6 +205,11 @@ const CFG = {
               spread: 0.5,    // extend both top corners outward (longer to the sides, ~1cm)
               fade: 0.25,     // alpha at the tip (top is 1.0) — vertical falloff
               blur: 0.016 },  // edge softness
+
+  grain: { intensity: 0.0,   // unifying film-grain strength 0..1 (opts.grain overrides) — disabled
+           mul: 0.12 },      // shader multiplier — controls how visible the noise is
+
+  glamour: false,             // luxury beauty grade on/off — glow, split toning, S-curve, sat boost
 };
 
 // Masks are built at reduced resolution (cheap blur/fill) and scaled up when drawn.
@@ -340,15 +345,13 @@ function tracePath(ctx, landmarks, indices, w, h) {
  */
 export function buildLipMask(w, h, landmarks, opts = {}) {
   ensure(w, h);
-  const blur = Math.max(1.2, MW * CFG.lips.blur); // softer edge → room for the ombre liner
   const m = maskCv.getContext('2d');
   m.setTransform(1, 0, 0, 1, 0, 0);
   m.clearRect(0, 0, MW, MH);
   m.fillStyle = '#fff';
-  m.filter = `blur(${blur}px)`;
+  m.filter = 'none';
   tracePath(m, landmarks, LIPS_OUTER, MW, MH);
   m.fill();
-  m.filter = 'none';
   const gap = Math.abs(landmarks[14].y - landmarks[13].y);
   const lipW = Math.abs(landmarks[291].x - landmarks[61].x);
   // Hysteresis: activate at 8%, deactivate at 5% — avoids flicker near threshold
@@ -369,7 +372,7 @@ export function buildLipMask(w, h, landmarks, opts = {}) {
     tc.setTransform(1, 0, 0, 1, 0, 0);
     tc.clearRect(0, 0, MW, MH);
     tc.fillStyle = '#fff';
-    tc.filter = `blur(${Math.max(1, blur * 0.5)}px)`;
+    tc.filter = 'none';
     tracePath(tc, landmarks, LIPS_INNER, MW, MH);
     tc.fill();
 
@@ -1286,28 +1289,50 @@ export function buildUnderEyeMask(w, h, landmarks) {
   m.filter = `blur(${Math.max(3, MW * CFG.underEye.blur)}px)`;
   const faceW = Math.abs(landmarks[FACE_SIDE_R].x - landmarks[FACE_SIDE_L].x) * MW;
   const cfg = CFG.underEye;
+
   const drop = faceW * cfg.drop;
-  const P = (i) => [landmarks[i].x * MW, landmarks[i].y * MH + drop]; // dropped under the lid
+  const P = (i) => [landmarks[i].x * MW, landmarks[i].y * MH + drop];
   const sp = cfg.spread;
+
   // lower-lid inner / centre / outer: right 133,145,33 ; left 362,374,263
   for (const [inner, low, outer] of [[133, 145, 33], [362, 374, 263]]) {
     const I = P(inner), L = P(low), O = P(outer);
     // top corners extended OUTWARD from the lid centre → longer on both sides
     const extend = (p) => [p[0] + (p[0] - L[0]) * sp, p[1] + (p[1] - L[1]) * sp];
     const a = extend(I), c = extend(O);
-    // tip: down onto the cheek, nudged toward the nose (inner − outer direction)
-    const apex = [L[0] + (I[0] - O[0]) * cfg.apexIn, L[1] + faceW * cfg.apexDrop];
+    // tip: down onto the cheek — scaled by pitch so it doesn't spike when
+    // camera is low (face tilted up).
+    const apexDropPx = faceW * cfg.apexDrop;
+    const apex = [L[0] + (I[0] - O[0]) * cfg.apexIn, L[1] + apexDropPx];
+
+    // Rounded shape: two side control points widen the bottom half so the
+    // shape reads as a soft petal, not a sharp triangle. The control points
+    // sit at ~60% height and spread outward from the apex.
+    const midH = 0.6;
+    const sideSpread = faceW * 0.06;
+    const outerMid = [
+      c[0] + sideSpread * Math.sign(c[0] - L[0]),
+      c[1] + (apex[1] - c[1]) * midH,
+    ];
+    const innerMid = [
+      a[0] + sideSpread * Math.sign(a[0] - L[0]),
+      a[1] + (apex[1] - a[1]) * midH,
+    ];
+
     // vertical gradient: bright under the lid, fading toward the tip
     const g = m.createLinearGradient(L[0], L[1], apex[0], apex[1]);
     g.addColorStop(0, 'rgba(255,255,255,1)');
+    g.addColorStop(0.55, 'rgba(255,255,255,0.75)');
     g.addColorStop(1, `rgba(255,255,255,${cfg.fade})`);
     m.fillStyle = g;
-    // top edge curves along the lid (a→L→c), then down to the tip and back
+
+    // Rounded petal: top arc along lid, then cubic curves down each side
+    // through the mid-control points to a rounded apex.
     m.beginPath();
     m.moveTo(a[0], a[1]);
     m.quadraticCurveTo(L[0], L[1], c[0], c[1]);
-    m.quadraticCurveTo((c[0] + apex[0]) / 2, (c[1] + apex[1]) / 2, apex[0], apex[1]);
-    m.quadraticCurveTo((a[0] + apex[0]) / 2, (a[1] + apex[1]) / 2, a[0], a[1]);
+    m.bezierCurveTo(outerMid[0], outerMid[1], apex[0] + sideSpread * 0.3, apex[1], apex[0], apex[1]);
+    m.bezierCurveTo(apex[0] - sideSpread * 0.3, apex[1], innerMid[0], innerMid[1], a[0], a[1]);
     m.closePath();
     m.fill();
   }

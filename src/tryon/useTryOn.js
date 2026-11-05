@@ -29,8 +29,8 @@ export const DEFAULT_RESOLUTION = { width: 1920, height: 1080 };
 /** Face motion above this counts as "moving" — hosts use it to gate heavy work. */
 export const MOVE_THRESH = 0.0015;
 
-/** Render every Nth fresh frame (1 = every frame, 2 = every 2nd, 3 = every 3rd). */
-export let RENDER_EVERY = 2;
+/** @deprecated — kept for API compat; queue-based pipeline detects every frame. */
+export let DETECT_EVERY = 1;
 
 export function useTryOn(options = {}) {
   const {
@@ -197,7 +197,7 @@ export function useTryOn(options = {}) {
 
     let stopped = false;
     let lastTime = -1;
-    let renderCount = 0;  // counts fresh frames; render when it hits RENDER_EVERY
+    let draining = false;  // true while detect+render pipeline is running
 
     (async () => {
       try {
@@ -216,69 +216,48 @@ export function useTryOn(options = {}) {
         await v.play();
         setCamError(null);
 
+        // Double-buffered snap canvases — one for capture, one for
+        // the detect+render pipeline that may still be reading.
+        const snaps = [document.createElement('canvas'), document.createElement('canvas')];
+        let snapIdx = 0;
+        let queued = null;   // { src, w, h } — latest captured frame
+
+        // Drain: take the latest queued frame, run MediaPipe → render.
+        // If another frame arrived while we were busy, schedule again
+        // via microtask so the browser can paint in between.
+        const drain = () => {
+          if (draining || !queued) return;
+          draining = true;
+          const { src, w, h } = queued;
+          queued = null;
+          const lms = trackFrame(src, true);
+          setFaceSeen(!!lms);
+          processFrame(src, w, h, lms);
+          draining = false;
+          if (queued) queueMicrotask(drain);
+        };
+
         const tick = () => {
           rafRef.current = requestAnimationFrame(tick);
           if (!v.videoWidth) return;
-          const cfg = cfgRef.current;
           const isFresh = v.currentTime !== lastTime;
-          // A 30fps camera against a 60Hz display means half of these ticks
-          // carry a video frame we have already drawn. Re-running detection,
-          // ten mask uploads and the shader to produce the same pixels is the
-          // cheapest thing to stop doing, and nothing is lost: there is no new
-          // image to show. Hosts that drive their own animation on top can set
-          // redrawEveryTick to keep the old behaviour.
-          if (!isFresh && !cfg.redrawEveryTick) return;
-          if (isFresh) lastTime = v.currentTime;
+          if (!isFresh) return;           // duplicate display tick — skip
+          lastTime = v.currentTime;
 
           const w = v.videoWidth, h = v.videoHeight;
-          let src = v;
 
-          // FRAME-LOCKED PREVIEW.
-          //
-          // Detecting straight off the <video> samples it at time T, but the
-          // draw that follows happens at T + however long detection took — and
-          // a live video element keeps advancing in between. When a new camera
-          // frame lands inside that window the picture on screen is NEWER than
-          // the landmarks drawn over it, and the makeup slides off the face.
-          //
-          // Freezing the frame first removes the window entirely: detection and
-          // display read the same pixels, so the mask cannot drift from the
-          // face it was computed on. The copy costs ~0.008ms, against ~6ms for
-          // one texture upload — effectively free.
-          //
-          // The trade is that the preview shows you a moment ago rather than
-          // now. For a mirror that is invisible; lipstick lagging your lip is
-          // not. Hosts that would rather have the freshest possible image can
-          // set syncToDetection: false.
-          if (cfg.syncToDetection !== false) {
-            let snap = snapRef.current;
-            if (!snap) { snap = document.createElement('canvas'); snapRef.current = snap; }
-            if (snap.width !== w || snap.height !== h) { snap.width = w; snap.height = h; }
-            if (isFresh) snap.getContext('2d').drawImage(v, 0, 0, w, h);
-            src = snap;
-          }
+          // Capture to the buffer NOT currently being read by drain.
+          snapIdx = 1 - snapIdx;
+          const snap = snaps[snapIdx];
+          if (snap.width !== w || snap.height !== h) { snap.width = w; snap.height = h; }
+          snap.getContext('2d').drawImage(v, 0, 0, w, h);
 
-          // Detect on every fresh frame (accumulates smoother landmarks),
-          // but render makeup only every RENDER_EVERY-th fresh frame —
-          // texture uploads + shader are the expensive part.
-          const lms = trackFrame(src, isFresh);
-          setFaceSeen(!!lms);
-          if (isFresh) renderCount++;
-          if (renderCount >= RENDER_EVERY) {
-            renderCount = 0;
-            processFrame(src, w, h, lms);
-          } else if (procRef.current) {
-            // Skip render — reuse previous frame, just notify host
-            cfg.onFrame?.({
-              processed: procRef.current, source: src, landmarks: lms,
-              w, h,
-              faceLum: metricsRef.current.faceLum,
-              lightBal: metricsRef.current.lightBal,
-              faceYaw: metricsRef.current.faceYaw,
-              motion: metricsRef.current.motion,
-              moving: metricsRef.current.moving,
-            });
-          }
+          // Queue it — latest always wins, older frame is dropped.
+          queued = { src: snap, w, h };
+
+          // If pipeline is idle, drain immediately (lowest latency).
+          // If busy, drain will pick it up when current frame finishes.
+          if (!draining) drain();
         };
         cancelAnimationFrame(rafRef.current);
         tick();

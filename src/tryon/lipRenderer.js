@@ -209,8 +209,203 @@ export const CFG = {
   grain: { intensity: 0.0,   // unifying film-grain strength 0..1 (opts.grain overrides) — disabled
            mul: 0.12 },      // shader multiplier — controls how visible the noise is
 
-  glamour: true,             // luxury beauty grade on/off — glow, split toning, S-curve, sat boost
+  glamour: false,             // luxury beauty grade on/off — glow, split toning, S-curve, sat boost
 };
+
+// ── Cross-browser alpha-channel blur (Safari lacks ctx.filter) ────────────
+// 3-pass box blur on the alpha channel ≈ gaussian. Operates in-place.
+// `radius` is in pixels on the canvas being blurred.
+function blurAlpha(canvas, radius) {
+  const r = Math.round(radius);
+  if (r < 1) return;
+  const w = canvas.width, h = canvas.height;
+  if (w < 2 || h < 2) return;
+  const ctx = canvas.getContext('2d');
+  const img = ctx.getImageData(0, 0, w, h);
+  const d = img.data;
+  // Extract alpha into flat array
+  const n = w * h;
+  const src = new Float32Array(n);
+  const dst = new Float32Array(n);
+  for (let i = 0; i < n; i++) src[i] = d[i * 4 + 3];
+  // Horizontal box blur pass
+  function blurH(inp, out, rad) {
+    const iarr = 1 / (rad + rad + 1);
+    for (let y = 0; y < h; y++) {
+      const yo = y * w;
+      let ti = yo, li = yo, ri = yo + rad;
+      const fv = inp[yo], lv = inp[yo + w - 1];
+      let val = (rad + 1) * fv;
+      for (let j = 0; j < rad; j++) val += inp[yo + Math.min(j, w - 1)];
+      for (let j = 0; j <= rad; j++) {
+        val += (ri < yo + w ? inp[ri] : lv) - fv;
+        out[ti++] = val * iarr; ri++;
+      }
+      for (let j = rad + 1; j < w - rad; j++) {
+        val += inp[ri] - inp[li];
+        out[ti++] = val * iarr; ri++; li++;
+      }
+      for (let j = w - rad; j < w; j++) {
+        val += lv - inp[li];
+        out[ti++] = val * iarr; li++;
+      }
+    }
+  }
+  // Vertical box blur pass
+  function blurV(inp, out, rad) {
+    const iarr = 1 / (rad + rad + 1);
+    for (let x = 0; x < w; x++) {
+      let ti = x, li = x, ri = x + rad * w;
+      const fv = inp[x], lv = inp[x + w * (h - 1)];
+      let val = (rad + 1) * fv;
+      for (let j = 0; j < rad; j++) val += inp[x + Math.min(j, h - 1) * w];
+      for (let j = 0; j <= rad; j++) {
+        val += (ri < x + h * w ? inp[ri] : lv) - fv;
+        out[ti] = val * iarr; ti += w; ri += w;
+      }
+      for (let j = rad + 1; j < h - rad; j++) {
+        val += inp[ri] - inp[li];
+        out[ti] = val * iarr; ti += w; ri += w; li += w;
+      }
+      for (let j = h - rad; j < h; j++) {
+        val += lv - inp[li];
+        out[ti] = val * iarr; li += w; ti += w;
+      }
+    }
+  }
+  // 3 passes of box blur ≈ gaussian
+  blurH(src, dst, r); blurV(dst, src, r);
+  blurH(src, dst, r); blurV(dst, src, r);
+  blurH(src, dst, r); blurV(dst, src, r);
+  // Write back alpha
+  for (let i = 0; i < n; i++) d[i * 4 + 3] = Math.min(255, Math.max(0, Math.round(src[i])));
+  ctx.putImageData(img, 0, 0);
+}
+
+// Full RGBA box blur for frequency-separation (foundation). Same 3-pass technique
+// as blurAlpha but operates on all 4 channels independently.
+function blurRGBA(canvas, radius) {
+  const r = Math.round(radius);
+  if (r < 1) return;
+  const w = canvas.width, h = canvas.height;
+  if (w < 2 || h < 2) return;
+  const ctx = canvas.getContext('2d');
+  const img = ctx.getImageData(0, 0, w, h);
+  const d = img.data;
+  const n = w * h;
+  const src = new Float32Array(n);
+  const dst = new Float32Array(n);
+  function blurH(inp, out, rad) {
+    const iarr = 1 / (rad + rad + 1);
+    for (let y = 0; y < h; y++) {
+      let ti = y * w, li = ti, ri = ti + rad;
+      const yo = y * w;
+      const fv = inp[yo], lv = inp[yo + w - 1];
+      let val = (rad + 1) * fv;
+      for (let j = 0; j < rad; j++) val += inp[yo + Math.min(j, w - 1)];
+      for (let j = 0; j <= rad; j++) {
+        val += (ri < yo + w ? inp[ri] : lv) - fv;
+        out[ti++] = val * iarr; ri++;
+      }
+      for (let j = rad + 1; j < w - rad; j++) {
+        val += inp[ri] - inp[li];
+        out[ti++] = val * iarr; ri++; li++;
+      }
+      for (let j = w - rad; j < w; j++) {
+        val += lv - inp[li];
+        out[ti++] = val * iarr; li++;
+      }
+    }
+  }
+  function blurV(inp, out, rad) {
+    const iarr = 1 / (rad + rad + 1);
+    for (let x = 0; x < w; x++) {
+      let ti = x, li = x, ri = x + rad * w;
+      const fv = inp[x], lv = inp[x + w * (h - 1)];
+      let val = (rad + 1) * fv;
+      for (let j = 0; j < rad; j++) val += inp[x + Math.min(j, h - 1) * w];
+      for (let j = 0; j <= rad; j++) {
+        val += (ri < x + h * w ? inp[ri] : lv) - fv;
+        out[ti] = val * iarr; ti += w; ri += w;
+      }
+      for (let j = rad + 1; j < h - rad; j++) {
+        val += inp[ri] - inp[li];
+        out[ti] = val * iarr; ti += w; ri += w; li += w;
+      }
+      for (let j = h - rad; j < h; j++) {
+        val += lv - inp[li];
+        out[ti] = val * iarr; li += w; ti += w;
+      }
+    }
+  }
+  // Process each channel (R, G, B, A) separately
+  for (let ch = 0; ch < 4; ch++) {
+    for (let i = 0; i < n; i++) src[i] = d[i * 4 + ch];
+    blurH(src, dst, r); blurV(dst, src, r);
+    blurH(src, dst, r); blurV(dst, src, r);
+    blurH(src, dst, r); blurV(dst, src, r);
+    for (let i = 0; i < n; i++) d[i * 4 + ch] = Math.min(255, Math.max(0, Math.round(src[i])));
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+// Like applyBlur but blurs all RGBA channels (for frequency-separation, not masks).
+function applyBlurRGBA(canvas, radiusPx) {
+  if (radiusPx < 0.5) return;
+  if (canvasFilterSupported()) {
+    // Native: draw into refineCv through filter, copy back
+    const w = canvas.width, h = canvas.height;
+    const r = refineCv.getContext('2d');
+    r.setTransform(1, 0, 0, 1, 0, 0);
+    if (refineCv.width < w || refineCv.height < h) { refineCv.width = w; refineCv.height = h; }
+    r.clearRect(0, 0, w, h);
+    r.filter = `blur(${radiusPx}px)`;
+    r.drawImage(canvas, 0, 0, w, h);
+    r.filter = 'none';
+    const m = canvas.getContext('2d');
+    m.setTransform(1, 0, 0, 1, 0, 0);
+    m.clearRect(0, 0, w, h);
+    m.drawImage(refineCv, 0, 0, w, h);
+  } else {
+    blurRGBA(canvas, radiusPx);
+  }
+}
+
+// Test once whether ctx.filter = 'blur(...)' actually works (Safari: no).
+let _filterWorks = null;
+function canvasFilterSupported() {
+  if (_filterWorks !== null) return _filterWorks;
+  try {
+    const tc = document.createElement('canvas');
+    tc.width = 4; tc.height = 4;
+    const c = tc.getContext('2d');
+    c.filter = 'blur(1px)';
+    _filterWorks = c.filter === 'blur(1px)';
+  } catch (_) { _filterWorks = false; }
+  return _filterWorks;
+}
+
+// Apply blur to a canvas — uses native filter where supported, fallback otherwise.
+function applyBlur(canvas, radiusPx) {
+  if (radiusPx < 0.5) return;
+  if (canvasFilterSupported()) {
+    // Native: redraw onto refineCv through filter, copy back
+    const w = canvas.width, h = canvas.height;
+    const r = refineCv.getContext('2d');
+    r.setTransform(1, 0, 0, 1, 0, 0);
+    if (refineCv.width < w || refineCv.height < h) { refineCv.width = w; refineCv.height = h; }
+    r.clearRect(0, 0, w, h);
+    r.filter = `blur(${radiusPx}px)`;
+    r.drawImage(canvas, 0, 0, w, h);
+    r.filter = 'none';
+    const m = canvas.getContext('2d');
+    m.setTransform(1, 0, 0, 1, 0, 0);
+    m.clearRect(0, 0, w, h);
+    m.drawImage(refineCv, 0, 0, w, h);
+  } else {
+    blurAlpha(canvas, radiusPx);
+  }
+}
 
 // Masks are built at reduced resolution (cheap blur/fill) and scaled up when drawn.
 const MASK_SCALE = CFG.maskScale;
@@ -419,7 +614,8 @@ export function buildEyeMask(w, h, landmarks) {
   const m = eyeMaskCv.getContext('2d');
   m.setTransform(1, 0, 0, 1, 0, 0);
   m.clearRect(0, 0, MW, MH);
-  m.filter = `blur(${Math.max(2, MW * CFG.eyes.blur)}px)`;
+  m.filter = 'none';
+  const eyeBlurPx = Math.max(2, MW * CFG.eyes.blur);
   const [perspR, perspL] = eyePerspective(landmarks);
   for (const [lash, vref, persp] of [[EYE_R_LASH, EYE_R_V, perspR], [EYE_L_LASH, EYE_L_V, perspL]]) {
     const eyeH = Math.abs(landmarks[vref[0]].y - landmarks[vref[1]].y) * MH;
@@ -528,7 +724,7 @@ export function buildEyeMask(w, h, landmarks) {
   // let it climb and subtract the brows — the shadow reaches the brow BONE and
   // stops at the hair. Cut with the same blur so the boundary stays soft.
   m.save();
-  m.filter = `blur(${Math.max(2, MW * CFG.eyes.blur)}px)`;
+  m.filter = 'none';
   m.globalCompositeOperation = 'destination-out';
   // Fill the brow, then stroke the same path to dilate the cut past the hair —
   // the landmark polygon traces the brow tightly, and a bare fill leaves a rim
@@ -543,6 +739,7 @@ export function buildEyeMask(w, h, landmarks) {
   m.restore();
 
   m.filter = 'none';
+  applyBlur(eyeMaskCv, eyeBlurPx);
   return eyeMaskCv;
 }
 
@@ -554,14 +751,14 @@ export function buildFaceMask(w, h, landmarks) {
   m.clearRect(0, 0, MW, MH);
   m.globalCompositeOperation = 'source-over';
   m.fillStyle = '#fff';
-  m.filter = `blur(${Math.max(2, MW * CFG.face.blur)}px)`;
-  fillPoly(m, landmarks, FACE_OVAL, MW, MH);
   m.filter = 'none';
+  fillPoly(m, landmarks, FACE_OVAL, MW, MH);
   m.globalCompositeOperation = 'destination-out';
   fillPoly(m, landmarks, EYE_R_FULL, MW, MH);
   fillPoly(m, landmarks, EYE_L_FULL, MW, MH);
   fillPoly(m, landmarks, LIPS_OUTER, MW, MH);
   m.globalCompositeOperation = 'source-over';
+  applyBlur(faceMaskCv, Math.max(2, MW * CFG.face.blur));
   // Foundation is a base layer — it should cover the whole face (incl. nose &
   // brows), so it is intentionally NOT subject to feature protection.
   return faceMaskCv;
@@ -856,7 +1053,9 @@ export function buildLashMask(w, h, landmarks) {
     // blur merges into the stroke and the 2× draw cost isn't worth it.
     const do3dHere = do3d && !isSmall;
     if (do3dHere) {
-      m.filter = `blur(${Math.max(0.8, LW * 0.002)}px)`;
+      // Shadow pass: slight blur gives depth. Safari lacks ctx.filter —
+      // skip the blur there (sub-pixel on thin strokes, barely visible).
+      if (canvasFilterSupported()) m.filter = `blur(${Math.max(0.8, LW * 0.002)}px)`;
       drawLashPass('shadow');
       m.filter = 'none';
     }
@@ -882,7 +1081,7 @@ export function buildBlushMask(w, h, landmarks) {
   m.setTransform(1, 0, 0, 1, 0, 0);
   m.clearRect(0, 0, MW, MH);
   const blushBlur = Math.max(2, MW * CFG.blush.blur);
-  m.filter = `blur(${blushBlur}px)`; // diffuse edges
+  m.filter = 'none';
   const faceW = Math.abs(landmarks[FACE_SIDE_R].x - landmarks[FACE_SIDE_L].x) * MW;
   const half = Math.max(1, faceW * CFG.blush.half);   // sweep length (semi-major)
   const width = Math.max(1, faceW * CFG.blush.width); // sweep width  (semi-minor)
@@ -932,16 +1131,8 @@ export function buildBlushMask(w, h, landmarks) {
   }
   m.filter = 'none';
 
-  // Second softer blur pass — eliminates any banding from the gradient stops.
-  // Copy → clear → re-draw blurred. This costs ~0.3ms but dissolves edges.
-  const r = refineCv.getContext('2d');
-  r.setTransform(1, 0, 0, 1, 0, 0);
-  r.clearRect(0, 0, MW, MH);
-  r.filter = `blur(${Math.max(1, blushBlur * 0.6)}px)`;
-  r.drawImage(blushMaskCv, 0, 0, MW, MH);
-  r.filter = 'none';
-  m.clearRect(0, 0, MW, MH);
-  m.drawImage(refineCv, 0, 0, MW, MH);
+  // Cross-browser blur — diffuse edges + dissolve gradient banding
+  applyBlur(blushMaskCv, blushBlur);
   cutFeatures(m, landmarks);
   return blushMaskCv;
 }
@@ -957,7 +1148,7 @@ export function buildContourMask(w, h, landmarks) {
   m.lineCap = 'round';
   m.lineJoin = 'round';
   const contourBlur = Math.max(3, MW * CFG.contour.blur);
-  m.filter = `blur(${contourBlur}px)`;
+  m.filter = 'none';
   const faceW = Math.abs(landmarks[FACE_SIDE_R].x - landmarks[FACE_SIDE_L].x) * MW;
   const drop = faceW * CFG.contour.drop;
   const base = faceW * CFG.contour.width;
@@ -981,17 +1172,8 @@ export function buildContourMask(w, h, landmarks) {
     m.strokeStyle = `rgba(255,255,255,${CFG.contour.core})`;
     m.stroke();
   }
-  m.filter = 'none';
-
-  // Second blur pass — smooth any stroke aliasing for seamless skin blend
-  const rc = refineCv.getContext('2d');
-  rc.setTransform(1, 0, 0, 1, 0, 0);
-  rc.clearRect(0, 0, MW, MH);
-  rc.filter = `blur(${Math.max(1, contourBlur * 0.5)}px)`;
-  rc.drawImage(contourMaskCv, 0, 0, MW, MH);
-  rc.filter = 'none';
-  m.clearRect(0, 0, MW, MH);
-  m.drawImage(refineCv, 0, 0, MW, MH);
+  // Cross-browser blur — softens strokes for seamless skin blend
+  applyBlur(contourMaskCv, contourBlur);
 
   cutFeatures(m, landmarks);
   return contourMaskCv;
@@ -1024,13 +1206,9 @@ export function buildHighlightMask(w, h, landmarks) {
   m.ellipse(cx, cy * (faceW / faceH), faceW * 0.62, faceW * 0.62, 0, 0, Math.PI * 2);
   m.fill();
   m.restore();
-  m.filter = `blur(${Math.max(3, MW * CFG.highlight.blur)}px)`;
-  // re-apply blur by drawing to itself (filter on the context above already applied to fill)
-  // Actually set filter before drawing:
-  m.filter = 'none';
-  // Redo with blur upfront
+  // Redo draw at correct aspect ratio
   m.clearRect(0, 0, MW, MH);
-  m.filter = `blur(${Math.max(3, MW * CFG.highlight.blur)}px)`;
+  m.filter = 'none';
   m.save();
   m.scale(1, faceH / faceW);
   m.fillStyle = g;
@@ -1039,6 +1217,7 @@ export function buildHighlightMask(w, h, landmarks) {
   m.fill();
   m.restore();
   m.filter = 'none';
+  applyBlur(highlightMaskCv, Math.max(3, MW * CFG.highlight.blur));
   // Highlight covers the nose — it's a face-wide glow, nose bridge catches light too.
   // Only cut eyes/lips/brows (not NOSE) so the bridge still glows naturally.
   if (PROTECT) {
@@ -1065,7 +1244,7 @@ export function buildBronzerMask(w, h, landmarks) {
 
   const cfg = CFG.bronzer;
   const bronzerBlur = Math.max(3, MW * cfg.blur);
-  m.filter = `blur(${bronzerBlur}px)`;
+  m.filter = 'none';
 
   const faceW = Math.abs(landmarks[FACE_SIDE_R].x - landmarks[FACE_SIDE_L].x) * MW;
   const a0 = cfg.alpha;
@@ -1130,15 +1309,8 @@ export function buildBronzerMask(w, h, landmarks) {
 
   m.filter = 'none';
 
-  // Second blur pass for seamless skin blend
-  const rc = refineCv.getContext('2d');
-  rc.setTransform(1, 0, 0, 1, 0, 0);
-  rc.clearRect(0, 0, MW, MH);
-  rc.filter = `blur(${Math.max(2, bronzerBlur * 0.6)}px)`;
-  rc.drawImage(bronzerMaskCv, 0, 0, MW, MH);
-  rc.filter = 'none';
-  m.clearRect(0, 0, MW, MH);
-  m.drawImage(refineCv, 0, 0, MW, MH);
+  // Cross-browser blur (replaces two-pass ctx.filter which fails in Safari)
+  applyBlur(bronzerMaskCv, bronzerBlur);
 
   // Cut features — keep bronzer off eyes, lips, brows, but NOT nose (nose bridge gets warmth)
   if (PROTECT) {
@@ -1165,7 +1337,7 @@ export function buildNoseContourMask(w, h, landmarks) {
 
   const cfg = CFG.noseContour;
   const noseBlur = Math.max(2, MW * cfg.blur);
-  m.filter = `blur(${noseBlur}px)`;
+  m.filter = 'none';
 
   const faceW = Math.abs(landmarks[FACE_SIDE_R].x - landmarks[FACE_SIDE_L].x) * MW;
   const offset = faceW * cfg.offset;
@@ -1227,15 +1399,8 @@ export function buildNoseContourMask(w, h, landmarks) {
 
   m.filter = 'none';
 
-  // Second blur pass for skin-like softness
-  const rc = refineCv.getContext('2d');
-  rc.setTransform(1, 0, 0, 1, 0, 0);
-  rc.clearRect(0, 0, MW, MH);
-  rc.filter = `blur(${Math.max(1, noseBlur * 0.5)}px)`;
-  rc.drawImage(noseContourMaskCv, 0, 0, MW, MH);
-  rc.filter = 'none';
-  m.clearRect(0, 0, MW, MH);
-  m.drawImage(refineCv, 0, 0, MW, MH);
+  // Cross-browser blur (replaces two-pass ctx.filter which fails in Safari)
+  applyBlur(noseContourMaskCv, noseBlur);
 
   // Cut eyes and brows only (nose contour IS on the nose, lips are far enough)
   if (PROTECT) {
@@ -1286,7 +1451,8 @@ export function buildUnderEyeMask(w, h, landmarks) {
   m.setTransform(1, 0, 0, 1, 0, 0);
   m.clearRect(0, 0, MW, MH);
   m.lineJoin = 'round';
-  m.filter = `blur(${Math.max(3, MW * CFG.underEye.blur)}px)`;
+  m.filter = 'none';
+  const underEyeBlurPx = Math.max(3, MW * CFG.underEye.blur);
   const faceW = Math.abs(landmarks[FACE_SIDE_R].x - landmarks[FACE_SIDE_L].x) * MW;
   const cfg = CFG.underEye;
 
@@ -1337,6 +1503,7 @@ export function buildUnderEyeMask(w, h, landmarks) {
     m.fill();
   }
   m.filter = 'none';
+  applyBlur(underEyeMaskCv, underEyeBlurPx);
   cutFeatures(m, landmarks);
   return underEyeMaskCv;
 }
@@ -1430,7 +1597,8 @@ export function buildEyelinerMask(w, h, landmarks) {
   m.lineCap = 'round';
   m.lineJoin = 'round';
   m.lineWidth = Math.max(1, MH * CFG.eyeliner.width);
-  m.filter = `blur(${Math.max(0.5, MW * CFG.eyeliner.blur)}px)`;
+  m.filter = 'none';
+  const eyelinerBlurPx = Math.max(0.5, MW * CFG.eyeliner.blur);
   const [perspR, perspL] = eyePerspective(landmarks);
   for (const [lash, vref, persp] of [[EYE_R_LASH, EYE_R_V, perspR], [EYE_L_LASH, EYE_L_V, perspL]]) {
     m.strokeStyle = '#fff';
@@ -1558,6 +1726,7 @@ export function buildEyelinerMask(w, h, landmarks) {
     }
   }
   m.filter = 'none';
+  applyBlur(eyelinerMaskCv, eyelinerBlurPx);
   return eyelinerMaskCv;
 }
 
@@ -1568,10 +1737,11 @@ export function buildBrowMask(w, h, landmarks) {
   m.setTransform(1, 0, 0, 1, 0, 0);
   m.clearRect(0, 0, MW, MH);
   m.fillStyle = '#fff';
-  m.filter = `blur(${Math.max(1, MW * CFG.brows.blur)}px)`;
+  m.filter = 'none';
   fillPoly(m, landmarks, BROW_R, MW, MH);
   fillPoly(m, landmarks, BROW_L, MW, MH);
   m.filter = 'none';
+  applyBlur(browMaskCv, Math.max(1, MW * CFG.brows.blur));
   return browMaskCv;
 }
 
@@ -1732,9 +1902,9 @@ function compositeFoundation(ctx, w, h, maskSrc, opts) {
 
   // Step 1: blurred version of the face → low frequency
   lo.setTransform(1, 0, 0, 1, 0, 0);
-  lo.filter = `blur(${blurPx}px)`;
-  lo.drawImage(ctx.canvas, 0, 0, w, h);
   lo.filter = 'none';
+  lo.drawImage(ctx.canvas, 0, 0, w, h);
+  applyBlurRGBA(freqLoCv, blurPx);
 
   // Step 2: high-freq = original − low.  Canvas can't subtract directly, but
   // we can approximate with two complementary soft-light passes. The approach:

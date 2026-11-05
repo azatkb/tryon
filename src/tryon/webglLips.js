@@ -216,7 +216,7 @@ void main(){
   // Intensity drives coverage:  low (0.1-0.2) = sheer tint — lets almost all
   // skin through; mid (0.25-0.4) = medium — evens tone, pores still visible;
   // high (0.5+) = full — covers blemishes, only the deepest texture survives.
-  float mf = feather(softA(uFnd, vUv, 3.0)) * uFndInt * skinGate * expI;
+  float mf = feather(texture2D(uFnd, vUv).a) * uFndInt * skinGate * expI;
   if (mf > 0.001) {
     vec3 tinted = blendColor(outc, uFndShade);
     vec3 texd   = softLight(outc, uFndShade * 0.5 + 0.25);
@@ -290,7 +290,7 @@ void main(){
   }
 
   // ── BLUSH: SSS warm flush, powder vs cream, reduces where skin is red ───────
-  float mb = feather(softA(uBlush, vUv, 3.0)) * uBlushInt * skinGate;
+  float mb = texture2D(uBlush, vUv).a * uBlushInt * skinGate;
   mb *= 1.0 - contourD * 0.5;
   if (mb > 0.001) {
     float redness = smoothstep(0.02, 0.30, outc.r - (outc.g + outc.b) * 0.5);
@@ -374,7 +374,7 @@ void main(){
   }
 
   // ── EYESHADOW: colour blend + finish-aware surface (matte/satin/shimmer) ────
-  float me = feather(softA(uEye, vUv, 3.0)) * uEyeInt * expI;
+  float me = feather(softA(uEye, vUv, 2.0)) * uEyeInt * expI;
   if (me > 0.001) {
     float shadeL = percL(uEyeShade);
     vec3 col  = blendColor(outc, uEyeShade);
@@ -507,8 +507,8 @@ void main(){
   vec3 origLow = clamp(softRGB(uFrame, vUv, 3.0) * uWB, 0.0, 1.0);
   vec3 detail  = orig - origLow;
   float delta  = clamp(length(outc - orig) * 5.0, 0.0, 1.0);
-  float lipZone = feather(softA(uLip, vUv, 3.0)) * uLipInt;
-  float eyeZone = feather(softA(uEye, vUv, 3.0)) * uEyeInt;
+  float lipZone = feather(texture2D(uLip, vUv).a) * uLipInt;
+  float eyeZone = feather(texture2D(uEye, vUv).a) * uEyeInt;
   // Lips get 1.1× texture, eyes get 1.2× (eyelid creases/pores under shadow),
   // everything else gets 0.7×.
   float texStr  = mix(0.7, 1.1, lipZone);

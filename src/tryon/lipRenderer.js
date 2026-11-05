@@ -209,7 +209,7 @@ export const CFG = {
   grain: { intensity: 0.0,   // unifying film-grain strength 0..1 (opts.grain overrides) — disabled
            mul: 0.12 },      // shader multiplier — controls how visible the noise is
 
-  glamour: false,             // luxury beauty grade on/off — glow, split toning, S-curve, sat boost
+  glamour: true,             // luxury beauty grade on/off — glow, split toning, S-curve, sat boost
 };
 
 // Masks are built at reduced resolution (cheap blur/fill) and scaled up when drawn.

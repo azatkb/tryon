@@ -6,6 +6,7 @@ import {
   buildContourMask, buildHighlightMask, buildUnderEyeMask, buildLipMask,
   buildLipLinerMask, buildEyelinerMask, buildBrowMask,
 } from './tryon/index.js';
+import { refineLipContour, drawRefinedContour } from './tryon/lipContourRefine.js';
 import { ENTITIES, AREAS, entitiesByArea } from './entities.js';
 import { CATALOG } from './catalog.js';
 import { LESSON, LESSONS, lessonLayers, resolveStep } from './tutorials.js';
@@ -99,6 +100,7 @@ export default function DebugApp() {
   const [lessonIdx, setLessonIdx] = useState(0);
   const [showFamilies, setShowFamilies] = useState(false);
   const [photoMode, setPhotoMode] = useState(false);
+  const [lipContour, setLipContour] = useState(false);
   const [photoUrl, setPhotoUrl] = useState(null);
   const activeLesson = LESSONS[lessonIdx] || LESSON;
   const allFamilies = useMemo(collectFamilies, []);
@@ -111,7 +113,7 @@ export default function DebugApp() {
     return s;
   });
   const stateRef = useRef({});
-  stateRef.current = { enabled, useGL, borders, showPoints, tune };
+  stateRef.current = { enabled, useGL, borders, showPoints, tune, lipContour };
 
   // feature protection is a module-level flag in the renderer
   useEffect(() => { setFeatureProtect(protect); }, [protect]);
@@ -201,6 +203,8 @@ export default function DebugApp() {
 
   // The engine owns camera, detection, smoothing, exposure and the makeup pass.
   // All this workbench does is blit the processed frame and draw its overlays.
+  const scratchRef = useRef(null);
+  const debugContourBufRef = useRef([]);
   const onFrame = useCallback(({ processed, source, landmarks, w, h }) => {
     const cv = canvasRef.current;
     if (!cv) return;
@@ -210,6 +214,23 @@ export default function DebugApp() {
     if (!landmarks) return;
     if (stateRef.current.borders) drawBorders(ctx, w, h, landmarks);
     if (stateRef.current.showPoints) drawLandmarks(ctx, w, h, landmarks);
+
+    // Lip contour refinement — sample brightness from the SOURCE frame
+    if (stateRef.current.lipContour && source) {
+      if (!scratchRef.current) scratchRef.current = document.createElement('canvas');
+      const sc = scratchRef.current;
+      if (sc.width !== w || sc.height !== h) { sc.width = w; sc.height = h; }
+      const sctx = sc.getContext('2d', { willReadFrequently: true });
+      sctx.drawImage(source, 0, 0, w, h);
+      const imageData = sctx.getImageData(0, 0, w, h);
+
+      const refined = refineLipContour(imageData, landmarks, w, h, {
+        frameBuffer: debugContourBufRef.current,
+        bufferSize: 3,
+        spatialStr: 0.4,
+      });
+      drawRefinedContour(ctx, refined, { color: '#0f0', lineWidth: 1.5 });
+    }
   }, [drawBorders]);
 
   const { ready, error, camError, detectStill, redrawStill } = useTryOn({
@@ -454,6 +475,7 @@ export default function DebugApp() {
           </div>
           <label className="dbg-row"><input type="checkbox" checked={borders} onChange={(e) => setBorders(e.target.checked)} /> Show mask borders</label>
           <label className="dbg-row"><input type="checkbox" checked={showPoints} onChange={(e) => setShowPoints(e.target.checked)} /> Mesh points</label>
+          <label className="dbg-row"><input type="checkbox" checked={lipContour} onChange={(e) => setLipContour(e.target.checked)} /> Lip contour refine</label>
           <label className="dbg-row"><input type="checkbox" checked={protect} onChange={(e) => setProtect(e.target.checked)} /> Protect features (nose/eyes/lips/brows)</label>
           <label className="dbg-row"><input type="checkbox" checked={useGL} disabled={!glAvailable()} onChange={(e) => setUseGL(e.target.checked)} /> WebGL render</label>
           <label className="dbg-row" style={{marginTop:6}}>

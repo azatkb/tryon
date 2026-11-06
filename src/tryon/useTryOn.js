@@ -23,6 +23,7 @@ import {
   smoothLandmarks, predictLandmarks, estimateFaceLum, estimateLightBalance, estimateFaceYaw, faceMotion,
   detectBlink,
 } from './faceMetrics.js';
+import { refineLipContour } from './lipContourRefine.js';
 
 export const DEFAULT_RESOLUTION = { width: 1920, height: 1080 };
 
@@ -30,7 +31,7 @@ export const DEFAULT_RESOLUTION = { width: 1920, height: 1080 };
 export const MOVE_THRESH = 0.0015;
 
 /** @deprecated — kept for API compat; queue-based pipeline detects every frame. */
-export let DETECT_EVERY = 2;
+export let DETECT_EVERY = 1;
 
 export function useTryOn(options = {}) {
   const {
@@ -66,6 +67,8 @@ export function useTryOn(options = {}) {
   const procRef = useRef(null);       // offscreen full-frame processed canvas
   const snapRef = useRef(null);       // frozen camera frame, shared by detect + display
   const lastResRef = useRef(null);
+  const contourScratchRef = useRef(null); // scratch canvas for lip contour refinement
+  const contourBufRef = useRef([]);       // ring buffer of last N frames for median filter
   const smoothedRef = useRef(null);
   const prevFullRef = useRef(null);
   const prevMotionRef = useRef(null);
@@ -105,6 +108,25 @@ export function useTryOn(options = {}) {
       // `layers` object can only update when React re-renders.
       const live = cfg.getLayers ? cfg.getLayers(metricsRef.current) : cfg.layers;
       const withLum = { ...live, faceLum: metricsRef.current.faceLum, lightBal: metricsRef.current.lightBal, faceYaw: metricsRef.current.faceYaw, motion: metricsRef.current.motion, blinkL: metricsRef.current.blinkL, blinkR: metricsRef.current.blinkR };
+
+      // Lip contour refinement — run when lips or lipLiner are active
+      if (live.lips || live.lipLiner) {
+        try {
+          if (!contourScratchRef.current) contourScratchRef.current = document.createElement('canvas');
+          const sc = contourScratchRef.current;
+          if (sc.width !== w || sc.height !== h) { sc.width = w; sc.height = h; }
+          const sctx = sc.getContext('2d', { willReadFrequently: true });
+          sctx.drawImage(src, 0, 0, w, h);
+          const imgData = sctx.getImageData(0, 0, w, h);
+          const refined = refineLipContour(imgData, lms, w, h, {
+            frameBuffer: contourBufRef.current,
+            bufferSize: 3,
+            spatialStr: 0.4,
+          });
+          withLum.refinedOuter = refined;
+        } catch (_) { /* contour refinement is best-effort */ }
+      }
+
       const useGL = cfg.renderer === 'gl' || (cfg.renderer === 'auto' && glAvailable());
       let done = false;
       if (useGL) {

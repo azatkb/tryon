@@ -41,5 +41,8 @@ export {
   buildLipLinerMask, buildEyelinerMask, buildBrowMask, buildSculptPack,
 } from './lipRenderer.js';
 
+// Lip contour refinement (pixel-based brightness edge detection).
+export { refineLipContour, drawRefinedContour } from './lipContourRefine.js';
+
 // The model loader, for hosts that drive detection themselves.
 export { useFaceLandmarker } from './useFaceLandmarker.js';

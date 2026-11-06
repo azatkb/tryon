@@ -704,7 +704,7 @@ function upload(unit, t, src) {
 export function renderMakeupGL(source, w, h, landmarks, opts) {
   if (!glAvailable() || !initGL()) return null;
   if (!landmarks || landmarks.length < 468) return null;
-  const { foundation, underEye, contour, blush, highlight, bronzer, noseContour, hair, eyes, lashes, lips, lipLiner, eyeliner, brows, wb } = opts;
+  const { foundation, underEye, contour, blush, highlight, bronzer, noseContour, hair, eyes, lashes, lips, lipLiner, eyeliner, brows, wb, refinedOuter } = opts;
 
   if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
   gl.viewport(0, 0, w, h);
@@ -757,15 +757,15 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
         gl.activeTexture(gl.TEXTURE0 + 6);
         gl.bindTexture(gl.TEXTURE_2D, lipTex);
       } else {
-        upload(6, tex.lip, buildLipMask(w, h, landmarks, lips));
+        upload(6, tex.lip, buildLipMask(w, h, landmarks, { ...lips, refinedOuter }));
       }
     } else {
-      upload(6, tex.lip, lips ? buildLipMask(w, h, landmarks, lips) : blank());
+      upload(6, tex.lip, lips ? buildLipMask(w, h, landmarks, { ...lips, refinedOuter }) : blank());
     }
     upload(7, tex.sculpt, sculptOn
       ? buildSculptPack(w, h, landmarks, { contour: !!contour, highlight: !!highlight, underEye: !!underEye })
       : blank());
-    upload(8, tex.lipLiner, lipLiner ? buildLipLinerMask(w, h, landmarks) : blank());
+    upload(8, tex.lipLiner, lipLiner ? buildLipLinerMask(w, h, landmarks, { refinedOuter }) : blank());
     upload(9, tex.eyeliner, eyeliner ? buildEyelinerMask(w, h, landmarks) : blank());
     upload(10, tex.brows, brows ? buildBrowMask(w, h, landmarks) : blank());
     const extraOn = !!(bronzer || noseContour);

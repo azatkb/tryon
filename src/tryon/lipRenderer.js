@@ -209,7 +209,7 @@ export const CFG = {
   grain: { intensity: 0.0,   // unifying film-grain strength 0..1 (opts.grain overrides) — disabled
            mul: 0.12 },      // shader multiplier — controls how visible the noise is
 
-  glamour: true,             // luxury beauty grade on/off — glow, split toning, S-curve, sat boost
+  glamour: false,             // luxury beauty grade on/off — glow, split toning, S-curve, sat boost
 };
 
 // ── Cross-browser alpha-channel blur (Safari lacks ctx.filter) ────────────
@@ -559,7 +559,19 @@ export function buildLipMask(w, h, landmarks, opts = {}) {
   m.clearRect(0, 0, MW, MH);
   m.fillStyle = '#fff';
   m.filter = 'none';
-  tracePath(m, landmarks, LIPS_OUTER, MW, MH);
+  if (opts.refinedOuter) {
+    // Use pixel-refined contour (scaled from frame coords to mask coords)
+    // Draw with lineTo, NOT spline — spline overshoots between points and
+    // pushes the mask outside the detected edge.
+    const sx = MW / w, sy = MH / h;
+    const scaled = opts.refinedOuter.map(p => [p.x * sx, p.y * sy]);
+    m.beginPath();
+    m.moveTo(scaled[0][0], scaled[0][1]);
+    for (let i = 1; i < scaled.length; i++) m.lineTo(scaled[i][0], scaled[i][1]);
+    m.closePath();
+  } else {
+    tracePath(m, landmarks, LIPS_OUTER, MW, MH);
+  }
   m.fill();
   const gap = Math.abs(landmarks[14].y - landmarks[13].y);
   const lipW = Math.abs(landmarks[291].x - landmarks[61].x);
@@ -585,8 +597,10 @@ export function buildLipMask(w, h, landmarks, opts = {}) {
     tracePath(tc, landmarks, LIPS_INNER, MW, MH);
     tc.fill();
 
-    // Step 2: intersect with shrunk LIPS_OUTER — guarantees minimum lip thickness
-    const outerPts = LIPS_OUTER.map((i) => [landmarks[i].x * MW, landmarks[i].y * MH]);
+    // Step 2: intersect with shrunk outer — guarantees minimum lip thickness
+    const outerPts = opts.refinedOuter
+      ? opts.refinedOuter.map(p => [p.x * (MW / w), p.y * (MH / h)])
+      : LIPS_OUTER.map((i) => [landmarks[i].x * MW, landmarks[i].y * MH]);
     let ocx = 0, ocy = 0;
     for (const [x, y] of outerPts) { ocx += x; ocy += y; }
     ocx /= outerPts.length; ocy /= outerPts.length;
@@ -1525,18 +1539,23 @@ export function buildUnderEyeMask(w, h, landmarks) {
 // Lip liner: a ring strictly INSIDE the lip contour — crisp outer edge (no blur),
 // very slight inner softness. Achieved by stroking at 2× width then clipping to
 // the lip fill, so the outer half of the stroke is cut away → inner ring only.
-export function buildLipLinerMask(w, h, landmarks) {
+export function buildLipLinerMask(w, h, landmarks, opts = {}) {
   ensure(w, h);
   const m = lipLinerMaskCv.getContext('2d');
   m.setTransform(1, 0, 0, 1, 0, 0);
   m.clearRect(0, 0, MW, MH);
   m.filter = 'none'; // crisp outer edge — no blur
 
+  // Helper: get outer lip points in mask coords (from refined or landmarks)
+  const outerMask = opts.refinedOuter
+    ? opts.refinedOuter.map(p => [p.x * (MW / w), p.y * (MH / h)])
+    : LIPS_OUTER.map((i) => [landmarks[i].x * MW, landmarks[i].y * MH]);
+
   // Clip to a slightly inset lip shape — the Catmull-Rom spline on the inset
   // stroke path can overshoot at mouth corners; a 1-2px safety margin on the
   // clip ensures nothing pokes out past the actual lip contour.
   m.save();
-  const clipPts = LIPS_OUTER.map((i) => [landmarks[i].x * MW, landmarks[i].y * MH]);
+  const clipPts = outerMask;
   let clipCx = 0, clipCy = 0;
   for (const [x, y] of clipPts) { clipCx += x; clipCy += y; }
   clipCx /= clipPts.length; clipCy /= clipPts.length;
@@ -1545,7 +1564,15 @@ export function buildLipLinerMask(w, h, landmarks) {
     x + (clipCx - x) * clipShrink,
     y + (clipCy - y) * clipShrink,
   ]);
-  traceSmooth(m, clipInset);
+  if (opts.refinedOuter) {
+    // Straight lines — refined points are already smooth, spline overshoots
+    m.beginPath();
+    m.moveTo(clipInset[0][0], clipInset[0][1]);
+    for (let i = 1; i < clipInset.length; i++) m.lineTo(clipInset[i][0], clipInset[i][1]);
+    m.closePath();
+  } else {
+    traceSmooth(m, clipInset);
+  }
   m.clip();
 
   const lineW = Math.max(2, MW * CFG.lipLiner.width);
@@ -1558,7 +1585,7 @@ export function buildLipLinerMask(w, h, landmarks) {
   //     the boundary and being half eaten by the clip.
   //  2. The lower-lip run is lifted further, toward the mouth line. Liner on
   //     the bottom lip is drawn inside the natural edge, never along it.
-  const pts = LIPS_OUTER.map((i) => [landmarks[i].x * MW, landmarks[i].y * MH]);
+  const pts = outerMask.map(p => [p[0], p[1]]);
   const n = pts.length;
 
   let cx = 0, cy = 0;
@@ -1623,13 +1650,12 @@ export function buildLipLinerMask(w, h, landmarks) {
     tracePath(tc, landmarks, LIPS_INNER, MW, MH);
     tc.fill();
 
-    // Intersect with shrunk LIPS_OUTER — guarantees minimum lip-liner band
-    const outerPts = LIPS_OUTER.map((i) => [landmarks[i].x * MW, landmarks[i].y * MH]);
+    // Intersect with shrunk outer — guarantees minimum lip-liner band
     let ocx = 0, ocy = 0;
-    for (const [x, y] of outerPts) { ocx += x; ocy += y; }
-    ocx /= outerPts.length; ocy /= outerPts.length;
+    for (const [x, y] of outerMask) { ocx += x; ocy += y; }
+    ocx /= outerMask.length; ocy /= outerMask.length;
     const safeInset = 0.30; // slightly more than lips (0.25) — keep liner ring intact
-    const safePts = outerPts.map(([x, y]) => [
+    const safePts = outerMask.map(([x, y]) => [
       x + (ocx - x) * safeInset,
       y + (ocy - y) * safeInset,
     ]);
@@ -2112,10 +2138,10 @@ export function renderMakeup(ctx, w, h, landmarks, opts) {
   // The lipstick then covers it by its own alpha, so the liner survives mostly
   // at the lip edge (where the colour is thinnest) exactly as it does on a face.
   if (opts.lipLiner) {
-    buildLipLinerMask(w, h, landmarks);
+    buildLipLinerMask(w, h, landmarks, { refinedOuter: opts.refinedOuter });
     compositeRegion(ctx, w, h, lipLinerMaskCv, { ...opts.lipLiner, finish: 'none', pigment: 0.25 });
   }
-  if (opts.lips) renderLips(ctx, w, h, landmarks, opts.lips);
+  if (opts.lips) renderLips(ctx, w, h, landmarks, { ...opts.lips, refinedOuter: opts.refinedOuter });
 }
 
 // ---- Debug overlay: tint the ONNX segmentation mask so you can see what it predicts ----

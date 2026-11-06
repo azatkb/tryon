@@ -32,7 +32,7 @@ export const DEFAULT_RESOLUTION = { width: 1920, height: 1080 };
 export const MOVE_THRESH = 0.0015;
 
 /** @deprecated — kept for API compat; queue-based pipeline detects every frame. */
-export let DETECT_EVERY = 1;
+export let DETECT_EVERY = 3;
 
 export function useTryOn(options = {}) {
   const {

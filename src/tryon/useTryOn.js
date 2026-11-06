@@ -46,6 +46,7 @@ export function useTryOn(options = {}) {
     lumInterval = 20,         // frames between exposure re-measurements
     redrawEveryTick = false,  // true = draw on every rAF even without a new frame
     syncToDetection = true,   // show the frame detection actually ran on (no mask drift)
+    contourRefine = true,     // enable/disable lip contour refinement
     active = true,
     onFrame,
     onError,
@@ -59,7 +60,7 @@ export function useTryOn(options = {}) {
   const cfgRef = useRef({});
   cfgRef.current = {
     layers, getLayers, renderer, smoothing, lumInterval,
-    redrawEveryTick, syncToDetection, onFrame,
+    redrawEveryTick, syncToDetection, contourRefine, onFrame,
   };
 
   const videoRef = useRef(null);
@@ -118,7 +119,7 @@ export function useTryOn(options = {}) {
       // Refine runs every ~4 frames in background. Result blended with MP
       // landmarks via refineBlend (0=MP, 1=refined). Blend ramps down on
       // motion, ramps up when still.
-      if (live.lips || live.lipLiner) {
+      if (cfg.contourRefine && (live.lips || live.lipLiner)) {
         const isMoving = metricsRef.current.moving;
         // Smooth blend ramp: fade out on motion, fade in when still
         const blend = refineBlendRef.current;

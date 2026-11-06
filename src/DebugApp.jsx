@@ -238,6 +238,7 @@ export default function DebugApp() {
     source: photoMode ? 'element' : 'camera',
     sourceEl: imgRef.current,
     renderer: useGL ? 'auto' : 'canvas',
+    contourRefine: false,  // debug contour is drawn in onFrame
     onFrame,
   });
 

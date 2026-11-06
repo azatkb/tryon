@@ -746,7 +746,9 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
     upload(5, tex.lash, (lashes && !use3dLash && lashMot < 0.008) ? buildLashMask(w, h, landmarks) : blank());
     // 3D lip mesh: render directly into a GL texture via FBO — z-depth gives
     // correct foreshortening on head turns.  Falls back to 2D canvas mask.
-    if (lips && lipMesh3DAvailable()) {
+    // When refinedOuter is available, skip 3D mesh — it doesn't support the
+    // refined contour, so the lipstick would ignore edge correction.
+    if (lips && lipMesh3DAvailable() && !refinedOuter) {
       const lipTex = renderLipMesh(gl, w, h, landmarks, lips);
       if (lipTex) {
         // renderLipMesh wrote into its own FBO texture — bind it to unit 6.

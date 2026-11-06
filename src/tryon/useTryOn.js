@@ -24,6 +24,7 @@ import {
   detectBlink,
 } from './faceMetrics.js';
 import { refineLipContour } from './lipContourRefine.js';
+import { LIPS_OUTER } from './lips.js';
 
 export const DEFAULT_RESOLUTION = { width: 1920, height: 1080 };
 
@@ -69,6 +70,10 @@ export function useTryOn(options = {}) {
   const lastResRef = useRef(null);
   const contourScratchRef = useRef(null); // scratch canvas for lip contour refinement
   const contourBufRef = useRef([]);       // ring buffer of last N frames for median filter
+  const refinedRef = useRef(null);        // latest async-computed refined contour
+  const refineRunning = useRef(false);    // true while an async refine is in flight
+  const refineBlendRef = useRef(0);       // 0 = pure MP, 1 = pure refined (smooth ramp)
+  const refineTickRef = useRef(0);        // frame counter for throttling refine
   const smoothedRef = useRef(null);
   const prevFullRef = useRef(null);
   const prevMotionRef = useRef(null);
@@ -109,22 +114,71 @@ export function useTryOn(options = {}) {
       const live = cfg.getLayers ? cfg.getLayers(metricsRef.current) : cfg.layers;
       const withLum = { ...live, faceLum: metricsRef.current.faceLum, lightBal: metricsRef.current.lightBal, faceYaw: metricsRef.current.faceYaw, motion: metricsRef.current.motion, blinkL: metricsRef.current.blinkL, blinkR: metricsRef.current.blinkR };
 
-      // Lip contour refinement — run when lips or lipLiner are active
+      // Lip contour refinement — async, throttled, with smooth blend.
+      // Refine runs every ~4 frames in background. Result blended with MP
+      // landmarks via refineBlend (0=MP, 1=refined). Blend ramps down on
+      // motion, ramps up when still.
       if (live.lips || live.lipLiner) {
-        try {
-          if (!contourScratchRef.current) contourScratchRef.current = document.createElement('canvas');
-          const sc = contourScratchRef.current;
-          if (sc.width !== w || sc.height !== h) { sc.width = w; sc.height = h; }
-          const sctx = sc.getContext('2d', { willReadFrequently: true });
-          sctx.drawImage(src, 0, 0, w, h);
-          const imgData = sctx.getImageData(0, 0, w, h);
-          const refined = refineLipContour(imgData, lms, w, h, {
-            frameBuffer: contourBufRef.current,
-            bufferSize: 3,
-            spatialStr: 0.4,
+        const isMoving = metricsRef.current.moving;
+        // Smooth blend ramp: fade out on motion, fade in when still
+        const blend = refineBlendRef.current;
+        if (isMoving) {
+          refineBlendRef.current = Math.max(0, blend - 0.15); // fast fade out
+          if (refineBlendRef.current < 0.01) {
+            contourBufRef.current.length = 0; // reset buffer after fully faded
+          }
+        } else if (refinedRef.current) {
+          refineBlendRef.current = Math.min(1, blend + 0.08); // slow fade in
+        }
+
+        // Apply blended contour
+        const b = refineBlendRef.current;
+        if (b > 0.01 && refinedRef.current && refinedRef.current.length > 0) {
+          // Apply stored deltas to CURRENT MP landmarks — correction
+          // tracks with face movement instead of lagging behind
+          const blended = refinedRef.current.map((delta, i) => {
+            const mp = { x: lms[LIPS_OUTER[i]].x * w, y: lms[LIPS_OUTER[i]].y * h };
+            return {
+              x: mp.x + delta.dx * b,
+              y: mp.y + delta.dy * b,
+            };
           });
-          withLum.refinedOuter = refined;
-        } catch (_) { /* contour refinement is best-effort */ }
+          withLum.refinedOuter = blended;
+        }
+
+        // Throttled async refine — every 4th frame, only when not moving
+        refineTickRef.current++;
+        if (!isMoving && !refineRunning.current && refineTickRef.current % 4 === 0) {
+          refineRunning.current = true;
+          try {
+            if (!contourScratchRef.current) contourScratchRef.current = document.createElement('canvas');
+            const sc = contourScratchRef.current;
+            if (sc.width !== w || sc.height !== h) { sc.width = w; sc.height = h; }
+            const sctx = sc.getContext('2d', { willReadFrequently: true });
+            sctx.drawImage(src, 0, 0, w, h);
+            const imgData = sctx.getImageData(0, 0, w, h);
+            const lmsCopy = lms;
+            const buf = contourBufRef.current;
+            setTimeout(() => {
+              try {
+                if (!metricsRef.current.moving) {
+                  const refined = refineLipContour(imgData, lmsCopy, w, h, {
+                    frameBuffer: buf, bufferSize: 3, spatialStr: 0.4,
+                  });
+                  if (!metricsRef.current.moving) {
+                    // Store as deltas from MP landmarks so correction
+                    // tracks with face movement between refine frames
+                    refinedRef.current = refined.map((rp, i) => {
+                      const mp = lmsCopy[LIPS_OUTER[i]];
+                      return { dx: rp.x - mp.x * w, dy: rp.y - mp.y * h };
+                    });
+                  }
+                }
+              } catch (_) { /* best-effort */ }
+              refineRunning.current = false;
+            }, 0);
+          } catch (_) { refineRunning.current = false; }
+        }
       }
 
       const useGL = cfg.renderer === 'gl' || (cfg.renderer === 'auto' && glAvailable());

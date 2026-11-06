@@ -561,14 +561,18 @@ export function buildLipMask(w, h, landmarks, opts = {}) {
   m.filter = 'none';
   if (opts.refinedOuter) {
     // Use pixel-refined contour (scaled from frame coords to mask coords)
-    // Draw with lineTo, NOT spline — spline overshoots between points and
-    // pushes the mask outside the detected edge.
+    // Shrink 1px inward so spline interpolation doesn't overshoot the edge
     const sx = MW / w, sy = MH / h;
     const scaled = opts.refinedOuter.map(p => [p.x * sx, p.y * sy]);
-    m.beginPath();
-    m.moveTo(scaled[0][0], scaled[0][1]);
-    for (let i = 1; i < scaled.length; i++) m.lineTo(scaled[i][0], scaled[i][1]);
-    m.closePath();
+    let cx = 0, cy = 0;
+    for (const [x, y] of scaled) { cx += x; cy += y; }
+    cx /= scaled.length; cy /= scaled.length;
+    const shrunk = scaled.map(([x, y]) => {
+      const dx = cx - x, dy = cy - y;
+      const d = Math.hypot(dx, dy) || 1;
+      return [x + (dx / d) * 1.0, y + (dy / d) * 1.0]; // 1px inward
+    });
+    traceSmooth(m, shrunk);
   } else {
     tracePath(m, landmarks, LIPS_OUTER, MW, MH);
   }

@@ -112,13 +112,13 @@ export const CFG = {
                                  // as a fraction of lip height — real liner sits
                                  // inside the lower edge, not on it
 
-  eyeliner: { width: 0.005,
-              wing: 0.45,        // wing length, relative to eye opening
-              wingReach: 1.40,   // how far the flick travels ALONG the eye axis
-              wingLift: 0.08,    // almost no lift — sharp straight-down wing
-              blur: 0.0012,
+  eyeliner: { width: 0.0035,      // thinner — natural pencil liner, not stamp
+              wing: 0.62,        // moderate-long wing
+              wingReach: 1.70,   // flick past outer corner
+              wingLift: 0.04,    // almost flat — wing goes more outward than up
+              blur: 0.0015,      // softer edge — blends into lash line
               taper: true,       // taper = thin at inner corner
-              wingTaper: 0.30 }, // wing tip narrows to this fraction of base width
+              wingTaper: 0.18 }, // sharp pointed wing tip
 
   brows: { blur: 0.004 }, // brow fill edge softness
 
@@ -664,17 +664,11 @@ export function buildEyeMask(w, h, landmarks) {
     const upL = Math.hypot(upX, upY) || 1; upX /= upL; upY /= upL;
 
     // ── Perspective tuck ──────────────────────────────────────────────
-    // When the face turns, the far eye foreshortens (persp < 1). The inner
-    // corner (nose side) needs to tuck inward and the shadow height should
-    // compress — mimicking real perspective where the near-nose edge wraps
-    // around the bridge and disappears.
-    // tuck: 0 = frontal (no change), up to ~0.6 at strong foreshortening
-    const tuck = Math.max(0, 1 - persp) * 2.0;  // stronger tuck for eyeshadow
-    // Pull inner points toward the eye centre along the lash axis
+    const tuck = Math.max(0, 1 - persp) * 2.0;
     if (tuck > 0.01) {
       const cx = (outer[0] + inner[0]) / 2, cy = (outer[1] + inner[1]) / 2;
       for (let k = 0; k < n; k++) {
-        const t = k / (n - 1);  // 0 at outer, 1 at inner
+        const t = k / (n - 1);
         const pull = t > 0.35 ? (t - 0.35) / 0.65 * tuck : 0;
         if (pull > 0) {
           lo[k][0] += (cx - lo[k][0]) * pull * 0.65;
@@ -683,33 +677,23 @@ export function buildEyeMask(w, h, landmarks) {
       }
     }
 
-    // Shadow height scales down on the foreshortened eye — perspective
-    // compresses the visible lid surface, so the wash should be shorter.
     const perspLift = lift * (1 - tuck * 0.35);
 
-    // A straight vertical extrusion of the lash line gives a band exactly as
-    // wide as the eye with sheer sides — which reads as a narrow stripe. Real
-    // shadow is a fan: it climbs higher at the outer third and carries OUT past
-    // the outer corner toward the temple, which is what gives the eye its lift.
     const hi = lo.map((p, k) => {
-      const t = k / (n - 1);                       // 0 at outer, 1 at inner
-      const lf = perspLift * (1.3 - 0.6 * t);     // taller over the outer third
-      const ow = perspLift * CFG.eyes.outward * (1 - t) * (1 - t); // fan, outer-weighted
+      const t = k / (n - 1);
+      const lf = perspLift * (1.3 - 0.6 * t);
+      const ow = perspLift * CFG.eyes.outward * (1 - t) * (1 - t);
       return [p[0] + upX * lf + axX * ow, p[1] + upY * lf + axY * ow];
     });
 
-    // Tail also shrinks on foreshortened eye
     const tailLen = perspLift * CFG.eyes.tail;
     const tailBase = [outer[0] + axX * tailLen * 0.5, outer[1] + axY * tailLen * 0.5];
     const tailTip = [outer[0] + axX * tailLen + upX * lift * 1.0,
                      outer[1] + axY * tailLen + upY * lift * 1.0];
 
-    // outer corner -> along the lash line -> inner, back along the lifted edge,
-    // then out through the tail and closed.
     const poly = [tailBase, ...lo, ...hi.slice().reverse(), tailTip];
 
-    // Gradient runs along the eye's own "up", not screen vertical: dense at the
-    // lash line, still solid through the crease, sheer at the brow bone.
+    // Gradient runs along the eye's own "up": dense at lash line, sheer at brow.
     const gx = (outer[0] + inner[0]) / 2, gy = (outer[1] + inner[1]) / 2;
     const grad = m.createLinearGradient(
       gx, gy,
@@ -727,12 +711,8 @@ export function buildEyeMask(w, h, landmarks) {
     m.fill();
 
     // ── Inner-corner fade on the far eye ─────────────────────────────
-    // On top of the geometric tuck, fade the opacity near the nose so the
-    // shadow doesn't end with a hard edge at the bridge.
     if (tuck > 0.05) {
-      const fadeStr = Math.min(1, tuck * 0.7);   // 0 at frontal, up to ~0.7
-      // Gradient runs from inner corner (fully transparent) outward along the
-      // eye axis, covering the inner ~40% of the eye width.
+      const fadeStr = Math.min(1, tuck * 0.7);
       const fadeEnd = [
         inner[0] + (outer[0] - inner[0]) * 0.4,
         inner[1] + (outer[1] - inner[1]) * 0.4,
@@ -751,21 +731,15 @@ export function buildEyeMask(w, h, landmarks) {
     }
   }
 
-  // Keep the wash off the brow hair. Clamping the gradient short of the brow
-  // would also rob the lid of the height that makes the shape read, so instead
-  // let it climb and subtract the brows — the shadow reaches the brow BONE and
-  // stops at the hair. Cut with the same blur so the boundary stays soft.
+  // Keep the wash off the brow hair.
   m.save();
   m.filter = 'none';
   m.globalCompositeOperation = 'destination-out';
-  // Fill the brow, then stroke the same path to dilate the cut past the hair —
-  // the landmark polygon traces the brow tightly, and a bare fill leaves a rim
-  // of colour sitting on its edge.
   m.lineJoin = 'round';
   m.lineCap = 'round';
   m.lineWidth = Math.max(3, MH * 0.022);
   for (const poly of [BROW_R, BROW_L]) {
-    fillPoly(m, landmarks, poly, MW, MH);  // leaves the path current
+    fillPoly(m, landmarks, poly, MW, MH);
     m.stroke();
   }
   m.restore();
@@ -1927,7 +1901,7 @@ export function renderEyes(ctx, w, h, landmarks, opts) {
   if (!landmarks || landmarks.length < 468) return;
   ensure(w, h);
   buildEyeMask(w, h, landmarks);
-  compositeRegion(ctx, w, h, eyeMaskCv, { ...opts, finish: 'satin', pigment: 0.2 });
+  compositeRegion(ctx, w, h, eyeMaskCv, { ...opts, finish: opts.finish || 'satin', pigment: 0.2 });
 }
 
 // Darkening composite for lashes: paint a dark colour along the mask (not a

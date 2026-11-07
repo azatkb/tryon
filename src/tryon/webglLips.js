@@ -384,60 +384,53 @@ void main(){
 
     float depth = smoothstep(0.78, 0.25, shadeL);
     vec3 pigment = mix(mix(col, soft, 0.30), deep, depth * 0.92);
-    // Use reduced opacity for pigment to let skin texture bleed through —
-    // the post-processing pass re-injects high-freq detail proportional to
-    // how much the pixel changed, so keeping some original luminance info
-    // means the texture comes back stronger in the eye zone.
-    float texPreserve = 0.88 + depth * 0.08; // slightly less coverage = more texture
+    float texPreserve = 0.88 + depth * 0.08;
     outc = mix(outc, pigment, me * texPreserve);
 
-    // Finish-specific surface response for eyeshadow
     if (uEyeFinish > 1.5) {
-      // SHIMMER: fine reflective particles catching light. Not a flat overlay —
-      // noise-based sparkle that shifts with face luminance so particles
-      // appear to glint as the head moves (seed changes each frame).
       float sparkle = hash21(vUv * 420.0 + fract(uFaceLum * 211.0));
       float sparkleMask = smoothstep(0.72, 0.95, sparkle);
-      // Gate to lit zones: shimmer only catches where light hits the lid
       float litGate = smoothstep(0.25, 0.65, skinL);
       vec3 shimmerCol = mix(vec3(1.0, 0.98, 0.92), uEyeShade * 1.5 + 0.5, 0.3);
       outc += sparkleMask * litGate * me * shimmerCol * 0.35;
-      // Broad satin base underneath the sparkle points
       float sheen = smoothstep(0.35, 0.75, skinL) * 0.08;
       outc += sheen * me * vec3(1.0, 0.97, 0.93);
     } else if (uEyeFinish > 0.5) {
-      // SATIN: soft luminous sheen, no individual sparkle points
       float sheen = smoothstep(0.35, 0.78, skinL) * 0.06;
       outc += sheen * me * vec3(1.0, 0.97, 0.93);
     }
-    // else MATTE: the base pigment deposit is already matte — no additions.
   }
 
-  // ── EYELINER: near-black, slight texture absorption ─────────────────────────
+  // ── EYELINER: flat pigment, minimal light response ──────────────────────────
   float mel = aaA(uEyeliner, vUv) * uEyelinerInt * expI;
   if (mel > 0.001) {
-    // multiply then push toward liner colour — keeps a hint of skin texture
-    vec3 liner = blendMultiply(outc, uEyelinerShade * 0.4);
-    liner = mix(liner, uEyelinerShade, 0.85);
-    outc = mix(outc, liner, mel);
+    // Non-linear: thin edges stay translucent, centre is dense
+    float melSoft = mel * smoothstep(0.0, 0.35, mel);
+    // Flat colour — eyeliner is opaque pigment, not a transparent wash
+    vec3 liner = mix(uEyelinerShade, blendMultiply(outc, uEyelinerShade * 0.5), 0.10);
+    outc = mix(outc, liner, melSoft);
   }
 
-  // ── MASCARA LASHES: enhance, not obliterate ─────────────────────────────────
-  // Real mascara coats individual lashes, darkening and thickening them while
-  // still letting skin show between. A solid black block reads as eyeliner —
-  // so we reduce opacity in thinner mask areas and let more skin texture bleed
-  // through, creating the perception of separated, coated lashes.
+  // ── MASCARA LASHES: individual coated fibers, not a stamp ───────────────────
+  // Real mascara darkens and thickens individual lashes. The key to realism:
+  //   • Sparse tips fade out rather than ending abruptly
+  //   • Root zone is dense; mid-shaft and tips increasingly transparent
+  //   • Skin between lashes stays fully visible (not a solid block)
+  //   • Very dark but not pure black — retains a hint of warm brown
   float ml2 = aaA(uLash, vUv) * uLashInt * expI;
   if (ml2 > 0.001) {
-    // Mask density shapes the effect: dense centre (lash root) → near-opaque;
-    // thin edges (lash tips) → translucent darkening only.
     float rawA = texture2D(uLash, vUv).a;
-    float tipFade = smoothstep(0.10, 0.55, rawA); // tips stay sheer
-    float lashStr = ml2 * mix(0.45, 1.0, tipFade);
-    // Not pure black — a very dark version of the underlying pixel,
-    // so skin texture is darkened rather than replaced.
-    vec3 lashCol = outc * 0.08;
-    outc = mix(outc, lashCol, lashStr);
+    // Root-to-tip gradient: dense at root (rawA > 0.5), wispy at tips
+    float tipFade = smoothstep(0.08, 0.50, rawA);
+    // Stronger separation — thin mask areas stay very translucent
+    float lashStr = ml2 * mix(0.30, 0.92, tipFade);
+    // Not pure black — very dark warm brown, so skin texture shows through
+    vec3 lashCol = outc * 0.06 + vec3(0.012, 0.006, 0.002);
+    // At tips, just darken existing colour rather than replacing it
+    float tipBlend = 1.0 - tipFade;
+    vec3 tipDark = outc * (0.35 + 0.25 * tipBlend);
+    vec3 finalLash = mix(lashCol, tipDark, tipBlend * 0.7);
+    outc = mix(outc, finalLash, lashStr);
   }
 
   // ── LIP LINER: goes down BEFORE the lipstick ────────────────────────────────
@@ -509,7 +502,7 @@ void main(){
   vec3 detail  = orig - origLow;
   float delta  = clamp(length(outc - orig) * 5.0, 0.0, 1.0);
   float lipZone = feather(texture2D(uLip, vUv).a) * uLipInt;
-  float eyeZone = feather(texture2D(uEye, vUv).a) * uEyeInt;
+  float eyeZone = feather(me) * uEyeInt;
   // Lips get 1.1× texture, eyes get 1.2× (eyelid creases/pores under shadow),
   // everything else gets 0.7×.
   float texStr  = mix(0.7, 1.1, lipZone);
@@ -748,7 +741,7 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
     // correct foreshortening on head turns.  Falls back to 2D canvas mask.
     // When refinedOuter is available, skip 3D mesh — it doesn't support the
     // refined contour, so the lipstick would ignore edge correction.
-    if (lips && lipMesh3DAvailable() && !refinedOuter) {
+    if (lips && lipMesh3DAvailable()) {
       const lipTex = renderLipMesh(gl, w, h, landmarks, lips);
       if (lipTex) {
         // renderLipMesh wrote into its own FBO texture — bind it to unit 6.

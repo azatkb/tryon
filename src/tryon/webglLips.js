@@ -63,10 +63,12 @@ precision highp float;
 varying vec2 vUv;
 uniform sampler2D uFrame, uFnd, uBlush, uHair, uEye, uLash, uLip, uSculpt, uLipLiner, uEyeliner, uBrows, uExtra;
 uniform vec3 uFndShade, uBlushShade, uHairShade, uEyeShade, uLipShade, uWB, uLipLinerShade, uEyelinerShade, uBrowShade, uBronzerShade, uUnderEyeShade;
+uniform vec3 uEyeCreaseShade, uEyeHighlightShade;  // multi-zone eyeshadow
 uniform float uFndInt, uBlushInt, uHairInt, uEyeInt, uLashInt, uLipInt;
 uniform float uContourInt, uHighlightInt, uUnderEyeInt, uBronzerInt, uNoseContourInt, uLipLinerInt, uEyelinerInt, uBrowInt;
 uniform float uLight, uFinish, uFaceLum, uCinema, uGrain, uGlamour, uLightBal, uFaceYaw;
 uniform float uEyeFinish;  // 0=matte, 1=satin, 2=shimmer
+uniform float uEyeCreaseFinish, uEyeHighlightFinish;  // per-zone finish
 uniform float uFndFinish;  // 0=powder/matte, 1=natural, 2=dewy/cream
 uniform float uBlushFinish; // 0=powder, 1=cream
 uniform vec2 uTexel;   // 1/w, 1/h — for multi-tap mask feathering
@@ -374,29 +376,56 @@ void main(){
     outc = mix(outc, deepened, mbr);
   }
 
-  // ── EYESHADOW: colour blend + finish-aware surface (matte/satin/shimmer) ────
-  float me = texture2D(uEye, vUv).a * uEyeInt * expI;
+  // ── EYESHADOW: multi-zone colour via alpha position ─────────────────────────
+  // The mask alpha encodes vertical position: 1.0 at lash line → 0.12 at brow.
+  // We read the RAW alpha to determine zone, then use the intensity-scaled value
+  // for blending. Zones blend smoothly via smoothstep — no hard boundaries.
+  //   rawA > 0.70  →  lid zone   (uEyeShade)
+  //   rawA 0.35–0.70 → crease zone (uEyeCreaseShade, falls back to lid shade)
+  //   rawA < 0.35  →  highlight zone (uEyeHighlightShade, falls back to lid shade)
+  float rawEyeA = texture2D(uEye, vUv).a;
+  float me = rawEyeA * uEyeInt * expI;
   if (me > 0.001) {
-    float shadeL = percL(uEyeShade);
-    vec3 col  = blendColor(outc, uEyeShade);
-    vec3 soft = softLight(outc, uEyeShade);
-    vec3 deep = blendMultiply(outc, uEyeShade * 1.35 + 0.08);
+    // Zone blending weights — smooth transitions, no visible seams
+    float wLid   = smoothstep(0.55, 0.78, rawEyeA);                    // lid: strong below crease
+    float wCrease = smoothstep(0.25, 0.45, rawEyeA) * smoothstep(0.85, 0.65, rawEyeA); // crease: bell curve in the middle
+    float wHigh  = smoothstep(0.40, 0.18, rawEyeA);                    // highlight: near brow bone
+    float wTotal = wLid + wCrease + wHigh + 0.001;  // avoid div by zero
+    wLid /= wTotal; wCrease /= wTotal; wHigh /= wTotal;
 
+    // Resolve zone colours — fall back to lid shade when zone is inactive (black)
+    vec3 creaseCol = (uEyeCreaseShade.r + uEyeCreaseShade.g + uEyeCreaseShade.b > 0.01)
+                     ? uEyeCreaseShade : uEyeShade;
+    vec3 highCol   = (uEyeHighlightShade.r + uEyeHighlightShade.g + uEyeHighlightShade.b > 0.01)
+                     ? uEyeHighlightShade : uEyeShade;
+
+    // Blend the zone colour for this pixel
+    vec3 zoneShade = uEyeShade * wLid + creaseCol * wCrease + highCol * wHigh;
+
+    // Per-zone finish: interpolate between zone finishes
+    float zoneFin = uEyeFinish * wLid + uEyeCreaseFinish * wCrease + uEyeHighlightFinish * wHigh;
+
+    // Pigment blend — same logic as before but with the resolved zone shade
+    float shadeL = percL(zoneShade);
+    vec3 col  = blendColor(outc, zoneShade);
+    vec3 soft = softLight(outc, zoneShade);
+    vec3 deep = blendMultiply(outc, zoneShade * 1.35 + 0.08);
     float depth = smoothstep(0.78, 0.25, shadeL);
     vec3 pigment = mix(mix(col, soft, 0.30), deep, depth * 0.92);
-    float texPreserve = 0.88 + depth * 0.08;
+    float texPreserve = 0.92 + depth * 0.06;  // raised: colour sits IN skin texture
     outc = mix(outc, pigment, me * texPreserve);
 
-    if (uEyeFinish > 1.5) {
+    // Finish effects — use per-zone finish
+    if (zoneFin > 1.5) {
       float sparkle = hash21(vUv * 420.0 + fract(uFaceLum * 211.0));
       float sparkleMask = smoothstep(0.72, 0.95, sparkle);
       float litGate = smoothstep(0.25, 0.65, skinL);
-      vec3 shimmerCol = mix(vec3(1.0, 0.98, 0.92), uEyeShade * 1.5 + 0.5, 0.3);
-      outc += sparkleMask * litGate * me * shimmerCol * 0.35;
-      float sheen = smoothstep(0.35, 0.75, skinL) * 0.08;
+      vec3 shimmerCol = mix(vec3(1.0, 0.98, 0.92), zoneShade * 1.5 + 0.5, 0.3);
+      outc += sparkleMask * litGate * me * shimmerCol * 0.30;
+      float sheen = smoothstep(0.35, 0.75, skinL) * 0.07;
       outc += sheen * me * vec3(1.0, 0.97, 0.93);
-    } else if (uEyeFinish > 0.5) {
-      float sheen = smoothstep(0.35, 0.78, skinL) * 0.06;
+    } else if (zoneFin > 0.5) {
+      float sheen = smoothstep(0.35, 0.78, skinL) * 0.05;
       outc += sheen * me * vec3(1.0, 0.97, 0.93);
     }
   }
@@ -656,9 +685,10 @@ function initGL() {
 
   for (const u of ['uFrame','uFnd','uBlush','uHair','uEye','uLash','uLip','uSculpt','uLipLiner','uEyeliner','uBrows','uExtra',
                    'uFndShade','uBlushShade','uHairShade','uEyeShade','uLipShade','uWB','uLipLinerShade','uEyelinerShade','uBrowShade','uBronzerShade','uUnderEyeShade',
+                   'uEyeCreaseShade','uEyeHighlightShade',
                    'uFndInt','uBlushInt','uHairInt','uEyeInt','uLashInt','uLipInt',
                    'uContourInt','uHighlightInt','uUnderEyeInt','uBronzerInt','uNoseContourInt','uLipLinerInt','uEyelinerInt','uBrowInt',
-                   'uLight','uFinish','uFaceLum','uCinema','uGrain','uGlamour','uLightBal','uFaceYaw','uEyeFinish','uFndFinish','uBlushFinish','uTexel']) {
+                   'uLight','uFinish','uFaceLum','uCinema','uGrain','uGlamour','uLightBal','uFaceYaw','uEyeFinish','uEyeCreaseFinish','uEyeHighlightFinish','uFndFinish','uBlushFinish','uTexel']) {
     loc[u] = gl.getUniformLocation(prog, u);
   }
   tex = { frame: makeTex(), fnd: makeTex(), blush: makeTex(), hair: makeTex(), eye: makeTex(), lash: makeTex(), lip: makeTex(), sculpt: makeTex(), lipLiner: makeTex(), eyeliner: makeTex(), brows: makeTex(), extra: makeTex() };
@@ -782,6 +812,8 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
   gl.uniform3fv(loc.uBlushShade, hexToRgb(blush ? blush.color : '#000000'));
   gl.uniform3fv(loc.uHairShade, hexToRgb(hair ? hair.color : '#000000'));
   gl.uniform3fv(loc.uEyeShade, hexToRgb(eyes ? eyes.color : '#000000'));
+  gl.uniform3fv(loc.uEyeCreaseShade, hexToRgb(eyes?.creaseColor || '#000000'));
+  gl.uniform3fv(loc.uEyeHighlightShade, hexToRgb(eyes?.highlightColor || '#000000'));
   gl.uniform3fv(loc.uLipShade, hexToRgb(lips ? lips.color : '#000000'));
   gl.uniform3fv(loc.uLipLinerShade, hexToRgb(lipLiner ? lipLiner.color : '#000000'));
   gl.uniform3fv(loc.uEyelinerShade, hexToRgb(eyeliner ? eyeliner.color : '#0a0a0a'));
@@ -829,6 +861,8 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
   const FND_FINISH = { matte: 0, powder: 0, natural: 1, satin: 1, dewy: 2, cream: 2 };
   const BLUSH_FINISH = { powder: 0, matte: 0, cream: 1 };
   gl.uniform1f(loc.uEyeFinish, EYE_FINISH[eyes?.finish] ?? 0);
+  gl.uniform1f(loc.uEyeCreaseFinish, EYE_FINISH[eyes?.creaseFinish ?? eyes?.finish] ?? 0);
+  gl.uniform1f(loc.uEyeHighlightFinish, EYE_FINISH[eyes?.highlightFinish ?? 'shimmer'] ?? 2);
   gl.uniform1f(loc.uFndFinish, FND_FINISH[foundation?.finish] ?? 1);
   gl.uniform1f(loc.uBlushFinish, BLUSH_FINISH[blush?.finish] ?? 0);
 

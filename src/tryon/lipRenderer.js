@@ -112,13 +112,13 @@ export const CFG = {
                                  // as a fraction of lip height — real liner sits
                                  // inside the lower edge, not on it
 
-  eyeliner: { width: 0.0035,      // thinner — natural pencil liner, not stamp
-              wing: 0.62,        // moderate-long wing
-              wingReach: 1.70,   // flick past outer corner
-              wingLift: 0.04,    // almost flat — wing goes more outward than up
-              blur: 0.0015,      // softer edge — blends into lash line
+  eyeliner: { width: 0.0025,      // thin pencil line — natural, not stamped
+              wing: 0.55,        // moderate wing
+              wingReach: 1.55,   // subtle flick past outer corner
+              wingLift: 0.035,   // almost flat — wing goes outward
+              blur: 0.0020,      // softer diffused edge — melts into lash line
               taper: true,       // taper = thin at inner corner
-              wingTaper: 0.18 }, // sharp pointed wing tip
+              wingTaper: 0.15 }, // soft pointed wing tip
 
   brows: { blur: 0.004 }, // brow fill edge softness
 

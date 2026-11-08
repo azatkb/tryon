@@ -19,6 +19,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { useFaceLandmarker } from './useFaceLandmarker.js';
 import { renderMakeup } from './lipRenderer.js';
 import { renderMakeupGL, glAvailable } from './webglLips.js';
+import { renderMakeupMultiPass, multiPassAvailable } from './webglMultiPass.js';
 import {
   smoothLandmarks, predictLandmarks, estimateFaceLum, estimateLightBalance, estimateFaceYaw, faceMotion,
   detectBlink,
@@ -40,7 +41,7 @@ export function useTryOn(options = {}) {
     getLayers,                // optional () => layers, called per frame
     source = 'camera',        // 'camera' | 'element'
     sourceEl = null,          // required when source === 'element' (an <img>/<video>)
-    renderer = 'auto',        // 'auto' | 'gl' | 'canvas'
+    renderer = 'auto',        // 'auto' | 'gl' | 'multipass' | 'canvas'
     smoothing = {},           // { alpha, maxAlpha, gain, predict }
     resolution = DEFAULT_RESOLUTION,
     lumInterval = 20,         // frames between exposure re-measurements
@@ -182,9 +183,14 @@ export function useTryOn(options = {}) {
         }
       }
 
-      const useGL = cfg.renderer === 'gl' || (cfg.renderer === 'auto' && glAvailable());
+      const useMP = cfg.renderer === 'multipass' || (cfg.renderer === 'auto' && multiPassAvailable());
+      const useGL = !useMP && (cfg.renderer === 'gl' || (cfg.renderer === 'auto' && glAvailable()));
       let done = false;
-      if (useGL) {
+      if (useMP) {
+        const mpc = renderMakeupMultiPass(src, w, h, lms, withLum);
+        if (mpc) { pctx.drawImage(mpc, 0, 0, w, h); done = true; }
+      }
+      if (!done && (useGL || cfg.renderer === 'auto')) {
         const glc = renderMakeupGL(src, w, h, lms, withLum);
         if (glc) { pctx.drawImage(glc, 0, 0, w, h); done = true; }
       }

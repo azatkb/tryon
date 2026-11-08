@@ -1,7 +1,7 @@
 import { useRef, useState, useCallback } from 'react';
 
 // ─── config ────────────────────────────────────────────────────────
-const RUNPOD_ENDPOINT = 'https://api.runpod.ai/v2/qwen-image-edit-2511-lora';
+const RUNPOD_ENDPOINT = 'https://api.runpod.ai/v2/qwen-image-edit-2511';
 const RUNPOD_API_KEY  = 'rpa_5E0DBQOY1R262BTP25QZEMF16KGZX7S4RE5Y9Z0Ke3h2bi'; // set your key here or via env
 const POLL_INTERVAL   = 3000;
 
@@ -42,6 +42,11 @@ async function submitJob(imageData, prompt) {
       input: {
         prompt,
         images: [imageData],
+        enable_base64_output: false,
+        enable_sync_mode: false,
+        output_format: 'jpeg',
+        seed: -1,
+        size: '1024*1024',
       },
     }),
   });

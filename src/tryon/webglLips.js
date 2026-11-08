@@ -69,6 +69,7 @@ uniform float uContourInt, uHighlightInt, uUnderEyeInt, uBronzerInt, uNoseContou
 uniform float uLight, uFinish, uFaceLum, uCinema, uGrain, uGlamour, uLightBal, uFaceYaw;
 uniform float uEyeFinish;  // 0=matte, 1=satin, 2=shimmer
 uniform float uEyeCreaseFinish, uEyeHighlightFinish;  // per-zone finish
+uniform float uCutCrease;  // 0=smooth blend, 1=hard cut crease with concealer line
 uniform float uFndFinish;  // 0=powder/matte, 1=natural, 2=dewy/cream
 uniform float uBlushFinish; // 0=powder, 1=cream
 uniform vec2 uTexel;   // 1/w, 1/h — for multi-tap mask feathering
@@ -386,11 +387,36 @@ void main(){
   float rawEyeA = texture2D(uEye, vUv).a;
   float me = rawEyeA * uEyeInt * expI;
   if (me > 0.001) {
-    // Zone blending weights — smooth transitions, no visible seams
-    float wLid   = smoothstep(0.55, 0.78, rawEyeA);                    // lid: strong below crease
-    float wCrease = smoothstep(0.25, 0.45, rawEyeA) * smoothstep(0.85, 0.65, rawEyeA); // crease: bell curve in the middle
-    float wHigh  = smoothstep(0.40, 0.18, rawEyeA);                    // highlight: near brow bone
-    float wTotal = wLid + wCrease + wHigh + 0.001;  // avoid div by zero
+    // Zone blending weights — smooth or cut crease depending on uCutCrease.
+    // Cut crease: the lid-to-crease transition sharpens from a wide smoothstep
+    // to a near-step function, and a thin concealer strip appears at the
+    // boundary (rawA ~0.68) to "cut" the two zones apart — just like real
+    // concealer applied with a flat brush along the crease fold.
+    float cc = uCutCrease;  // 0 = smooth, 1 = full cut
+
+    // Transition width narrows with cut crease: smooth uses 0.55–0.78, cut uses 0.65–0.71
+    float lidLo  = mix(0.55, 0.65, cc);
+    float lidHi  = mix(0.78, 0.71, cc);
+    float crLo   = mix(0.25, 0.35, cc);
+    float crHi   = mix(0.45, 0.42, cc);
+    float crTop  = mix(0.85, 0.76, cc);
+    float crTopI = mix(0.65, 0.70, cc);
+
+    float wLid   = smoothstep(lidLo, lidHi, rawEyeA);
+    float wCrease = smoothstep(crLo, crHi, rawEyeA) * smoothstep(crTop, crTopI, rawEyeA);
+    float wHigh  = smoothstep(0.40, 0.18, rawEyeA);
+
+    // Cut crease concealer line: a narrow bell curve at the lid/crease boundary
+    // that pushes colour toward skin tone, simulating the concealer strip MUAs
+    // use to separate the lid from the crease. Width shrinks, amplitude rises.
+    float cutLine = 0.0;
+    if (cc > 0.01) {
+      float cutCentre = 0.68;  // alpha value at the crease fold
+      float cutWidth  = mix(0.15, 0.04, cc);  // narrow at full cut
+      cutLine = exp(-pow((rawEyeA - cutCentre) / cutWidth, 2.0)) * cc;
+    }
+
+    float wTotal = wLid + wCrease + wHigh + 0.001;
     wLid /= wTotal; wCrease /= wTotal; wHigh /= wTotal;
 
     // Resolve zone colours — fall back to lid shade when zone is inactive (black)
@@ -401,6 +427,10 @@ void main(){
 
     // Blend the zone colour for this pixel
     vec3 zoneShade = uEyeShade * wLid + creaseCol * wCrease + highCol * wHigh;
+    // Cut crease concealer: push zone colour toward skin at the cut line
+    if (cutLine > 0.01) {
+      zoneShade = mix(zoneShade, outc, cutLine * 0.75);  // 75% skin show-through at peak
+    }
 
     // Per-zone finish: interpolate between zone finishes
     float zoneFin = uEyeFinish * wLid + uEyeCreaseFinish * wCrease + uEyeHighlightFinish * wHigh;
@@ -688,7 +718,7 @@ function initGL() {
                    'uEyeCreaseShade','uEyeHighlightShade',
                    'uFndInt','uBlushInt','uHairInt','uEyeInt','uLashInt','uLipInt',
                    'uContourInt','uHighlightInt','uUnderEyeInt','uBronzerInt','uNoseContourInt','uLipLinerInt','uEyelinerInt','uBrowInt',
-                   'uLight','uFinish','uFaceLum','uCinema','uGrain','uGlamour','uLightBal','uFaceYaw','uEyeFinish','uEyeCreaseFinish','uEyeHighlightFinish','uFndFinish','uBlushFinish','uTexel']) {
+                   'uLight','uFinish','uFaceLum','uCinema','uGrain','uGlamour','uLightBal','uFaceYaw','uEyeFinish','uEyeCreaseFinish','uEyeHighlightFinish','uCutCrease','uFndFinish','uBlushFinish','uTexel']) {
     loc[u] = gl.getUniformLocation(prog, u);
   }
   tex = { frame: makeTex(), fnd: makeTex(), blush: makeTex(), hair: makeTex(), eye: makeTex(), lash: makeTex(), lip: makeTex(), sculpt: makeTex(), lipLiner: makeTex(), eyeliner: makeTex(), brows: makeTex(), extra: makeTex() };
@@ -863,6 +893,7 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
   gl.uniform1f(loc.uEyeFinish, EYE_FINISH[eyes?.finish] ?? 0);
   gl.uniform1f(loc.uEyeCreaseFinish, EYE_FINISH[eyes?.creaseFinish ?? eyes?.finish] ?? 0);
   gl.uniform1f(loc.uEyeHighlightFinish, EYE_FINISH[eyes?.highlightFinish ?? 'shimmer'] ?? 2);
+  gl.uniform1f(loc.uCutCrease, eyes?.cutCrease ? 1.0 : 0.0);
   gl.uniform1f(loc.uFndFinish, FND_FINISH[foundation?.finish] ?? 1);
   gl.uniform1f(loc.uBlushFinish, BLUSH_FINISH[blush?.finish] ?? 0);
 

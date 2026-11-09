@@ -7,6 +7,7 @@ import './debug.css';
 const DebugApp  = lazy(() => import('./DebugApp.jsx'));
 const AppPage   = lazy(() => import('./App.jsx'));
 const PhotoPage = lazy(() => import('./PhotoPage.jsx'));
+const LiveTryOn = lazy(() => import('./LiveTryOn.jsx'));
 const EmbedView = lazy(() =>
   import('./tryon/index.js').then(m => ({
     default: () => (
@@ -47,6 +48,7 @@ function Router() {
   return (
     <Suspense fallback={loading}>
       {path === '/photo' ? <PhotoPage /> :
+       path === '/live'  ? <LiveTryOn /> :
        path === '/app'   ? <AppPage /> :
        path === '/embed' ? <EmbedView /> :
        /* '/' and everything else */ <DebugApp />}

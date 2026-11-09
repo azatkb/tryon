@@ -27,7 +27,7 @@ let passes = {};
 let texPool = {};  // reusable textures for mask uploads
 
 // Mask cache (same logic as single-pass)
-let lastMaskKey = '', lastHairMask = null, lastLipOverride = null, lastGeom = null;
+let lastMaskKey = '', lastHairMask = null, lastLipOverride = null, lastGeom = null, lastLipSegVer = -1;
 const GEOM_EPS = 0.00015;
 
 function geometryMoved(lms) {
@@ -369,7 +369,7 @@ void main(){
 const FRAG_LIPS = GLSL_COMMON + `
 uniform sampler2D uPrev, uFrame, uLipLiner, uLip, uHair;
 uniform vec3 uLipShade, uLipLinerShade, uHairShade, uWB;
-uniform float uLipInt, uLipLinerInt, uHairInt;
+uniform float uLipInt, uLipLinerInt, uHairInt, uLipPx;
 uniform float uFinish, uLight;
 
 void main(){
@@ -380,6 +380,35 @@ void main(){
   // ── Hair ──
   float mh = feather(texture2D(uHair, vUv).a) * uHairInt * expI;
   if (mh > 0.001) outc = mix(outc, recolour(outc, uHairShade), mh);
+
+  // ── Lip-edge band (~6 px inside the outline), BEFORE liner and lipstick ──
+  // The vermilion border carries a light "white roll". Liner and lipstick
+  // both transfer colour while keeping luminance, so that ridge survived as
+  // a light seam between liner and lipstick. Real pigment covers it: remove
+  // bright ridges (frame detail above its local blur) in that band only;
+  // dark creases are untouched.
+  float lipCov = max(texture2D(uLip, vUv).a, texture2D(uLipLiner, vUv).a);
+  // Band width ∝ lip thickness (uLipPx): on a small, far-away mouth a fixed
+  // 6 px band would cover the whole lip.
+  float bandR = clamp(0.3 * uLipPx, 1.5, 6.0);
+  float edgeBand = (1.0 - smoothstep(0.8, 0.99, softA(uLip, vUv, bandR))) * step(0.001, lipCov);
+  if (edgeBand > 0.001) {
+    // The ridge runs ALONG the edge, so compare ACROSS it: step inward (up
+    // the lip-mask gradient) and use the lip's own brightness 5–8 px in as
+    // the reference. Anything brighter than that in the band is the roll.
+    vec2 t6 = uTexel * bandR;
+    vec2 g = vec2(texture2D(uLip, vUv + vec2(t6.x, 0.0)).a - texture2D(uLip, vUv - vec2(t6.x, 0.0)).a,
+                  texture2D(uLip, vUv + vec2(0.0, t6.y)).a - texture2D(uLip, vUv - vec2(0.0, t6.y)).a);
+    float gl = length(g);
+    if (gl > 1e-3) {
+      vec2 n = (g / gl) * uTexel;                       // inward, one pixel
+      float fL = percL(texture2D(uFrame, vUv).rgb);
+      float r1 = clamp(0.25 * uLipPx, 1.5, 5.0), r2 = clamp(0.4 * uLipPx, 2.5, 8.0);
+      float ref = 0.5 * (percL(texture2D(uFrame, vUv + n * r1).rgb) + percL(texture2D(uFrame, vUv + n * r2).rgb));
+      float ridge = max(0.0, fL - ref - 0.01) * edgeBand;
+      outc = setLum(outc, clamp(percL(outc) - ridge, 0.0, 1.0));
+    }
+  }
 
   // ── Lip liner (before lipstick) ──
   float mll = aaA(uLipLiner, vUv) * uLipLinerInt * expI;
@@ -421,7 +450,12 @@ void main(){
   vec3 origBlur = clamp(softRGB(uFrame, vUv, 3.0) * uWB, 0.0, 1.0);
   float lipZone = clamp(lipA * uLipInt, 0.0, 1.0);
   float str = mix(0.3, 0.6, lipZone);  // lips get strong injection (lip lines)
-  outc = injectTexture(outc, origSample, origBlur, str);
+  // Liner band (+~2px): the real lip border has a bright "white roll" right
+  // there. Re-injecting it drew a light seam between liner and lipstick.
+  // Keep the dark creases, drop the bright detail in that band.
+  float linZ = max(clamp(softA(uLipLiner, vUv, 2.0) * 1.8, 0.0, 1.0) * step(0.001, uLipLinerInt), edgeBand);
+  vec3 origNoRoll = mix(origSample, min(origSample, origBlur), linZ);
+  outc = injectTexture(outc, origNoRoll, origBlur, str);
 
   gl_FragColor = vec4(clamp(outc, 0.0, 1.0), 1.0);
 }`;
@@ -582,7 +616,7 @@ function initMP() {
     passes.lips = buildPass(FRAG_LIPS, [
       'uPrev','uFrame','uLipLiner','uLip','uHair',
       'uLipShade','uLipLinerShade','uHairShade','uWB',
-      'uLipInt','uLipLinerInt','uHairInt',
+      'uLipInt','uLipLinerInt','uHairInt','uLipPx',
       'uFinish','uLight','uFaceLum','uTexel'
     ]);
     passes.post = buildPass(FRAG_POST, [
@@ -636,7 +670,7 @@ export function renderMakeupMultiPass(source, w, h, landmarks, opts) {
   if (!landmarks || landmarks.length < 468) return null;
 
   const { foundation, underEye, contour, blush, highlight, bronzer, noseContour,
-          hair, eyes, lashes, lips, lipLiner, eyeliner, brows, wb, refinedOuter } = opts;
+          hair, eyes, lashes, lips, lipLiner, eyeliner, brows, wb, refinedOuter, lipSeg } = opts;
 
   if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
   ensureFBOs(w, h);
@@ -671,25 +705,34 @@ export function renderMakeupMultiPass(source, w, h, landmarks, opts) {
     const lashMot = opts.motion ?? 0;
     const use3dLash = lashes && lash3dAvailable();
     upload(8, texPool.lash, (lashes && !use3dLash && lashMot < 0.008) ? buildLashMask(w, h, landmarks) : blank());
-    upload(9, texPool.lipLiner, lipLiner ? buildLipLinerMask(w, h, landmarks, { refinedOuter }) : blank());
+    upload(9, texPool.lipLiner, lipLiner ? buildLipLinerMask(w, h, landmarks, { refinedOuter, lipSeg }) : blank());
     // Lip mask (3D mesh or 2D)
-    if (lips && lipMesh3DAvailable()) {
+    // Colour segmentation wins over the 3D mesh — liner and lipstick must
+    // come from the same mask or their edges drift apart.
+    if (lips && !lipSeg && lipMesh3DAvailable()) {
       const lipTex = renderLipMesh(gl, w, h, landmarks, lips);
       if (lipTex) {
         gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
         gl.activeTexture(gl.TEXTURE0 + 10);
         gl.bindTexture(gl.TEXTURE_2D, lipTex);
       } else {
-        upload(10, texPool.lip, buildLipMask(w, h, landmarks, { ...lips, refinedOuter }));
+        upload(10, texPool.lip, buildLipMask(w, h, landmarks, { ...lips, refinedOuter, lipSeg }));
       }
     } else {
-      upload(10, texPool.lip, lips ? buildLipMask(w, h, landmarks, { ...lips, refinedOuter }) : blank());
+      upload(10, texPool.lip, lips ? buildLipMask(w, h, landmarks, { ...lips, refinedOuter, lipSeg }) : blank());
     }
     upload(11, texPool.hair, (hair && hair.mask) ? hair.mask : blank());
     lastMaskKey = key; lastHairMask = hair?.mask || null; lastLipOverride = lipOverride;
+    lastLipSegVer = lipSeg ? lipSeg.version : -1;
   } else {
     // Frame always updates
     upload(0, texPool.frame, source);
+    // Lip segmentation refines every frame even when the head is still.
+    if (lipSeg && lipSeg.version !== lastLipSegVer) {
+      if (lipLiner) upload(9, texPool.lipLiner, buildLipLinerMask(w, h, landmarks, { lipSeg }));
+      if (lips) upload(10, texPool.lip, buildLipMask(w, h, landmarks, { ...lips, lipSeg }));
+      lastLipSegVer = lipSeg.version;
+    }
   }
 
   const blinkGate = Math.min(opts.blinkL ?? 1, opts.blinkR ?? 1);
@@ -787,6 +830,7 @@ export function renderMakeupMultiPass(source, w, h, landmarks, opts) {
 
   gl.uniform1f(ll.uLipInt, lips ? (lips.intensity ?? 0.7) : 0);
   gl.uniform1f(ll.uLipLinerInt, lipLiner ? (lipLiner.intensity ?? 0.8) : 0);
+  gl.uniform1f(ll.uLipPx, lipSeg && lipSeg.t ? lipSeg.t : 20.0);
   gl.uniform1f(ll.uHairInt, (hair && hair.mask) ? (hair.intensity ?? 0.7) : 0);
   gl.uniform1f(ll.uFinish, FINISH_CODE[lips?.finish] ?? 1);
   gl.uniform1f(ll.uLight, lips?.lightResponse ?? 0.5);

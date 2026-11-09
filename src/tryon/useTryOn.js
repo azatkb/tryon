@@ -26,6 +26,7 @@ import {
 } from './faceMetrics.js';
 import { refineLipContour } from './lipContourRefine.js';
 import { LIPS_OUTER } from './lips.js';
+import { segmentLipsColor, resetLipSeg } from './lipColorSeg.js';
 
 export const DEFAULT_RESOLUTION = { width: 1920, height: 1080 };
 
@@ -39,7 +40,7 @@ export function useTryOn(options = {}) {
   const {
     layers = {},
     getLayers,                // optional () => layers, called per frame
-    source = 'camera',        // 'camera' | 'element'
+    source = 'camera',        // 'camera' | 'element' | 'video'
     sourceEl = null,          // required when source === 'element' (an <img>/<video>)
     renderer = 'auto',        // 'auto' | 'gl' | 'multipass' | 'canvas'
     smoothing = {},           // { alpha, maxAlpha, gain, predict }
@@ -47,7 +48,8 @@ export function useTryOn(options = {}) {
     lumInterval = 20,         // frames between exposure re-measurements
     redrawEveryTick = false,  // true = draw on every rAF even without a new frame
     syncToDetection = true,   // show the frame detection actually ran on (no mask drift)
-    contourRefine = true,     // enable/disable lip contour refinement
+    contourRefine = true,     // enable/disable lip contour refinement (luminance, legacy)
+    lipColorSeg = true,       // per-pixel colour segmentation of the lips (overrides contourRefine)
     active = true,
     onFrame,
     onError,
@@ -61,7 +63,7 @@ export function useTryOn(options = {}) {
   const cfgRef = useRef({});
   cfgRef.current = {
     layers, getLayers, renderer, smoothing, lumInterval,
-    redrawEveryTick, syncToDetection, contourRefine, onFrame,
+    redrawEveryTick, syncToDetection, contourRefine, lipColorSeg, onFrame,
   };
 
   const videoRef = useRef(null);
@@ -120,7 +122,14 @@ export function useTryOn(options = {}) {
       // Refine runs every ~4 frames in background. Result blended with MP
       // landmarks via refineBlend (0=MP, 1=refined). Blend ramps down on
       // motion, ramps up when still.
-      if (cfg.contourRefine && (live.lips || live.lipLiner)) {
+      if (cfg.lipColorSeg && (live.lips || live.lipLiner)) {
+        // Pixel-accurate lip mask trained on this frame's own colours. Both
+        // lipstick and liner are cut from it, so their edges always coincide.
+        try {
+          const seg = segmentLipsColor(src, w, h, lms, { moving: metricsRef.current.moving });
+          if (seg) withLum.lipSeg = seg;
+        } catch (_) { /* fall back to the landmark polygon */ }
+      } else if (cfg.contourRefine && (live.lips || live.lipLiner)) {
         const isMoving = metricsRef.current.moving;
         // Smooth blend ramp: fade out on motion, fade in when still
         const blend = refineBlendRef.current;
@@ -271,6 +280,9 @@ export function useTryOn(options = {}) {
     return lms;
   }, [landmarkerRef]);
 
+  // Switching source (camera / video / photo) starts the lip mask from scratch.
+  useEffect(() => { resetLipSeg(); }, [source, sourceEl]);
+
   // ---- camera lifecycle + render loop ----
   useEffect(() => {
     if (!ready || !active || source !== 'camera') return undefined;
@@ -363,6 +375,70 @@ export function useTryOn(options = {}) {
   }, [ready, active, source, resolution.width, resolution.height,
       landmarkerRef, trackFrame, processFrame, onError]);
 
+  // ---- video element playback loop (source === 'video') ----
+  // Like the camera loop but reads from a host-provided <video> element playing
+  // a local file instead of a getUserMedia stream. No stream ownership.
+  useEffect(() => {
+    if (!ready || !active || source !== 'video') return undefined;
+    const fl = landmarkerRef.current;
+    const v = sourceEl;
+    if (!fl || !v || v.tagName !== 'VIDEO') return undefined;
+
+    let stopped = false;
+    let lastTime = -1;
+    let draining = false;
+
+    (async () => {
+      try {
+        await fl.setOptions({ runningMode: 'VIDEO' });
+
+        const snaps = [document.createElement('canvas'), document.createElement('canvas')];
+        let snapIdx = 0;
+        let queued = null;
+
+        const drain = () => {
+          if (draining || !queued) return;
+          draining = true;
+          const { src, w, h } = queued;
+          queued = null;
+          const lms = trackFrame(src, true);
+          setFaceSeen(!!lms);
+          processFrame(src, w, h, lms);
+          draining = false;
+          if (queued) queueMicrotask(drain);
+        };
+
+        const tick = () => {
+          if (stopped) return;
+          rafRef.current = requestAnimationFrame(tick);
+          if (!v.videoWidth || v.paused || v.ended) return;
+          const isFresh = v.currentTime !== lastTime;
+          if (!isFresh) return;
+          lastTime = v.currentTime;
+
+          const w = v.videoWidth, h = v.videoHeight;
+          snapIdx = 1 - snapIdx;
+          const snap = snaps[snapIdx];
+          if (snap.width !== w || snap.height !== h) { snap.width = w; snap.height = h; }
+          snap.getContext('2d').drawImage(v, 0, 0, w, h);
+          queued = { src: snap, w, h };
+          if (!draining) drain();
+        };
+        cancelAnimationFrame(rafRef.current);
+        tick();
+      } catch (e) {
+        if (stopped) return;
+        onError?.(e);
+      }
+    })();
+
+    return () => {
+      stopped = true;
+      cancelAnimationFrame(rafRef.current);
+    };
+  }, [ready, active, source, sourceEl,
+      landmarkerRef, trackFrame, processFrame, onError]);
+
   /**
    * Detect + render a still image. Hosts call this for photo mode, where there
    * is no frame loop to hang the work off.
@@ -375,6 +451,7 @@ export function useTryOn(options = {}) {
     const h = img.naturalHeight || img.height;
     if (!w || !h) return null;
     await fl.setOptions({ runningMode: 'IMAGE' });
+    resetLipSeg();  // a new still must not blend with the previous frame's mask
     let lms = null;
     try { lms = fl.detect(img)?.faceLandmarks?.[0] || null; } catch (e) { onError?.(e); }
     lastResRef.current = { faceLandmarks: lms ? [lms] : [] };
@@ -393,6 +470,28 @@ export function useTryOn(options = {}) {
     return lms;
   }, [landmarkerRef, sourceEl, processFrame, onError]);
 
+  /**
+   * Detect + render exactly one frame of a video element, synchronously, with
+   * full VIDEO-mode tracking (smoothing, motion, lip segmentation). For
+   * frame-by-frame export: seek the (paused) element, call this, then encode
+   * what onFrame painted. The playback loop ignores a paused element, so the
+   * two never process the same frame twice.
+   */
+  const exportSnapRef = useRef(null);
+  const renderVideoFrame = useCallback((el) => {
+    const v = el || sourceEl;
+    if (!landmarkerRef.current || !v || !v.videoWidth) return null;
+    const w = v.videoWidth, h = v.videoHeight;
+    let snap = exportSnapRef.current;
+    if (!snap) { snap = document.createElement('canvas'); exportSnapRef.current = snap; }
+    if (snap.width !== w || snap.height !== h) { snap.width = w; snap.height = h; }
+    snap.getContext('2d').drawImage(v, 0, 0, w, h);
+    const lms = trackFrame(snap, true);
+    setFaceSeen(!!lms);
+    processFrame(snap, w, h, lms);
+    return lms;
+  }, [sourceEl, landmarkerRef, trackFrame, processFrame]);
+
   /** Re-run the makeup pass on the last still without re-detecting. */
   const redrawStill = useCallback((el) => {
     const img = el || sourceEl;
@@ -407,6 +506,6 @@ export function useTryOn(options = {}) {
     videoEl: videoRef.current,
     metricsRef,
     glAvailable: glAvailable(),
-    detectStill, redrawStill, processFrame,
+    detectStill, redrawStill, processFrame, renderVideoFrame,
   };
 }

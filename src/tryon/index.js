@@ -41,6 +41,9 @@ export {
   buildLipLinerMask, buildEyelinerMask, buildBrowMask, buildSculptPack,
 } from './lipRenderer.js';
 
+// Per-pixel lip segmentation from frame colours (lipstick + liner share it).
+export { segmentLipsColor, getLastLipSeg, resetLipSeg, setLipRoughness, getLipRoughness, setLipSymmetry } from './lipColorSeg.js';
+
 // Lip contour refinement (pixel-based brightness edge detection).
 export { refineLipContour, drawRefinedContour } from './lipContourRefine.js';
 

@@ -552,6 +552,72 @@ function tracePath(ctx, landmarks, indices, w, h) {
  * Landmarks are the base; an ONNX segmentation mask in opts.overrideMask only
  * refines the edge, with a floor so weak segmentation can't erase the lips.
  */
+// Paint the fitted lip outline (lipColorSeg) into a FULL-resolution mask.
+// One closed curve → crisp edge, no holes. Full res matters: at half res a
+// thin upper lip is only a few texels, the AA ramp eats it and the shader's
+// edge-depth darkening turns the whole lip into a "shadow"; it also blurs
+// away the 1-px edge texture. liner=true leaves only the ring between the
+// outline and the outline pushed inward by the (perspective-aware) liner width.
+let lipSegCv, lipSegLinerCv, lipSegTmpCv;
+function segCanvas(cv, w, h) {
+  if (!cv) cv = document.createElement('canvas');
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+  return cv;
+}
+function drawLipSeg(cv, seg, w, h, liner = false) {
+  lipSegTmpCv = segCanvas(lipSegTmpCv, w, h);
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.filter = 'none';
+  ctx.clearRect(0, 0, w, h);
+  const path = (c, pts) => {
+    c.beginPath();
+    c.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) c.lineTo(pts[i][0], pts[i][1]);
+    c.closePath();
+  };
+  ctx.fillStyle = '#fff';
+  if (seg.fringe) {
+    // Uneven pigment at the very edge: a slightly larger noisy outline at low
+    // alpha under the solid one — the falloff is soft AND irregular.
+    ctx.globalAlpha = 0.38;
+    path(ctx, seg.fringe); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+  path(ctx, seg.outer); ctx.fill();
+  if (liner) {
+    ctx.globalCompositeOperation = 'destination-out';
+    path(ctx, seg.linerInner); ctx.fill();
+  }
+  if (seg.safe) {
+    // Mouth open: cut (inner opening ∩ safety clamp), same rule as buildLipMask.
+    const tc = lipSegTmpCv.getContext('2d');
+    tc.setTransform(1, 0, 0, 1, 0, 0);
+    tc.globalCompositeOperation = 'source-over';
+    tc.filter = 'none';
+    tc.clearRect(0, 0, w, h);
+    tc.fillStyle = '#fff';
+    path(tc, seg.inner); tc.fill();
+    tc.globalCompositeOperation = 'destination-in';
+    path(tc, seg.safe); tc.fill();
+    tc.globalCompositeOperation = 'source-over';
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.drawImage(lipSegTmpCv, 0, 0);
+  }
+  ctx.globalCompositeOperation = 'source-over';
+  return cv;
+}
+
+/** Lip gap / mouth width, measured on MediaPipe's 3D points (pose-invariant). */
+function mouthOpenRatio(lm, w, h) {
+  const P = (i) => [lm[i].x * w, lm[i].y * h, (lm[i].z || 0) * w];
+  const a = P(13), b = P(14), c = P(61), d = P(291);
+  const gap = Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+  const wid = Math.hypot(c[0] - d[0], c[1] - d[1], c[2] - d[2]);
+  return wid > 0 ? gap / wid : 0;
+}
+
 export function buildLipMask(w, h, landmarks, opts = {}) {
   ensure(w, h);
   const m = maskCv.getContext('2d');
@@ -559,6 +625,11 @@ export function buildLipMask(w, h, landmarks, opts = {}) {
   m.clearRect(0, 0, MW, MH);
   m.fillStyle = '#fff';
   m.filter = 'none';
+  if (opts.lipSeg) {
+    // Fitted outline — shares its edge with the liner. Full resolution.
+    lipSegCv = segCanvas(lipSegCv, w, h);
+    return drawLipSeg(lipSegCv, opts.lipSeg, w, h, false);
+  }
   if (opts.refinedOuter) {
     // Use pixel-refined contour (scaled from frame coords to mask coords)
     // Shrink 1px inward so spline interpolation doesn't overshoot the edge
@@ -577,11 +648,11 @@ export function buildLipMask(w, h, landmarks, opts = {}) {
     tracePath(m, landmarks, LIPS_OUTER, MW, MH);
   }
   m.fill();
-  const gap = Math.abs(landmarks[14].y - landmarks[13].y);
-  const lipW = Math.abs(landmarks[291].x - landmarks[61].x);
-  // Hysteresis: activate at 8%, deactivate at 5% — avoids flicker near threshold
-  const ratio = lipW > 0 ? gap / lipW : 0;
-  _lipCutoutActive = ratio > (_lipCutoutActive ? 0.05 : 0.08);
+  // Mouth-open ratio in 3D px: a turned head narrows the mouth on screen and
+  // must not fake an opening (that cut a hole through closed lips).
+  // Hysteresis: activate at 5%, deactivate at 3% — avoids flicker near threshold
+  const ratio = mouthOpenRatio(landmarks, w, h);
+  _lipCutoutActive = ratio > (_lipCutoutActive ? 0.03 : 0.05);
   if (_lipCutoutActive) {
     // The mouth-opening cutout must never punch through the lip fill.
     // LIPS_INNER landmarks don't perfectly nest inside LIPS_OUTER (the real
@@ -1524,45 +1595,28 @@ export function buildLipLinerMask(w, h, landmarks, opts = {}) {
   m.clearRect(0, 0, MW, MH);
   m.filter = 'none'; // crisp outer edge — no blur
 
+  if (opts.lipSeg) {
+    // Ring at the outer edge of the SAME outline the lipstick uses.
+    lipSegLinerCv = segCanvas(lipSegLinerCv, w, h);
+    return drawLipSeg(lipSegLinerCv, opts.lipSeg, w, h, true);
+  }
+
   // Helper: get outer lip points in mask coords (from refined or landmarks)
   const outerMask = opts.refinedOuter
     ? opts.refinedOuter.map(p => [p.x * (MW / w), p.y * (MH / h)])
     : LIPS_OUTER.map((i) => [landmarks[i].x * MW, landmarks[i].y * MH]);
 
-  // Clip to a slightly inset lip shape — the Catmull-Rom spline on the inset
-  // stroke path can overshoot at mouth corners; a 1-2px safety margin on the
-  // clip ensures nothing pokes out past the actual lip contour.
-  m.save();
-  const clipPts = outerMask;
-  let clipCx = 0, clipCy = 0;
-  for (const [x, y] of clipPts) { clipCx += x; clipCy += y; }
-  clipCx /= clipPts.length; clipCy /= clipPts.length;
-  const clipShrink = 0.035; // ~3.5% inset — tighter to the lip edge
-  const clipInset = clipPts.map(([x, y]) => [
-    x + (clipCx - x) * clipShrink,
-    y + (clipCy - y) * clipShrink,
-  ]);
-  if (opts.refinedOuter) {
-    // Straight lines — refined points are already smooth, spline overshoots
-    m.beginPath();
-    m.moveTo(clipInset[0][0], clipInset[0][1]);
-    for (let i = 1; i < clipInset.length; i++) m.lineTo(clipInset[i][0], clipInset[i][1]);
-    m.closePath();
-  } else {
-    traceSmooth(m, clipInset);
-  }
-  m.clip();
+  // Strategy: fill the entire lip shape, then erase the interior, leaving
+  // only a thin ring at the edge. This guarantees the liner's outer boundary
+  // is EXACTLY the lipstick contour — they share the same path.
+  //
+  // 1. Fill the outer lip contour (same shape as lipstick).
+  // 2. Erase a slightly shrunk copy → thin ring remains.
+  // 3. Lower-lip lift: shrink more on the bottom → liner band is thicker
+  //    at the top of the lower lip, mimicking real liner application.
 
   const lineW = Math.max(2, MW * CFG.lipLiner.width);
 
-  // Build the path the liner actually follows. Two adjustments to the raw lip
-  // boundary, both of which is what a hand would do:
-  //
-  //  1. The whole ring is inset by half the stroke width, so the line sits
-  //     just INSIDE the lip edge at a constant thickness, instead of straddling
-  //     the boundary and being half eaten by the clip.
-  //  2. The lower-lip run is lifted further, toward the mouth line. Liner on
-  //     the bottom lip is drawn inside the natural edge, never along it.
   const pts = outerMask.map(p => [p[0], p[1]]);
   const n = pts.length;
 
@@ -1570,56 +1624,57 @@ export function buildLipLinerMask(w, h, landmarks, opts = {}) {
   for (const [x, y] of pts) { cx += x; cy += y; }
   cx /= n; cy /= n;
 
-  // "Up" for the mouth: bottom-lip centre -> top-lip centre. Taken from the
-  // face, so the lift follows a tilted head.
+  // Lower-lip lift direction
   let upX = (landmarks[0].x - landmarks[17].x) * MW;
   let upY = (landmarks[0].y - landmarks[17].y) * MH;
   const lipH = Math.hypot(upX, upY) || 1;
   upX /= lipH; upY /= lipH;
-  // When the mouth opens, the lower lip pulls away from the upper —
-  // lipH grows.  The lift (which tucks the lower liner inward) should
-  // DECREASE as the mouth opens, otherwise the liner detaches from the
-  // lower-lip edge.  Use closed-mouth lip height (~lip width * 0.35)
-  // as reference; fade lift to 0 as the gap grows.
   const mouthW = Math.abs(landmarks[291].x - landmarks[61].x) * MW;
-  const closedH = mouthW * 0.35;  // approximate closed-lip height
+  const closedH = mouthW * 0.35;
   const openFade = Math.max(0, 1 - Math.max(0, lipH - closedH) / (closedH * 0.6));
   const lift = closedH * CFG.lipLiner.lowerLift * openFade;
 
-  // LIPS_OUTER runs upper-left -> upper-right (0..10), then lower-right ->
-  // lower-left (11..19). Only that second run is lifted, fading to nothing at
-  // the mouth corners so the ring stays a continuous closed curve.
+  // Step 1: fill the full outer lip shape
+  m.fillStyle = '#fff';
+  if (opts.refinedOuter) {
+    m.beginPath();
+    m.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < n; i++) m.lineTo(pts[i][0], pts[i][1]);
+    m.closePath();
+  } else {
+    traceSmooth(m, pts);
+  }
+  m.fill();
+
+  // Step 2: erase interior — shrink each point inward by lineW, with
+  // extra lift on the lower lip
   const LOWER_FROM = 11, LOWER_TO = n - 1;
-  const adj = pts.map(([x, y], i) => {
-    let dx = cx - x, dy = cy - y;
+  const inner = pts.map(([x, y], i) => {
+    const dx = cx - x, dy = cy - y;
     const d = Math.hypot(dx, dy) || 1;
-    let px = x + (dx / d) * (lineW * 0.75);
-    let py = y + (dy / d) * (lineW * 0.75);
+    // Pull inward by lineW (the ring thickness we want to keep)
+    let px = x + (dx / d) * lineW;
+    let py = y + (dy / d) * lineW;
     if (i >= LOWER_FROM && i <= LOWER_TO) {
       const t = (i - (LOWER_FROM - 1)) / (LOWER_TO + 1 - (LOWER_FROM - 1));
-      const taper = Math.sin(Math.PI * t);   // 0 at both corners, 1 at centre
+      const taper = Math.sin(Math.PI * t);
       px += upX * lift * taper;
       py += upY * lift * taper;
     }
     return [px, py];
   });
 
-  m.strokeStyle = '#fff';
-  m.lineJoin = 'round';
-  m.lineCap = 'round';
-  m.lineWidth = lineW;
-  traceSmooth(m, adj);
-  m.stroke();
-
-  m.restore();
+  m.globalCompositeOperation = 'destination-out';
+  m.fillStyle = '#fff';
+  traceSmooth(m, inner);
+  m.fill();
+  m.globalCompositeOperation = 'source-over';
 
   // ── Mouth-opening cutout ──────────────────────────────────────────────
   // Same logic as buildLipMask: when the mouth opens, erase the inner area
   // so the liner doesn't paint over teeth/tongue.
-  const gap = Math.abs(landmarks[14].y - landmarks[13].y);
-  const lipWd = Math.abs(landmarks[291].x - landmarks[61].x);
-  const ratio = lipWd > 0 ? gap / lipWd : 0;
-  if (ratio > 0.06) {
+  const ratio = mouthOpenRatio(landmarks, w, h);
+  if (ratio > 0.04) {
     const tc = refineCv.getContext('2d');
     tc.setTransform(1, 0, 0, 1, 0, 0);
     tc.clearRect(0, 0, MW, MH);
@@ -1870,8 +1925,8 @@ function compositeRegion(ctx, w, h, maskSrc, opts) {
 export function renderLips(ctx, w, h, landmarks, opts) {
   if (!landmarks || landmarks.length < 468) return;
   ensure(w, h);
-  buildLipMask(w, h, landmarks, opts);
-  compositeRegion(ctx, w, h, maskCv, opts);
+  const lipMask = buildLipMask(w, h, landmarks, opts);
+  compositeRegion(ctx, w, h, lipMask, opts);
 
   // gloss: specular highlight on the lower lip, clipped to the mask
   if (opts.finish === 'gloss') {
@@ -1886,7 +1941,7 @@ export function renderLips(ctx, w, h, landmarks, opts) {
     g.addColorStop(1, 'rgba(255,255,255,0)');
     s.fillStyle = g; s.fillRect(0, 0, w, h);
     s.globalCompositeOperation = 'destination-in';
-    s.drawImage(maskCv, 0, 0, w, h);
+    s.drawImage(lipMask, 0, 0, w, h);
     s.globalCompositeOperation = 'source-over';
     ctx.save();
     ctx.globalCompositeOperation = 'screen';
@@ -2116,10 +2171,10 @@ export function renderMakeup(ctx, w, h, landmarks, opts) {
   // The lipstick then covers it by its own alpha, so the liner survives mostly
   // at the lip edge (where the colour is thinnest) exactly as it does on a face.
   if (opts.lipLiner) {
-    buildLipLinerMask(w, h, landmarks, { refinedOuter: opts.refinedOuter });
-    compositeRegion(ctx, w, h, lipLinerMaskCv, { ...opts.lipLiner, finish: 'none', pigment: 0.25 });
+    const linerMask = buildLipLinerMask(w, h, landmarks, { refinedOuter: opts.refinedOuter, lipSeg: opts.lipSeg });
+    compositeRegion(ctx, w, h, linerMask, { ...opts.lipLiner, finish: 'none', pigment: 0.25 });
   }
-  if (opts.lips) renderLips(ctx, w, h, landmarks, { ...opts.lips, refinedOuter: opts.refinedOuter });
+  if (opts.lips) renderLips(ctx, w, h, landmarks, { ...opts.lips, refinedOuter: opts.refinedOuter, lipSeg: opts.lipSeg });
 }
 
 // ---- Debug overlay: tint the ONNX segmentation mask so you can see what it predicts ----

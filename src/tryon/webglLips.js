@@ -22,7 +22,7 @@ let available = null;
 // Mask-upload cache. Masks depend only on landmark geometry and which regions
 // are active, so these four let us detect "nothing that shapes a mask moved"
 // and skip ten texture uploads — by far the most expensive work per frame.
-let lastMaskKey = '', lastHairMask = null, lastLipOverride = null;
+let lastMaskKey = '', lastHairMask = null, lastLipOverride = null, lastLipSegVer = -1;
 let lastGeom = null;
 
 // Sub-pixel landmark drift doesn't change a mask that was built at half
@@ -66,6 +66,7 @@ uniform vec3 uFndShade, uBlushShade, uHairShade, uEyeShade, uLipShade, uWB, uLip
 uniform vec3 uEyeCreaseShade, uEyeHighlightShade;  // multi-zone eyeshadow
 uniform float uFndInt, uBlushInt, uHairInt, uEyeInt, uLashInt, uLipInt;
 uniform float uContourInt, uHighlightInt, uUnderEyeInt, uBronzerInt, uNoseContourInt, uLipLinerInt, uEyelinerInt, uBrowInt;
+uniform float uLipPx;
 uniform float uLight, uFinish, uFaceLum, uCinema, uGrain, uGlamour, uLightBal, uFaceYaw;
 uniform float uEyeFinish;  // 0=matte, 1=satin, 2=shimmer
 uniform float uEyeCreaseFinish, uEyeHighlightFinish;  // per-zone finish
@@ -492,6 +493,35 @@ void main(){
     outc = mix(outc, finalLash, lashStr);
   }
 
+  // ── Lip-edge band (~6 px inside the outline), BEFORE liner and lipstick ──
+  // The vermilion border carries a light "white roll". Liner and lipstick
+  // both transfer colour while keeping luminance, so that ridge survived as
+  // a light seam between liner and lipstick. Real pigment covers it: remove
+  // bright ridges (frame detail above its local blur) in that band only;
+  // dark creases are untouched.
+  float lipCov = max(texture2D(uLip, vUv).a, texture2D(uLipLiner, vUv).a);
+  // Band width ∝ lip thickness (uLipPx): on a small, far-away mouth a fixed
+  // 6 px band would cover the whole lip.
+  float bandR = clamp(0.3 * uLipPx, 1.5, 6.0);
+  float edgeBand = (1.0 - smoothstep(0.8, 0.99, softA(uLip, vUv, bandR))) * step(0.001, lipCov);
+  if (edgeBand > 0.001) {
+    // The ridge runs ALONG the edge, so compare ACROSS it: step inward (up
+    // the lip-mask gradient) and use the lip's own brightness 5–8 px in as
+    // the reference. Anything brighter than that in the band is the roll.
+    vec2 t6 = uTexel * bandR;
+    vec2 g = vec2(texture2D(uLip, vUv + vec2(t6.x, 0.0)).a - texture2D(uLip, vUv - vec2(t6.x, 0.0)).a,
+                  texture2D(uLip, vUv + vec2(0.0, t6.y)).a - texture2D(uLip, vUv - vec2(0.0, t6.y)).a);
+    float gl = length(g);
+    if (gl > 1e-3) {
+      vec2 n = (g / gl) * uTexel;                       // inward, one pixel
+      float fL = percL(texture2D(uFrame, vUv).rgb);
+      float r1 = clamp(0.25 * uLipPx, 1.5, 5.0), r2 = clamp(0.4 * uLipPx, 2.5, 8.0);
+      float ref = 0.5 * (percL(texture2D(uFrame, vUv + n * r1).rgb) + percL(texture2D(uFrame, vUv + n * r2).rgb));
+      float ridge = max(0.0, fL - ref - 0.01) * edgeBand;
+      outc = setLum(outc, clamp(percL(outc) - ridge, 0.0, 1.0));
+    }
+  }
+
   // ── LIP LINER: goes down BEFORE the lipstick ────────────────────────────────
   // Lining first is the actual sequence, and it matters: the lipstick below
   // recolours whatever is already here, so the liner reads as a deeper edge
@@ -559,6 +589,10 @@ void main(){
   //    product — real lipstick sits in the creases, it doesn't erase them.
   vec3 origLow = clamp(softRGB(uFrame, vUv, 3.0) * uWB, 0.0, 1.0);
   vec3 detail  = orig - origLow;
+  // Liner band: drop BRIGHT detail (the lip's "white roll") so it can't show
+  // as a light seam between liner and lipstick; dark creases stay.
+  float linZ = max(clamp(mll * 1.6, 0.0, 1.0), edgeBand);
+  detail = mix(detail, min(detail, vec3(0.0)), linZ);
   float delta  = clamp(length(outc - orig) * 5.0, 0.0, 1.0);
   float lipZone = feather(texture2D(uLip, vUv).a) * uLipInt;
   float eyeZone = feather(me) * uEyeInt;
@@ -717,7 +751,7 @@ function initGL() {
                    'uFndShade','uBlushShade','uHairShade','uEyeShade','uLipShade','uWB','uLipLinerShade','uEyelinerShade','uBrowShade','uBronzerShade','uUnderEyeShade',
                    'uEyeCreaseShade','uEyeHighlightShade',
                    'uFndInt','uBlushInt','uHairInt','uEyeInt','uLashInt','uLipInt',
-                   'uContourInt','uHighlightInt','uUnderEyeInt','uBronzerInt','uNoseContourInt','uLipLinerInt','uEyelinerInt','uBrowInt',
+                   'uContourInt','uHighlightInt','uUnderEyeInt','uBronzerInt','uNoseContourInt','uLipLinerInt','uEyelinerInt','uBrowInt','uLipPx',
                    'uLight','uFinish','uFaceLum','uCinema','uGrain','uGlamour','uLightBal','uFaceYaw','uEyeFinish','uEyeCreaseFinish','uEyeHighlightFinish','uCutCrease','uFndFinish','uBlushFinish','uTexel']) {
     loc[u] = gl.getUniformLocation(prog, u);
   }
@@ -757,7 +791,7 @@ function upload(unit, t, src) {
 export function renderMakeupGL(source, w, h, landmarks, opts) {
   if (!glAvailable() || !initGL()) return null;
   if (!landmarks || landmarks.length < 468) return null;
-  const { foundation, underEye, contour, blush, highlight, bronzer, noseContour, hair, eyes, lashes, lips, lipLiner, eyeliner, brows, wb, refinedOuter } = opts;
+  const { foundation, underEye, contour, blush, highlight, bronzer, noseContour, hair, eyes, lashes, lips, lipLiner, eyeliner, brows, wb, refinedOuter, lipSeg } = opts;
 
   if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
   gl.viewport(0, 0, w, h);
@@ -801,7 +835,7 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
     // correct foreshortening on head turns.  Falls back to 2D canvas mask.
     // When refinedOuter is available, skip 3D mesh — it doesn't support the
     // refined contour, so the lipstick would ignore edge correction.
-    if (lips && lipMesh3DAvailable()) {
+    if (lips && !lipSeg && lipMesh3DAvailable()) {
       const lipTex = renderLipMesh(gl, w, h, landmarks, lips);
       if (lipTex) {
         // renderLipMesh wrote into its own FBO texture — bind it to unit 6.
@@ -812,15 +846,15 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
         gl.activeTexture(gl.TEXTURE0 + 6);
         gl.bindTexture(gl.TEXTURE_2D, lipTex);
       } else {
-        upload(6, tex.lip, buildLipMask(w, h, landmarks, { ...lips, refinedOuter }));
+        upload(6, tex.lip, buildLipMask(w, h, landmarks, { ...lips, refinedOuter, lipSeg }));
       }
     } else {
-      upload(6, tex.lip, lips ? buildLipMask(w, h, landmarks, { ...lips, refinedOuter }) : blank());
+      upload(6, tex.lip, lips ? buildLipMask(w, h, landmarks, { ...lips, refinedOuter, lipSeg }) : blank());
     }
     upload(7, tex.sculpt, sculptOn
       ? buildSculptPack(w, h, landmarks, { contour: !!contour, highlight: !!highlight, underEye: !!underEye })
       : blank());
-    upload(8, tex.lipLiner, lipLiner ? buildLipLinerMask(w, h, landmarks, { refinedOuter }) : blank());
+    upload(8, tex.lipLiner, lipLiner ? buildLipLinerMask(w, h, landmarks, { refinedOuter, lipSeg }) : blank());
     upload(9, tex.eyeliner, eyeliner ? buildEyelinerMask(w, h, landmarks) : blank());
     upload(10, tex.brows, brows ? buildBrowMask(w, h, landmarks) : blank());
     const extraOn = !!(bronzer || noseContour);
@@ -830,6 +864,12 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
     lastMaskKey = key;
     lastHairMask = hair?.mask || null;
     lastLipOverride = lipOverride;
+    lastLipSegVer = lipSeg ? lipSeg.version : -1;
+  } else if (lipSeg && lipSeg.version !== lastLipSegVer) {
+    // Lip segmentation refines every frame even when the head is still.
+    if (lips) upload(6, tex.lip, buildLipMask(w, h, landmarks, { ...lips, lipSeg }));
+    if (lipLiner) upload(8, tex.lipLiner, buildLipLinerMask(w, h, landmarks, { lipSeg }));
+    lastLipSegVer = lipSeg.version;
   }
 
   gl.uniform1i(loc.uFrame, 0); gl.uniform1i(loc.uFnd, 1); gl.uniform1i(loc.uBlush, 2);
@@ -874,6 +914,7 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
   gl.uniform1f(loc.uNoseContourInt, noseContour ? (noseContour.intensity ?? 0.5) : 0);
   gl.uniform1f(loc.uUnderEyeInt, underEye ? (underEye.intensity ?? 0.4) : 0);
   gl.uniform1f(loc.uLipLinerInt, lipLiner ? (lipLiner.intensity ?? 0.8) : 0);
+  gl.uniform1f(loc.uLipPx, lipSeg && lipSeg.t ? lipSeg.t : 20.0);
   gl.uniform1f(loc.uEyelinerInt, eyeliner ? (eyeliner.intensity ?? 0.9) * blinkGate : 0);
   gl.uniform1f(loc.uBrowInt, brows ? (brows.intensity ?? 0.6) : 0);
 

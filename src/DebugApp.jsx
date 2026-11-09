@@ -4,8 +4,9 @@ import {
   drawLandmarks, setFeatureProtect, setRegionEdge,
   buildFaceMask, buildBlushMask, buildEyeMask, buildLashMask,
   buildContourMask, buildHighlightMask, buildUnderEyeMask, buildLipMask,
-  buildLipLinerMask, buildEyelinerMask, buildBrowMask,
+  buildLipLinerMask, buildEyelinerMask, buildBrowMask, getLastLipSeg, resetLipSeg, setLipRoughness, setLipSymmetry,
 } from './tryon/index.js';
+import { createMp4Writer, downloadBlob, mp4WriterSupported } from './videoWriter.js';
 import { refineLipContour, drawRefinedContour } from './tryon/lipContourRefine.js';
 import { ENTITIES, AREAS, entitiesByArea } from './entities.js';
 import { CATALOG } from './catalog.js';
@@ -87,6 +88,7 @@ export default function DebugApp() {
   const canvasRef = useRef(null), maskTintRef = useRef(null);
   const origCanvasRef = useRef(null);  // original photo for side-by-side
   const imgRef = useRef(null);
+  const videoElRef = useRef(null);     // <video> for video file playback
   const [useGL, setUseGL] = useState(glAvailable());
   const [borders, setBorders] = useState(false);
   const [showPoints, setShowPoints] = useState(false);
@@ -100,7 +102,22 @@ export default function DebugApp() {
   const [lessonIdx, setLessonIdx] = useState(0);
   const [showFamilies, setShowFamilies] = useState(false);
   const [photoMode, setPhotoMode] = useState(false);
+  const [videoMode, setVideoMode] = useState(false);
+  const [videoUrl, setVideoUrl] = useState(null);
+  const [videoPaused, setVideoPaused] = useState(false);
+  const [recording, setRecording] = useState(false);   // live camera recording
+  const [saving, setSaving] = useState(false);         // finishing the MP4
+  const [recError, setRecError] = useState(null);
+  const liveWriterRef = useRef(null);
+  const pauseStartRef = useRef(0);
+  const videoModeRef = useRef(false);
+  videoModeRef.current = videoMode;
+  const liveT0Ref = useRef(0);
   const [lipContour, setLipContour] = useState(false);
+  const [colorSeg, setColorSeg] = useState(true);
+  const [lipRough, setLipRough] = useState(0.75);
+  const [lipSym, setLipSym] = useState(0.6);
+  const segInfoRef = useRef(null);
   const [photoUrl, setPhotoUrl] = useState(null);
   const activeLesson = LESSONS[lessonIdx] || LESSON;
   const allFamilies = useMemo(collectFamilies, []);
@@ -113,10 +130,12 @@ export default function DebugApp() {
     return s;
   });
   const stateRef = useRef({});
-  stateRef.current = { enabled, useGL, borders, showPoints, tune, lipContour };
+  stateRef.current = { enabled, useGL, borders, showPoints, tune, lipContour, colorSeg };
 
   // feature protection is a module-level flag in the renderer
   useEffect(() => { setFeatureProtect(protect); }, [protect]);
+  useEffect(() => { setLipRoughness(lipRough); }, [lipRough]);
+  useEffect(() => { setLipSymmetry(lipSym); }, [lipSym]);
 
   // push edge-hardness sliders into the renderer's CFG blur values
   useEffect(() => {
@@ -173,7 +192,11 @@ export default function DebugApp() {
     for (const region of regions) {
       const build = MASK_BUILDERS[region];
       if (!build) continue;
-      const mask = region === 'lips' ? build(w, h, lms, {}) : build(w, h, lms);
+      // Outline the mask the renderer ACTUALLY used for lips / liner.
+      const seg = stateRef.current.colorSeg ? getLastLipSeg() : null;
+      const mask = (region === 'lips' || region === 'lipLiner')
+        ? build(w, h, lms, { lipSeg: seg })
+        : build(w, h, lms);
 
       // Draw mask into t, tinted with region color
       tx.clearRect(0, 0, w, h);
@@ -211,7 +234,19 @@ export default function DebugApp() {
     if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
     const ctx = cv.getContext('2d');
     ctx.drawImage(processed, 0, 0, w, h);
-    if (!landmarks) return;
+    // Live recording: every rendered frame goes to the encoder (after overlays).
+    const capture = () => {
+      const wr = liveWriterRef.current;
+      if (wr) wr.addFrameNow(cv, (performance.now() - liveT0Ref.current) * 1000);
+    };
+    // Segmentation quality readout (DOM write, no React re-render)
+    const si = segInfoRef.current;
+    if (si) {
+      const sg = stateRef.current.colorSeg ? getLastLipSeg() : null;
+      si.textContent = sg ? `d'=${sg.dprime.toFixed(2)} conf=${Math.round(sg.conf * 100)}%` : '';
+      si.style.color = !sg ? '#888' : sg.conf > 0.7 ? '#4caf50' : sg.conf > 0.3 ? '#ff9800' : '#f44336';
+    }
+    if (!landmarks) { capture(); return; }
     if (stateRef.current.borders) drawBorders(ctx, w, h, landmarks);
     if (stateRef.current.showPoints) drawLandmarks(ctx, w, h, landmarks);
 
@@ -231,14 +266,17 @@ export default function DebugApp() {
       });
       drawRefinedContour(ctx, refined, { color: '#0f0', lineWidth: 1.5 });
     }
+    capture();
   }, [drawBorders]);
 
+  const tryOnSource = videoMode ? 'video' : photoMode ? 'element' : 'camera';
+  const tryOnEl = videoMode ? videoElRef.current : imgRef.current;
   const { ready, error, camError, detectStill, redrawStill } = useTryOn({
     layers,
-    source: photoMode ? 'element' : 'camera',
-    sourceEl: imgRef.current,
+    source: tryOnSource,
+    sourceEl: tryOnEl,
     renderer: useGL ? 'auto' : 'canvas',
-    contourRefine: false,  // debug contour is drawn in onFrame
+    lipColorSeg: colorSeg,
     onFrame,
   });
 
@@ -246,6 +284,10 @@ export default function DebugApp() {
   const handlePhoto = useCallback((e) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    // Exit video mode if active
+    if (videoElRef.current) { videoElRef.current.pause(); }
+    setVideoMode(false);
+    setVideoUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return null; });
     const url = URL.createObjectURL(file);
     setPhotoUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return url; });
     setPhotoMode(true);
@@ -273,13 +315,88 @@ export default function DebugApp() {
     if (photoMode && imgRef.current && ready) {
       redrawStill(imgRef.current);
     }
-  }, [photoMode, layers, ready, redrawStill]);
+  }, [photoMode, layers, ready, redrawStill, colorSeg, lipRough, lipSym]);
 
   // Back to camera
   const exitPhoto = useCallback(() => {
     setPhotoMode(false);
     setPhotoUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return null; });
   }, []);
+
+  // Video file upload handler
+  const handleVideo = useCallback((e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    setVideoUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return url; });
+    setVideoMode(true);
+    setPhotoMode(false);
+    setVideoPaused(false);
+  }, []);
+
+  // When video element is ready, start playback
+  const handleVideoLoaded = useCallback(() => {
+    const v = videoElRef.current;
+    if (v) { v.play().catch(() => {}); setVideoPaused(false); }
+  }, []);
+
+  const toggleVideoPause = useCallback(() => {
+    const v = videoElRef.current;
+    if (!v) return;
+    if (v.paused) {
+      // Resume: shift the recording clock so the pause leaves no frozen gap.
+      if (pauseStartRef.current) { liveT0Ref.current += performance.now() - pauseStartRef.current; pauseStartRef.current = 0; }
+      v.play().catch(() => {}); setVideoPaused(false);
+    } else {
+      pauseStartRef.current = performance.now();
+      v.pause(); setVideoPaused(true);
+    }
+  }, []);
+
+  const exitVideo = useCallback(() => {
+    const v = videoElRef.current;
+    if (v) { v.pause(); v.removeAttribute('src'); v.load(); }
+    setVideoMode(false);
+    setVideoUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return null; });
+    setVideoPaused(false);
+  }, []);
+
+  // ── Recording: WebCodecs H.264 → MP4, every rendered frame, full resolution ──
+  // Camera and video: each frame onFrame paints is encoded with its real time.
+  // Rec starts, Stop saves the file immediately.
+  const startRecording = useCallback(async () => {
+    const cv = canvasRef.current;
+    if (!cv || !cv.width) return;
+    setRecError(null);
+    try {
+      const wr = await createMp4Writer({
+        width: cv.width, height: cv.height, fps: 30,
+        mirror: !videoModeRef.current, // camera preview is mirrored on screen — save what you see
+      });
+      liveT0Ref.current = performance.now();
+      pauseStartRef.current = videoElRef.current?.paused && videoModeRef.current ? performance.now() : 0;
+      liveWriterRef.current = wr;
+      setRecording(true);
+    } catch (e) { setRecError(e.message || String(e)); }
+  }, []);
+
+  const stopRecording = useCallback(async () => {
+    const wr = liveWriterRef.current;
+    liveWriterRef.current = null;
+    setRecording(false);
+    if (!wr) return;
+    setSaving(true);
+    try {
+      if (wr.frames > 0) downloadBlob(await wr.finish(), `reesolve-tryon-${wr.width}x${wr.height}.mp4`);
+      else wr.cancel();
+    } catch (e) { setRecError(e.message || String(e)); }
+    setSaving(false);
+  }, []);
+
+  // Leaving a mode (or loading another file) saves a recording in progress.
+  useEffect(() => () => {
+    if (liveWriterRef.current) stopRecording();
+  }, [videoMode, photoMode, videoUrl, stopRecording]);
 
   // Download combined side-by-side: original | processed
   const downloadCombined = useCallback(() => {
@@ -337,6 +454,10 @@ export default function DebugApp() {
       {photoUrl && <img ref={imgRef} src={photoUrl} onLoad={handleImgLoad}
         style={{ position: 'absolute', width: 0, height: 0, opacity: 0, pointerEvents: 'none' }}
         crossOrigin="anonymous" />}
+      {/* Hidden video for video mode — sourceEl for useTryOn video loop */}
+      <video ref={videoElRef} src={videoUrl || undefined} onLoadedData={handleVideoLoaded}
+        playsInline muted loop
+        style={{ position: 'absolute', width: 0, height: 0, opacity: 0, pointerEvents: 'none' }} />
 
       <div className="dbg-stage">
         {photoMode && photoUrl ? (
@@ -359,12 +480,16 @@ export default function DebugApp() {
             </div>
           </div>
         ) : (
-          <canvas ref={canvasRef} className="mir" />
+          <canvas ref={canvasRef} className={videoMode ? '' : 'mir'}
+            onClick={videoMode ? toggleVideoPause : undefined}
+            style={videoMode ? { cursor: 'pointer' } : undefined} />
         )}
-        {!ready && !error && <div className="dbg-overlay">Loading face model…</div>}
+        {!ready && !error && <div className="dbg-overlay">Loading face model...</div>}
         {error && <div className="dbg-overlay err">Model failed: {error}</div>}
-        {camError && !photoMode && <div className="dbg-overlay err">Camera: {camError}</div>}
+        {camError && !photoMode && !videoMode && <div className="dbg-overlay err">Camera: {camError}</div>}
         {photoMode && !photoUrl && <div className="dbg-overlay">Upload a photo to debug</div>}
+        {videoMode && !videoUrl && <div className="dbg-overlay">Upload a video to debug</div>}
+        {videoMode && videoPaused && <div className="dbg-overlay" style={{ background: 'rgba(0,0,0,0.3)', fontSize: '1.5rem' }}>&#9208; Paused</div>}
       </div>
 
       <div className={`dbg-panel${panelOpen ? '' : ' dbg-panel--collapsed'}`}>
@@ -453,7 +578,7 @@ export default function DebugApp() {
         </div>}
         {panelOpen && <div className="dbg-foot">
           {/* ── Photo mode ── */}
-          <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 6, paddingBottom: 6, borderBottom: '1px solid #333' }}>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', marginBottom: 6, paddingBottom: 6, borderBottom: '1px solid #333' }}>
             <label style={{ fontSize: '.72rem', cursor: 'pointer', padding: '3px 10px', borderRadius: 12, fontWeight: 600,
               border: photoMode ? '2px solid #2196f3' : '1px solid #555',
               background: photoMode ? '#2196f3' : 'transparent',
@@ -461,10 +586,24 @@ export default function DebugApp() {
               Photo
               <input type="file" accept="image/*" onChange={handlePhoto} style={{ display: 'none' }} />
             </label>
-            {photoMode && (
-              <button onClick={exitPhoto} style={{ fontSize: '.72rem', padding: '3px 10px', borderRadius: 12,
+            <label style={{ fontSize: '.72rem', cursor: 'pointer', padding: '3px 10px', borderRadius: 12, fontWeight: 600,
+              border: videoMode ? '2px solid #9c27b0' : '1px solid #555',
+              background: videoMode ? '#9c27b0' : 'transparent',
+              color: videoMode ? '#fff' : '#ccc' }}>
+              Video
+              <input type="file" accept="video/*" onChange={handleVideo} style={{ display: 'none' }} />
+            </label>
+            {(photoMode || videoMode) && (
+              <button onClick={videoMode ? exitVideo : exitPhoto} style={{ fontSize: '.72rem', padding: '3px 10px', borderRadius: 12,
                 border: '1px solid #555', background: 'transparent', color: '#ccc', cursor: 'pointer', fontWeight: 600 }}>
                 Camera
+              </button>
+            )}
+            {videoMode && videoUrl && (
+              <button onClick={toggleVideoPause} style={{ fontSize: '.72rem', padding: '3px 10px', borderRadius: 12,
+                border: '1px solid #ff9800', background: videoPaused ? '#ff9800' : 'transparent',
+                color: videoPaused ? '#fff' : '#ff9800', cursor: 'pointer', fontWeight: 600 }}>
+                {videoPaused ? '▶ Play' : '⏸ Pause'}
               </button>
             )}
             {photoMode && photoUrl && (
@@ -473,9 +612,45 @@ export default function DebugApp() {
                 ⬇ Download
               </button>
             )}
+            {!photoMode && (!videoMode || videoUrl) && !saving && (
+              <button onClick={recording ? stopRecording : startRecording} disabled={!mp4WriterSupported()}
+                style={{ fontSize: '.72rem', padding: '3px 10px', borderRadius: 12,
+                border: recording ? '2px solid #f44336' : '1px solid #4caf50',
+                background: recording ? '#f44336' : 'transparent',
+                color: recording ? '#fff' : '#4caf50', cursor: 'pointer', fontWeight: 600,
+                animation: recording ? 'recBlink 1s infinite' : 'none' }}>
+                {recording ? '\u23F9 Stop & Save' : '\u23FA Rec'}
+              </button>
+            )}
+            {saving && (
+              <span style={{ fontSize: '.72rem', padding: '3px 10px', borderRadius: 12,
+                border: '1px solid #ff9800', color: '#ff9800', fontWeight: 600,
+                animation: 'recBlink 1.5s infinite' }}>
+                Saving MP4...
+              </span>
+            )}
+            {!mp4WriterSupported() && !photoMode && (
+              <span style={{ fontSize: '.68rem', color: '#f44336' }}>Recording needs Chrome/Edge 94+</span>
+            )}
+            {recError && <span style={{ fontSize: '.68rem', color: '#f44336' }}>{recError}</span>}
           </div>
           <label className="dbg-row"><input type="checkbox" checked={borders} onChange={(e) => setBorders(e.target.checked)} /> Show mask borders</label>
           <label className="dbg-row"><input type="checkbox" checked={showPoints} onChange={(e) => setShowPoints(e.target.checked)} /> Mesh points</label>
+          <label className="dbg-row"><input type="checkbox" checked={colorSeg} onChange={(e) => setColorSeg(e.target.checked)} /> Lip color seg <span ref={segInfoRef} style={{ marginLeft: 6, fontSize: '.68rem' }} /></label>
+          {colorSeg && (
+            <label className="dbg-row" style={{ paddingLeft: 18 }}>
+              Lip edge <input type="range" min="0" max="1" step="0.05" value={lipRough}
+                onChange={(e) => setLipRough(+e.target.value)} style={{ width: 90, verticalAlign: 'middle' }} />
+              {' '}{lipRough.toFixed(2)}
+            </label>
+          )}
+          {colorSeg && (
+            <label className="dbg-row" style={{ paddingLeft: 18 }}>
+              Symmetry <input type="range" min="0" max="1" step="0.05" value={lipSym}
+                onChange={(e) => setLipSym(+e.target.value)} style={{ width: 82, verticalAlign: 'middle' }} />
+              {' '}{lipSym.toFixed(2)}
+            </label>
+          )}
           <label className="dbg-row"><input type="checkbox" checked={lipContour} onChange={(e) => setLipContour(e.target.checked)} /> Lip contour refine</label>
           <label className="dbg-row"><input type="checkbox" checked={protect} onChange={(e) => setProtect(e.target.checked)} /> Protect features (nose/eyes/lips/brows)</label>
           <label className="dbg-row"><input type="checkbox" checked={useGL} disabled={!glAvailable()} onChange={(e) => setUseGL(e.target.checked)} /> WebGL render</label>

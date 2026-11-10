@@ -88,9 +88,52 @@ function cutFeatures(m, landmarks) {
   m.save();
   m.filter = 'none';
   m.globalCompositeOperation = 'destination-out';
-  for (const poly of [NOSE, EYE_R_FULL, EYE_L_FULL, LIPS_OUTER, BROW_R, BROW_L]) {
+  for (const poly of [NOSE, EYE_R_FULL, EYE_L_FULL, BROW_R, BROW_L]) {
     fillPoly(m, landmarks, poly, MW, MH);
   }
+  m.restore();
+  cutLips(m, landmarks);
+}
+
+// The lip outline the lipstick is painted with (set per frame by the
+// renderers). Every mask that keeps product OFF the lips cuts this same
+// outline: cutting MediaPipe's raw 20-point polygon instead left a strip of
+// untouched skin between e.g. the highlight and the lipstick — a dark line
+// tracing the upper lip.
+let _activeLipSeg = null;
+export function setActiveLipSeg(seg) { _activeLipSeg = seg || null; }
+
+/**
+ * Remove the lips from a face-product mask (destination-out), along the
+ * fitted outline, inset ~1.5 px so the product tucks under the lipstick's soft
+ * edge, ~1 px soft. Falls back to the smooth MediaPipe outline.
+ */
+function cutLips(m, landmarks, seg = _activeLipSeg) {
+  const sx = MW / (seg && seg._w ? seg._w : MW), sy = MH / (seg && seg._h ? seg._h : MH);
+  const pts = seg && seg.outerSmooth && seg._w
+    ? seg.outerSmooth.map(([x, y]) => [x * sx, y * sy])
+    : LIPS_OUTER.map((i) => [landmarks[i].x * MW, landmarks[i].y * MH]);
+  let cx = 0, cy = 0;
+  for (const [x, y] of pts) { cx += x; cy += y; }
+  cx /= pts.length; cy /= pts.length;
+  const inset = 1.5 * (MW / Math.max(1, seg && seg._w ? seg._w : MW / MASK_SCALE));
+  const inner = pts.map(([x, y]) => {
+    const dx = cx - x, dy = cy - y, d = Math.hypot(dx, dy) || 1;
+    return [x + (dx / d) * inset, y + (dy / d) * inset];
+  });
+  m.save();
+  m.setTransform(1, 0, 0, 1, 0, 0);
+  m.globalCompositeOperation = 'destination-out';
+  m.filter = canvasFilterSupported() ? 'blur(0.8px)' : 'none';
+  m.fillStyle = '#000';
+  if (seg && seg.outerSmooth && seg._w) {
+    m.beginPath(); m.moveTo(inner[0][0], inner[0][1]);
+    for (let i = 1; i < inner.length; i++) m.lineTo(inner[i][0], inner[i][1]);
+    m.closePath();
+  } else {
+    traceSmooth(m, inner);
+  }
+  m.fill();
   m.restore();
 }
 
@@ -577,18 +620,42 @@ function drawLipSeg(cv, seg, w, h, liner = false) {
     for (let i = 1; i < pts.length; i++) c.lineTo(pts[i][0], pts[i][1]);
     c.closePath();
   };
-  ctx.fillStyle = '#fff';
-  if (seg.fringe) {
-    // Uneven pigment at the very edge: a slightly larger noisy outline at low
-    // alpha under the solid one — the falloff is soft AND irregular.
-    ctx.globalAlpha = 0.38;
-    path(ctx, seg.fringe); ctx.fill();
-    ctx.globalAlpha = 1;
+  const stack = liner ? (seg.linerLayers || seg.layers) : seg.layers;
+  if (stack && stack.length) {
+    // Natural lip→skin transition: nested curves each adding 1/N coverage
+    // ('lighter' sums alpha) — full inside, fading across the edge. The liner
+    // has its own stack that stops at the lip edge (no dark bleed on skin).
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.fillStyle = `rgba(255,255,255,${1 / stack.length})`;
+    for (const L of stack) { path(ctx, L); ctx.fill(); }
+    ctx.globalCompositeOperation = 'source-over';
+  } else {
+    ctx.fillStyle = '#fff';
+    path(ctx, seg.outer); ctx.fill();
   }
-  path(ctx, seg.outer); ctx.fill();
   if (liner) {
+    // Liner's inner edge fades into the lipstick instead of a hard step.
     ctx.globalCompositeOperation = 'destination-out';
-    path(ctx, seg.linerInner); ctx.fill();
+    ctx.fillStyle = '#fff';
+    if (seg.linerSteps) {
+      for (const st of seg.linerSteps) { ctx.globalAlpha = st.alpha; path(ctx, st.pts); ctx.fill(); }
+      ctx.globalAlpha = 1;
+    } else {
+      path(ctx, seg.linerInner); ctx.fill();
+    }
+  }
+  if (seg.corners) {
+    // Fade into the mouth corners (radial, strongest at the corner point).
+    ctx.globalCompositeOperation = 'destination-out';
+    for (const c of seg.corners) {
+      const g = ctx.createRadialGradient(c.x, c.y, 0, c.x, c.y, c.r);
+      g.addColorStop(0, 'rgba(0,0,0,0.75)');
+      g.addColorStop(0.5, 'rgba(0,0,0,0.25)');
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(c.x - c.r, c.y - c.r, 2 * c.r, 2 * c.r);
+    }
+    ctx.globalCompositeOperation = 'source-over';
   }
   if (seg.safe) {
     // Mouth open: cut (inner opening ∩ safety clamp), same rule as buildLipMask.
@@ -821,7 +888,14 @@ export function buildEyeMask(w, h, landmarks) {
 }
 
 // Foundation mask: the face oval minus the eyes and lips (so they stay clean).
-export function buildFaceMask(w, h, landmarks) {
+//
+// The lips are cut AFTER the big blur and only lightly softened. Before, the
+// ~20 px face-edge blur also blurred the lip cut-out, so foundation faded out
+// over a wide ring around the mouth; the natural (darker) perioral skin showed
+// through as a "shadow" tracing the upper-lip outline. Now foundation reaches
+// the lip edge — with the fitted lip outline (opts.lipSeg) when available,
+// slightly inset so it tucks under the lipstick's soft edge.
+export function buildFaceMask(w, h, landmarks, opts = {}) {
   ensure(w, h);
   const m = faceMaskCv.getContext('2d');
   m.setTransform(1, 0, 0, 1, 0, 0);
@@ -833,9 +907,11 @@ export function buildFaceMask(w, h, landmarks) {
   m.globalCompositeOperation = 'destination-out';
   fillPoly(m, landmarks, EYE_R_FULL, MW, MH);
   fillPoly(m, landmarks, EYE_L_FULL, MW, MH);
-  fillPoly(m, landmarks, LIPS_OUTER, MW, MH);
   m.globalCompositeOperation = 'source-over';
   applyBlur(faceMaskCv, Math.max(2, MW * CFG.face.blur));
+
+  // Lip cut-out: tight (≈1 px soft), along the fitted outline, inset ~1.5 px.
+  cutLips(m, landmarks, opts.lipSeg || _activeLipSeg);
   // Foundation is a base layer — it should cover the whole face (incl. nose &
   // brows), so it is intentionally NOT subject to feature protection.
   return faceMaskCv;
@@ -1301,8 +1377,9 @@ export function buildHighlightMask(w, h, landmarks) {
     m.save();
     m.filter = 'none';
     m.globalCompositeOperation = 'destination-out';
-    for (const poly of [EYE_R_FULL, EYE_L_FULL, LIPS_OUTER, BROW_R, BROW_L]) fillPoly(m, landmarks, poly, MW, MH);
+    for (const poly of [EYE_R_FULL, EYE_L_FULL, BROW_R, BROW_L]) fillPoly(m, landmarks, poly, MW, MH);
     m.restore();
+    cutLips(m, landmarks);
   }
   return highlightMaskCv;
 }
@@ -1865,7 +1942,7 @@ export function buildBrowMask(w, h, landmarks) {
 
 // Shared compositor: recolour whatever `maskSrc` covers, preserving the region's
 // own luminance/texture ('color' blend). Used by both lips and eyeshadow.
-// opts: { color, intensity, finish?, lightResponse?, pigment?, gloss? }
+// opts: { color, intensity, finish?, lightResponse?, pigment?, gloss?, coverage? }
 function compositeRegion(ctx, w, h, maskSrc, opts) {
   const { color, intensity } = opts;
   const finish = opts.finish ?? 'satin';
@@ -1901,6 +1978,13 @@ function compositeRegion(ctx, w, h, maskSrc, opts) {
   if (finish === 'satin') {
     ctx.globalCompositeOperation = 'soft-light';
     ctx.globalAlpha = intensity * 0.5;
+    ctx.drawImage(colorCv, 0, 0);
+  }
+  if (opts.coverage > 0) {
+    // Coverage (lips): an opaque pigment layer so the natural lip colour
+    // doesn't show through. Relief comes back via the light-response pass.
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = Math.min(1, opts.coverage * 0.55 * (0.5 + intensity));
     ctx.drawImage(colorCv, 0, 0);
   }
   ctx.restore();
@@ -2112,8 +2196,9 @@ function compositeFoundation(ctx, w, h, maskSrc, opts) {
  */
 export function renderMakeup(ctx, w, h, landmarks, opts) {
   if (!landmarks || landmarks.length < 468) return;
+  setActiveLipSeg(opts.lipSeg);
   if (opts.foundation) {
-    buildFaceMask(w, h, landmarks);
+    buildFaceMask(w, h, landmarks, { lipSeg: opts.lipSeg });
     compositeFoundation(ctx, w, h, faceMaskCv, opts.foundation);
   }
   if (opts.underEye) {
@@ -2174,7 +2259,7 @@ export function renderMakeup(ctx, w, h, landmarks, opts) {
     const linerMask = buildLipLinerMask(w, h, landmarks, { refinedOuter: opts.refinedOuter, lipSeg: opts.lipSeg });
     compositeRegion(ctx, w, h, linerMask, { ...opts.lipLiner, finish: 'none', pigment: 0.25 });
   }
-  if (opts.lips) renderLips(ctx, w, h, landmarks, { ...opts.lips, refinedOuter: opts.refinedOuter, lipSeg: opts.lipSeg });
+  if (opts.lips) renderLips(ctx, w, h, landmarks, { coverage: 0.6, ...opts.lips, refinedOuter: opts.refinedOuter, lipSeg: opts.lipSeg });
 }
 
 // ---- Debug overlay: tint the ONNX segmentation mask so you can see what it predicts ----

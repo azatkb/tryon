@@ -39,6 +39,10 @@ let edgeRough = 0.75;  // 0 = perfectly smooth outline, 1 = most organic
 
 /** Edge realism: 0 = clean vector-like outline, 1 = strongest organic roughness. */
 export function setLipRoughness(v) { edgeRough = Math.max(0, Math.min(1, +v || 0)); }
+
+let edgeSoft = 1.0;    // lip→skin transition width multiplier (0 = hard cut-out edge)
+/** Lip→skin transition softness: 0 = hard edge, 1 = natural (default), 2 = very soft. */
+export function setLipSoftness(v) { edgeSoft = Math.max(0, Math.min(2, +v || 0)); }
 export function getLipRoughness() { return edgeRough; }
 
 // ── Organic edge texture ────────────────────────────────────────────────
@@ -63,47 +67,90 @@ const NOTCHES = Array.from({ length: 26 }, (_, i) => ({
 }));
 
 /**
- * Turn the smooth outline into an organic one: dense resample (~1.5 px),
- * then displace along the normal by multi-octave noise + lip-line notches.
- * Also returns a slightly larger, independently-noised "fringe" curve that is
- * painted semi-transparent: pigment catching skin texture at the very edge.
+ * Turn the smooth outline into the painted edge.
+ *
+ * Sampling is FIXED: SS samples per contour segment, uniform in the anatomical
+ * parameter u. (Sampling by arc length made the sample count jump frame to
+ * frame, and the finest noise octave aliased into visible edge shimmer.)
+ *
+ * Per sample:
+ *  · organic displacement along the normal — multi-octave value noise +
+ *    lip-line notches, anchored to u so it travels with the lips;
+ *  · a transition width `soft` — how gradually lip colour fades into skin.
+ *    From the references: the upper vermilion border is fairly defined
+ *    (~0.10 t), the lower lip edge melts into skin / the shadow below
+ *    (~0.22 t), and the mouth corners dissolve (up to ~3.5× softer).
+ *
+ * The edge is then built as LAYERS nested curves (from slightly outside the
+ * edge to inside it), each painted at 1/LAYERS alpha — a smooth, uneven,
+ * natural fade instead of a cut-out sticker edge. Inward offsets are capped
+ * by the local lip thickness so layers can't fold over at the corners.
  */
-function roughen(outer, nOut, t, perim, persp) {
+const SS = 5, LAYERS = 8;
+function roughen(outer, nOut, t, perim, persp, thick) {
   const amp0 = edgeRough * Math.max(0.15, 0.055 * t);  // image px (near side), ∝ lip size
   const notchScale = Math.max(0.3, Math.min(2, t / 20));  // notch width ∝ lip size
-  const out = [], fringe = [];
   const n = outer.length;
+  const base = [], nrmS = [], soft = [], thk = [], outFrac = [];
   for (let k = 0; k < n; k++) {
     const a = outer[k], b = outer[(k + 1) % n], na = nOut[k], nb = nOut[(k + 1) % n];
-    const seg = Math.hypot(b[0] - a[0], b[1] - a[1]);
-    const M = Math.max(1, Math.ceil(seg / 1.5));
-    for (let j = 0; j < M; j++) {
-      const f = j / M, u = (k + f) / n;
+    for (let j = 0; j < SS; j++) {
+      const f = j / SS, u = (k + f) / n;
       const x = a[0] + (b[0] - a[0]) * f, y = a[1] + (b[1] - a[1]) * f;
       let nx = na[0] + (nb[0] - na[0]) * f, ny = na[1] + (nb[1] - na[1]) * f;
       const nl = Math.hypot(nx, ny) || 1; nx /= nl; ny /= nl;
-      // Far side of a turned head: texture foreshortens with the surface.
-      const amp = amp0 * (persp[k] + (persp[(k + 1) % n] - persp[k]) * f);
-      // Upper lip has a crisper vermilion border than the lower one; both
-      // fade to clean at the mouth corners (u = 0 and u = 0.5).
-      const region = u < 0.5 ? 0.7 : 1.0;
+      const pz = persp[k] + (persp[(k + 1) % n] - persp[k]) * f;   // far side foreshortens
+      const th = thick[k] + (thick[(k + 1) % n] - thick[k]) * f;
+      const upper = u < 0.5;
       const cornerDist = Math.min(u, Math.abs(u - 0.5), 1 - u);
-      const corner = Math.min(1, cornerDist / 0.05);
-      let notch = 0;
-      for (const N of NOTCHES) {
-        let du = Math.abs(u - N.u); if (du > 0.5) du = 1 - du;
-        const dpx = du * perim;
-        const nw = N.widthPx * notchScale;
-        if (dpx < 4 * nw) notch += N.depth * Math.exp(-(dpx * dpx) / (nw * nw));
+      // organic displacement
+      let d = 0;
+      if (amp0 > 0) {
+        const corner = Math.min(1, cornerDist / 0.05);
+        let notch = 0;
+        for (const N of NOTCHES) {
+          let du = Math.abs(u - N.u); if (du > 0.5) du = 1 - du;
+          const dpx = du * perim, nw = N.widthPx * notchScale;
+          if (dpx < 4 * nw) notch += N.depth * Math.exp(-(dpx * dpx) / (nw * nw));
+        }
+        d = amp0 * pz * (upper ? 0.7 : 1.0) * corner
+          * (0.55 * vnoise(u, 40, 1) + 0.35 * vnoise(u, 130, 2) + 0.18 * vnoise(u, 200, 4) - 1.5 * notch);
       }
-      const d = amp * region * corner * (0.55 * vnoise(u, 40, 1) + 0.35 * vnoise(u, 130, 2)
-                                        + 0.22 * vnoise(u, 330, 4) - 1.5 * notch);
-      out.push([x + nx * d, y + ny * d]);
-      const df = d + amp * corner * (0.9 + 0.8 * vnoise(u, 95, 3) + 0.3 * vnoise(u, 260, 5));
-      fringe.push([x + nx * df, y + ny * df]);
+      base.push([x + nx * d, y + ny * d]);
+      nrmS.push([nx, ny]);
+      // transition width (px)
+      const cornerBoost = 1 + 1.2 * (1 - smooth01(0, 0.07, cornerDist));
+      const unevenness = 1 + 0.25 * vnoise(u, 25, 6);          // the fade itself isn't uniform
+      soft.push(Math.max(0.5, edgeSoft * t * (upper ? 0.10 : 0.22) * cornerBoost * pz * unevenness) * (edgeSoft > 0 ? 1 : 0));
+      thk.push(th);
+      // Near the corners the fade must not spill outward past the mouth —
+      // colour fades INTO the corner (see the corner fade in the renderer).
+      outFrac.push(0.45 - 0.37 * (1 - smooth01(0, 0.07, cornerDist)));
     }
   }
-  return { out, fringe };
+  // Lipstick layers: real lipstick colours the lip right up to its border and
+  // fades OUTSIDE it — so coverage is ~90 % on the fitted edge (a 50 % edge
+  // let the pale natural lip / white roll show as a light rim). Offsets run
+  // from +(outFrac+0.3)·soft onto the skin to −0.25·soft.
+  const mk = (n, from, span) => {
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const fpos = (i + 0.5) / n;
+      const pts = new Array(base.length);
+      for (let q = 0; q < base.length; q++) {
+        let off = soft[q] * (from(q) - span * fpos);
+        if (off < 0) off = Math.max(off, -0.35 * thk[q]);    // never fold inward at thin parts
+        pts[q] = [base[q][0] + nrmS[q][0] * off, base[q][1] + nrmS[q][1] * off];
+      }
+      out.push(pts);
+    }
+    return out;
+  };
+  const layers = mk(LAYERS, (q) => outFrac[q] + 0.3, 1.0);
+  // Liner layers stop AT the edge (a dark liner fading onto the skin read as a
+  // dark stripe above the upper lip); just a short inward fade.
+  const linerLayers = mk(4, () => 0.06, 0.45);
+  return { base, layers, linerLayers };
 }
 
 // Scratch buffers (allocated once)
@@ -411,6 +458,151 @@ function contourPerspective(lms, w, h) {
   return { persp, mouth3D };
 }
 
+/**
+ * Temporal filter for a contour (in place on `prev`, 2K floats):
+ *  1. carry the previous contour along with the face — least-squares
+ *     similarity (translation + rotation + scale) from prev → target, applied
+ *     to prev. Rigid head motion is followed with zero lag;
+ *  2. then smooth only the per-point RESIDUAL. That residual is mostly
+ *     landmark noise, so it's damped hard; a large residual (mouth opening,
+ *     a real shape change) raises the gain so it's followed quickly.
+ */
+function trackContour(prev, tgt, n, base, gain) {
+  let pcx = 0, pcy = 0, qcx = 0, qcy = 0;   // eslint-disable-line prefer-const
+  for (let k = 0; k < n; k++) { pcx += prev[2 * k]; pcy += prev[2 * k + 1]; qcx += tgt[2 * k]; qcy += tgt[2 * k + 1]; }
+  pcx /= n; pcy /= n; qcx /= n; qcy /= n;
+  let sa = 0, sb = 0, sp = 0;
+  for (let k = 0; k < n; k++) {
+    const px = prev[2 * k] - pcx, py = prev[2 * k + 1] - pcy, qx = tgt[2 * k] - qcx, qy = tgt[2 * k + 1] - qcy;
+    sa += px * qx + py * qy; sb += px * qy - py * qx; sp += px * px + py * py;
+  }
+  let A = sp > 1e-9 ? sa / sp : 1, B = sp > 1e-9 ? sb / sp : 0;   // (A + iB) = s·e^{iθ}
+  // A sub-pixel rigid "motion" is landmark noise moving the whole contour —
+  // carry it only partly. From ~1 px of mean displacement up, carry fully.
+  let disp = 0;
+  for (let k = 0; k < n; k++) {
+    const px = prev[2 * k] - pcx, py = prev[2 * k + 1] - pcy;
+    disp += Math.hypot(A * px - B * py + qcx - prev[2 * k], B * px + A * py + qcy - prev[2 * k + 1]);
+  }
+  disp /= n;
+  const g = Math.min(1, 0.2 + disp / 1.2);
+  A = 1 + (A - 1) * g; B *= g;
+  qcx = pcx + (qcx - pcx) * g; qcy = pcy + (qcy - pcy) * g;
+  for (let k = 0; k < n; k++) {
+    const px = prev[2 * k] - pcx, py = prev[2 * k + 1] - pcy;
+    const cx = A * px - B * py + qcx, cy = B * px + A * py + qcy;     // carried
+    const rx = tgt[2 * k] - cx, ry = tgt[2 * k + 1] - cy;            // residual
+    const a = Math.min(0.9, base + Math.hypot(rx, ry) / gain);
+    prev[2 * k] = cx + rx * a; prev[2 * k + 1] = cy + ry * a;
+  }
+}
+
+/** True if a closed polyline crosses itself (bbox-pruned O(n²)). */
+function selfIntersects(p) {
+  const n = p.length;
+  const bx0 = new Float32Array(n), bx1 = new Float32Array(n), by0 = new Float32Array(n), by1 = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const a = p[i], b = p[(i + 1) % n];
+    bx0[i] = Math.min(a[0], b[0]); bx1[i] = Math.max(a[0], b[0]);
+    by0[i] = Math.min(a[1], b[1]); by1[i] = Math.max(a[1], b[1]);
+  }
+  for (let i = 0; i < n; i++) for (let j = i + 2; j < n; j++) {
+    if (i === 0 && j === n - 1) continue;
+    if (bx1[j] < bx0[i] || bx0[j] > bx1[i] || by1[j] < by0[i] || by0[j] > by1[i]) continue;
+    if (segX(p[i], p[(i + 1) % n], p[j], p[(j + 1) % n])) return true;
+  }
+  return false;
+}
+
+/**
+ * Which parts of a lip contour FACE the camera (0 = turned away / hidden).
+ * Face normal from MediaPipe's 3D points (cheek→cheek × forehead→chin); the
+ * lips wrap around the face, so each point's local normal is that normal
+ * rotated about the face's up-axis by its lateral position on the mouth
+ * (±40° at the corners). In profile the far half gets visibility ≤ 0.
+ */
+function contourVisibility(lms, w, h, IDX) {
+  const P3 = (i) => [lms[i].x * w, lms[i].y * h, (lms[i].z || 0) * w];
+  const sub3 = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+  const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const nrm3 = (a) => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
+  const right = sub3(P3(454), P3(234)), down = sub3(P3(152), P3(10));
+  const c = [right[1] * down[2] - right[2] * down[1], right[2] * down[0] - right[0] * down[2], right[0] * down[1] - right[1] * down[0]];
+  const nf = nrm3([-c[0], -c[1], -c[2]]);                      // toward the camera when frontal
+  let r = nrm3(right);
+  const rd = dot3(r, nf); r = nrm3([r[0] - rd * nf[0], r[1] - rd * nf[1], r[2] - rd * nf[2]]);
+  const m61 = P3(61), m291 = P3(291);
+  const mc = [(m61[0] + m291[0]) / 2, (m61[1] + m291[1]) / 2, (m61[2] + m291[2]) / 2];
+  const half = Math.max(1e-3, Math.hypot(...sub3(m291, m61)) / 2);
+  const nMP = IDX.length, vMP = new Float32Array(nMP);
+  const phi = 40 * Math.PI / 180;
+  for (let i = 0; i < nMP; i++) {
+    const sLat = Math.max(-1.2, Math.min(1.2, dot3(sub3(P3(IDX[i]), mc), r) / half));
+    const th = sLat * phi, ct = Math.cos(th), st = Math.sin(th);
+    const nz = nf[2] * ct + r[2] * st;                       // z of the rotated normal
+    vMP[i] = -nz;                                            // camera looks along +z
+  }
+  const vis = new Float32Array(K);
+  for (let k = 0; k < K; k++) {
+    const i = Math.floor(k / SUB), f = (k % SUB) / SUB;
+    vis[k] = vMP[i] + (vMP[(i + 1) % nMP] - vMP[i]) * f;
+  }
+  return vis;
+}
+
+/**
+ * Replace each run of hidden points (vis < thr) by a straight chord between
+ * the visible points on either side — the silhouette. In profile this removes
+ * the far half that would otherwise fold over the near one. Returns the
+ * midpoints of the chords (for fading out a hidden corner).
+ */
+function hideRuns(pts, vis, thr) {
+  const n = pts.length, hidden = new Uint8Array(n);
+  let any = false, all = true;
+  for (let k = 0; k < n; k++) { hidden[k] = vis[k] < thr ? 1 : 0; any = any || !!hidden[k]; all = all && !!hidden[k]; }
+  if (!any || all) return [];
+  let start = 0; while (hidden[start]) start++;               // a visible point to start from
+  const mids = [];
+  for (let s0 = 0; s0 < n; s0++) {
+    const k = (start + s0) % n;
+    if (!hidden[k] || hidden[(k - 1 + n) % n]) continue;      // run begins at k
+    let e = k, len = 0;
+    while (hidden[e % n] && len < n) { e = (e + 1) % n; len++; }
+    const a = pts[(k - 1 + n) % n], b = pts[e];
+    // The silhouette isn't a straight cut: if the hidden points reach outward
+    // past the chord (the lips' profile bulge), run a quadratic through the
+    // most outward of them; otherwise the chord.
+    let cx2 = 0, cy2 = 0;
+    for (const p2 of pts) { cx2 += p2[0]; cy2 += p2[1]; }
+    cx2 /= n; cy2 /= n;
+    let dx = b[0] - a[0], dy = b[1] - a[1];
+    const dl = Math.hypot(dx, dy) || 1; dx /= dl; dy /= dl;
+    let ox = -dy, oy = dx;                                     // chord normal, outward
+    if (((a[0] + b[0]) / 2 - cx2) * ox + ((a[1] + b[1]) / 2 - cy2) * oy < 0) { ox = -ox; oy = -oy; }
+    let best = 0.5, E = null;
+    for (let j = 0; j < len; j++) {
+      const q = pts[(k + j) % n];
+      const dOut = (q[0] - a[0]) * ox + (q[1] - a[1]) * oy;
+      if (dOut > best) { best = dOut; E = q; }
+    }
+    let C = null, tE = 0.5;
+    if (E) {
+      tE = Math.max(0.15, Math.min(0.85, ((E[0] - a[0]) * dx + (E[1] - a[1]) * dy) / dl));
+      const u1 = 1 - tE;
+      C = [(E[0] - u1 * u1 * a[0] - tE * tE * b[0]) / (2 * tE * u1), (E[1] - u1 * u1 * a[1] - tE * tE * b[1]) / (2 * tE * u1)];
+    }
+    for (let j = 0; j < len; j++) {
+      const f = (j + 1) / (len + 1), q = (k + j) % n, g = 1 - f;
+      pts[q] = C
+        ? [g * g * a[0] + 2 * f * g * C[0] + f * f * b[0], g * g * a[1] + 2 * f * g * C[1] + f * f * b[1]]
+        : [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
+    }
+    const mid = pts[(k + (len >> 1)) % n];
+    mids.push([mid[0], mid[1], k, len]);
+  }
+  return mids;
+}
+
 /** Proper intersection point of segments ab and cd, or null. */
 function segX(a, b, c, d) {
   const r0 = b[0] - a[0], r1 = b[1] - a[1], s0 = d[0] - c[0], s1 = d[1] - c[1];
@@ -617,12 +809,17 @@ export function segmentLipsColor(src, w, h, lms, opts = {}) {
     }
   }
   const nrm = normals(outerD);
+  // Facing / hidden parts of the contour (profile views): no colour fitting on
+  // parts turned away from the camera.
+  const visOut = contourVisibility(lms, w, h, LIPS_OUTER);
+  const visIn = contourVisibility(lms, w, h, LIPS_INNER);
+  const HIDDEN = 0.02;   // strictly turned away — near-grazing parts are still visible
   const rOut = 0.5 * t, rIn = 0.35 * t, step = 0.5;
   const nSteps = Math.max(4, Math.ceil((rOut + rIn) / step));
   for (let k = 0; k < K; k++) {
     rawOff[k] = 0;
     wOff[k] = 0;
-    if (conf <= 0) continue;
+    if (conf <= 0 || visOut[k] < 0.3) continue;   // turned away: keep the model shape
     const [bxk, byk] = outerD[k], [nx, ny] = nrm[k];
     const at = (s) => sampleP(bxk + nx * s, byk + ny * s, xf);
     if (at(rOut) >= 0.5 || at(rOut - step) >= 0.5) continue;
@@ -670,7 +867,6 @@ export function segmentLipsColor(src, w, h, lms, opts = {}) {
     if (dc > 0.2 * bw || Math.abs(bw / prevBox[2] - 1) > 0.2 || Math.abs(bh / prevBox[3] - 1) > 0.35) fresh = true;
   }
   if (!prevPts) prevPts = new Float32Array(K * 2);
-  const a = fresh ? 1 : opts.moving ? 0.75 : 0.3;
   const outer = new Array(K);
   const tgt = new Float32Array(K * 2);
   for (let k = 0; k < K; k++) {
@@ -679,13 +875,11 @@ export function segmentLipsColor(src, w, h, lms, opts = {}) {
   }
   // Left/right proportion: the side you can barely see gets the seen side's shape.
   symmetriseThickness(tgt, innerD, supBuf, persp);
-  for (let k = 0; k < K; k++) {
-    const tx = tgt[2 * k], ty = tgt[2 * k + 1];
-    const x = prevPts[2 * k] * (1 - a) + tx * a, y = prevPts[2 * k + 1] * (1 - a) + ty * a;
-    prevPts[2 * k] = x;
-    prevPts[2 * k + 1] = y;
-    outer[k] = [x, y];
-  }
+  // Head motion carried with zero lag, per-point noise damped (see trackContour).
+  if (fresh) prevPts.set(tgt);
+  else trackContour(prevPts, tgt, K, opts.moving ? 0.22 : 0.12, 0.35 * t);
+  for (let k = 0; k < K; k++) outer[k] = [prevPts[2 * k], prevPts[2 * k + 1]];
+  const hiddenOuter = hideRuns(outer, visOut, HIDDEN);
   prevBox = box;
   let inner = innerD;
   if (cutoutActive && conf > 0 && Lp) {
@@ -719,17 +913,16 @@ export function segmentLipsColor(src, w, h, lms, opts = {}) {
     };
     regularise(rawOff, wOff, smOff, t, innerTaper, -0.7 * t, 0.2 * t, conf);
     if (!prevInner || fresh) prevInner = new Float32Array(K * 2).fill(NaN);
-    const ai = opts.moving ? 0.75 : 0.35;
-    inner = new Array(K);
+    const tgtIn = new Float32Array(K * 2);
     for (let k = 0; k < K; k++) {
-      const tx = innerD[k][0] + nIn[k][0] * smOff[k], ty = innerD[k][1] + nIn[k][1] * smOff[k];
-      const px0 = prevInner[2 * k], py0 = prevInner[2 * k + 1];
-      const x = Number.isNaN(px0) ? tx : px0 * (1 - ai) + tx * ai;
-      const y = Number.isNaN(py0) ? ty : py0 * (1 - ai) + ty * ai;
-      prevInner[2 * k] = x;
-      prevInner[2 * k + 1] = y;
-      inner[k] = [x, y];
+      tgtIn[2 * k] = innerD[k][0] + nIn[k][0] * smOff[k];
+      tgtIn[2 * k + 1] = innerD[k][1] + nIn[k][1] * smOff[k];
     }
+    if (Number.isNaN(prevInner[0])) prevInner.set(tgtIn);
+    else trackContour(prevInner, tgtIn, K, opts.moving ? 0.3 : 0.15, 0.35 * t);
+    inner = new Array(K);
+    for (let k = 0; k < K; k++) inner[k] = [prevInner[2 * k], prevInner[2 * k + 1]];
+    hideRuns(inner, visIn, HIDDEN);
   } else {
     prevInner = null;
   }
@@ -745,33 +938,54 @@ export function segmentLipsColor(src, w, h, lms, opts = {}) {
   // like on a real face at that distance.
   const linerPx = Math.max(0.6, (CFG.lipLiner.width / 0.16) * mouth3D);
 
+  const innerRefined = inner !== innerD;
+  if (!innerRefined) { inner = innerD.map((p2) => [p2[0], p2[1]]); hideRuns(inner, visIn, HIDDEN); }
   const nOut = normals(outer);
-  const linerInner = outer.map(([x, y], k) => {
-    // local lip thickness: distance to the nearest inner-edge point
+  // local lip thickness: distance to the nearest mouth-line point
+  const thick = new Float32Array(K);
+  for (let k = 0; k < K; k++) {
     let dmin = Infinity;
-    for (let j = 0; j < K; j++) { const q = innerD[j]; const dd = (q[0] - x) ** 2 + (q[1] - y) ** 2; if (dd < dmin) dmin = dd; }
-    const wk = Math.min(linerPx * persp[k], Math.sqrt(dmin) / 3);
-    return [x - nOut[k][0] * wk, y - nOut[k][1] * wk];
-  });
+    for (let j = 0; j < K; j++) { const q = inner[j]; const dd = (q[0] - outer[k][0]) ** 2 + (q[1] - outer[k][1]) ** 2; if (dd < dmin) dmin = dd; }
+    thick[k] = Math.sqrt(dmin);
+  }
+  const linerW = new Float32Array(K);
+  for (let k = 0; k < K; k++) linerW[k] = Math.min(linerPx * persp[k], thick[k] / 3);
+  const linerInner = outer.map(([x, y], k) => [x - nOut[k][0] * linerW[k], y - nOut[k][1] * linerW[k]]);
+  // Liner → lipstick: the inner edge of the liner fades too (3 steps).
+  const linerSteps = [[0.5, 0.3], [0.25, 0.5], [0, 1]].map(([fo, alpha]) => ({
+    alpha,
+    pts: untangle(linerInner.map(([x, y], k) => [x + nOut[k][0] * linerW[k] * fo, y + nOut[k][1] * linerW[k] * fo])),
+  }));
   let perim = 0;
   for (let k = 0; k < K; k++) { const a2 = outer[k], b2 = outer[(k + 1) % K]; perim += Math.hypot(b2[0] - a2[0], b2[1] - a2[1]); }
-  const rough = edgeRough > 0 ? roughen(outer, nOut, t, perim, persp) : null;
+  const edge = roughen(outer, nOut, t, perim, persp, thick);
+  const tangled = selfIntersects(edge.base);
   let safe = null;
   if (cutoutActive) {
     let ocx = 0, ocy = 0;
     for (const [x, y] of outer) { ocx += x; ocy += y; }
     ocx /= outer.length; ocy /= outer.length;
     // Refined inner edge is trustworthy → a looser safety clamp.
-    const shrink = inner !== innerD ? 0.12 : 0.25;
+    const shrink = innerRefined ? 0.12 : 0.25;
     safe = outer.map(([x, y]) => [x + (ocx - x) * shrink, y + (ocy - y) * shrink]);
   }
 
   lastSeg = {
-    outer: untangle(rough ? rough.out : outer),   // organic outline (what gets painted)
+    outer: tangled ? untangle(edge.base) : edge.base,   // organic outline (overlays / fallback)
+    // Soft lip→skin fade. Layer offsets are capped by local thickness, so they
+    // only fold if the base outline already does — untangle just in that case.
+    layers: edgeSoft > 0 ? (tangled ? edge.layers.map(untangle) : edge.layers) : null,
     outerSmooth: outer,                    // the regularised fit, for overlays
-    fringe: rough ? untangle(rough.fringe) : null, // semi-transparent pigment fringe
-    linerInner: untangle(linerInner), inner: untangle(inner), safe, bbox: box, conf, dprime, version: ++version,
+    linerInner: untangle(linerInner), linerSteps,
+    inner: untangle(inner), safe, bbox: box, conf, dprime, version: ++version,
     t,                                     // lip thickness (px) — shaders scale their edge band by it
+    _w: w, _h: h,                          // frame size the curves are in
+    // Mouth corners: lipstick fades out toward the corner point (references:
+    // the lips dissolve into the corners instead of ending in a hard point).
+    corners: edgeSoft > 0 ? [CORNER_L, CORNER_R].filter((k) => visOut[k] >= HIDDEN).map((k) => ({
+      x: outer[k][0], y: outer[k][1], r: Math.max(2, 0.6 * t * Math.min(1.5, edgeSoft) * persp[k]),
+    })) : null,   // a corner turned behind the silhouette needs no fade — the silhouette is a real lip edge
+    linerLayers: edgeSoft > 0 ? (tangled ? edge.linerLayers.map(untangle) : edge.linerLayers) : null,
   };
   return lastSeg;
 }

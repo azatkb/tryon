@@ -4,7 +4,7 @@ import {
   drawLandmarks, setFeatureProtect, setRegionEdge,
   buildFaceMask, buildBlushMask, buildEyeMask, buildLashMask,
   buildContourMask, buildHighlightMask, buildUnderEyeMask, buildLipMask,
-  buildLipLinerMask, buildEyelinerMask, buildBrowMask, getLastLipSeg, resetLipSeg, setLipRoughness, setLipSymmetry,
+  buildLipLinerMask, buildEyelinerMask, buildBrowMask, getLastLipSeg, resetLipSeg, setLipRoughness, setLipSymmetry, setLipSoftness,
 } from './tryon/index.js';
 import { createMp4Writer, downloadBlob, mp4WriterSupported } from './videoWriter.js';
 import { refineLipContour, drawRefinedContour } from './tryon/lipContourRefine.js';
@@ -117,6 +117,11 @@ export default function DebugApp() {
   const [colorSeg, setColorSeg] = useState(true);
   const [lipRough, setLipRough] = useState(0.75);
   const [lipSym, setLipSym] = useState(0.6);
+  const [lipSoft, setLipSoft] = useState(1.0);
+  const [lipCover, setLipCover] = useState(0.6);
+  const [lipTex, setLipTex] = useState(null);        // HTMLImageElement of a lip product texture
+  const [lipTexMix, setLipTexMix] = useState(0.7);
+  const [lipTexScale, setLipTexScale] = useState(2.0);
   const segInfoRef = useRef(null);
   const [photoUrl, setPhotoUrl] = useState(null);
   const activeLesson = LESSONS[lessonIdx] || LESSON;
@@ -136,6 +141,7 @@ export default function DebugApp() {
   useEffect(() => { setFeatureProtect(protect); }, [protect]);
   useEffect(() => { setLipRoughness(lipRough); }, [lipRough]);
   useEffect(() => { setLipSymmetry(lipSym); }, [lipSym]);
+  useEffect(() => { setLipSoftness(lipSoft); }, [lipSoft]);
 
   // push edge-hardness sliders into the renderer's CFG blur values
   useEffect(() => {
@@ -169,9 +175,11 @@ export default function DebugApp() {
     if (L.eyes) L.eyes.finish = eyeFinish;
     if (L.foundation) L.foundation.finish = fndFinish;
     if (L.blush) L.blush.finish = blushFinish;
+    if (L.lips) L.lips.coverage = lipCover;
+    if (L.lips && lipTex) { L.lips.texture = lipTex; L.lips.textureMix = lipTexMix; L.lips.textureScale = lipTexScale; }
     L.cinema = cinema;
     return L;
-  }, [enabled, tune, cinema, eyeFinish, fndFinish, blushFinish, activeLesson]);
+  }, [enabled, tune, cinema, eyeFinish, fndFinish, blushFinish, activeLesson, lipCover, lipTex, lipTexMix, lipTexScale]);
 
   const drawBorders = useCallback((ctx, w, h, lms) => {
     if (!maskTintRef.current) maskTintRef.current = document.createElement('canvas');
@@ -315,7 +323,7 @@ export default function DebugApp() {
     if (photoMode && imgRef.current && ready) {
       redrawStill(imgRef.current);
     }
-  }, [photoMode, layers, ready, redrawStill, colorSeg, lipRough, lipSym]);
+  }, [photoMode, layers, ready, redrawStill, colorSeg, lipRough, lipSym, lipSoft]);
 
   // Back to camera
   const exitPhoto = useCallback(() => {
@@ -651,11 +659,50 @@ export default function DebugApp() {
               {' '}{lipSym.toFixed(2)}
             </label>
           )}
+          {colorSeg && (
+            <label className="dbg-row" style={{ paddingLeft: 18 }}>
+              Lip soft <input type="range" min="0" max="2" step="0.05" value={lipSoft}
+                onChange={(e) => setLipSoft(+e.target.value)} style={{ width: 90, verticalAlign: 'middle' }} />
+              {' '}{lipSoft.toFixed(2)}
+            </label>
+          )}
           <label className="dbg-row"><input type="checkbox" checked={lipContour} onChange={(e) => setLipContour(e.target.checked)} /> Lip contour refine</label>
           <label className="dbg-row"><input type="checkbox" checked={protect} onChange={(e) => setProtect(e.target.checked)} /> Protect features (nose/eyes/lips/brows)</label>
           <label className="dbg-row"><input type="checkbox" checked={useGL} disabled={!glAvailable()} onChange={(e) => setUseGL(e.target.checked)} /> WebGL render</label>
           <label className="dbg-row" style={{marginTop:6}}>
             Cinema <input type="range" min="0" max="1" step="0.01" value={cinema} onChange={(e) => setCinema(+e.target.value)} style={{width:90,verticalAlign:'middle'}} /> {cinema.toFixed(2)}
+          </label>
+          <div className="dbg-row" style={{ gap: 6 }}>
+            <label style={{ cursor: 'pointer', textDecoration: 'underline' }}>
+              {lipTex ? 'Lip texture ✓' : 'Lip texture…'}
+              <input type="file" accept="image/*" style={{ display: 'none' }} onChange={(e) => {
+                const f = e.target.files?.[0]; if (!f) return;
+                const img = new Image();
+                img.onload = () => setLipTex(img);
+                img.src = URL.createObjectURL(f);
+                e.target.value = '';
+              }} />
+            </label>
+            {lipTex && <button onClick={() => setLipTex(null)} style={{ fontSize: '.68rem', padding: '0 6px' }}>✕</button>}
+          </div>
+          {lipTex && (
+            <label className="dbg-row" style={{ paddingLeft: 18 }}>
+              Tex mix <input type="range" min="0" max="1" step="0.05" value={lipTexMix}
+                onChange={(e) => setLipTexMix(+e.target.value)} style={{ width: 90, verticalAlign: 'middle' }} />
+              {' '}{lipTexMix.toFixed(2)}
+            </label>
+          )}
+          {lipTex && (
+            <label className="dbg-row" style={{ paddingLeft: 18 }}>
+              Tex scale <input type="range" min="0.5" max="8" step="0.1" value={lipTexScale}
+                onChange={(e) => setLipTexScale(+e.target.value)} style={{ width: 90, verticalAlign: 'middle' }} />
+              {' '}{lipTexScale.toFixed(1)}
+            </label>
+          )}
+          <label className="dbg-row">
+            Lip cover <input type="range" min="0" max="1" step="0.05" value={lipCover}
+              onChange={(e) => setLipCover(+e.target.value)} style={{ width: 90, verticalAlign: 'middle' }} />
+            {' '}{lipCover.toFixed(2)}
           </label>
           <label className="dbg-row">
             Foundation <select value={fndFinish} onChange={(e) => setFndFinish(e.target.value)} style={{marginLeft:4}}>

@@ -11,12 +11,13 @@
 // texture; an auto white-balance holds the look across warm / side lighting.
 
 import { initLipMesh, renderLipMesh, lipMesh3DAvailable } from './lipMesh3D.js';
-import { buildLipMask, buildEyeMask, buildFaceMask, buildLashMask, buildBlushMask, buildSculptPack,
+import { setActiveLipSeg, buildLipMask, buildEyeMask, buildFaceMask, buildLashMask, buildBlushMask, buildSculptPack,
          buildExtraPack, buildLipLinerMask, buildEyelinerMask, buildBrowMask, CFG } from './lipRenderer.js';
 import { lash3dAvailable, renderLashes3D } from './lashRenderer3D.js';
 
 let gl = null, canvas = null, prog = null, quadBuf = null;
 let tex = {}, loc = {};
+let lipTexObj = null, lastLipTexSrc = null;  // lip product texture (unit 12)
 let available = null;
 
 // Mask-upload cache. Masks depend only on landmark geometry and which regions
@@ -66,7 +67,11 @@ uniform vec3 uFndShade, uBlushShade, uHairShade, uEyeShade, uLipShade, uWB, uLip
 uniform vec3 uEyeCreaseShade, uEyeHighlightShade;  // multi-zone eyeshadow
 uniform float uFndInt, uBlushInt, uHairInt, uEyeInt, uLashInt, uLipInt;
 uniform float uContourInt, uHighlightInt, uUnderEyeInt, uBronzerInt, uNoseContourInt, uLipLinerInt, uEyelinerInt, uBrowInt;
-uniform float uLipPx;
+uniform float uLipPx, uLipCover;
+uniform sampler2D uLipTex;
+uniform float uLipTexOn, uLipTexMix, uLipTexScale;
+uniform vec2 uLipO, uLipAx, uLipAy;
+
 uniform float uLight, uFinish, uFaceLum, uCinema, uGrain, uGlamour, uLightBal, uFaceYaw;
 uniform float uEyeFinish;  // 0=matte, 1=satin, 2=shimmer
 uniform float uEyeCreaseFinish, uEyeHighlightFinish;  // per-zone finish
@@ -503,7 +508,10 @@ void main(){
   // Band width ∝ lip thickness (uLipPx): on a small, far-away mouth a fixed
   // 6 px band would cover the whole lip.
   float bandR = clamp(0.3 * uLipPx, 1.5, 6.0);
-  float edgeBand = (1.0 - smoothstep(0.8, 0.99, softA(uLip, vUv, bandR))) * step(0.001, lipCov);
+  // Only where the product actually covers (≥ ~50 %): the roll lies on the
+  // lip. On the soft fade over SKIN this pulled the much brighter skin down to
+  // lip brightness — that was the dark line above the upper lip.
+  float edgeBand = (1.0 - smoothstep(0.8, 0.99, softA(uLip, vUv, bandR))) * smoothstep(0.5, 0.95, lipCov);
   if (edgeBand > 0.001) {
     // The ridge runs ALONG the edge, so compare ACROSS it: step inward (up
     // the lip-mask gradient) and use the lip's own brightness 5–8 px in as
@@ -535,7 +543,8 @@ void main(){
 
   // ── LIPS: translucent pigment over skin — colour, relief and tone show through
   float lipA = feather(texture2D(uLip, vUv).a);
-  float ml = lipA * uLipInt * expI;
+  // Coverage also raises opacity inside the lip (the soft edge stays soft).
+  float ml = min(1.0, lipA * mix(uLipInt, 1.0, 0.85 * max(uLipCover, uLipTexMix * uLipTexOn)) * expI);
   if (ml > 0.001) {
     float lum = percL(outc);
     // The skin's own hue/sat bleeds through — real pigment is translucent.
@@ -550,9 +559,54 @@ void main(){
     // Exposure-normalise so brightness tracks the face, not the shade swatch
     float targetLum = clamp(lum + (0.5 - uFaceLum) * 0.25, 0.0, 1.0);
     mk = setLum(mk, mix(percL(mk), targetLum, 0.5));
+    // ── Coverage (uLipCover 0..1) ──
+    // Sheer (0): colour transferred at the lip's own luminance — the natural
+    // lip, its pale patches and darker rim show through like a tint.
+    // Opaque (1): the lipstick's OWN colour, lit only by the lip's large-scale
+    // lighting (volume, the shaded side) and carrying its fine relief (lip
+    // lines) — the lip's colour and blotches no longer show through.
+    if (uLipCover > 0.001) {
+      float lumF = percL(texture2D(uFrame, vUv).rgb);
+      float lumB = percL(softRGB(uFrame, vUv, 5.0));
+      float relief = clamp(lumF / max(lumB, 0.04), 0.7, 1.3);
+      relief = mix(relief, min(relief, 1.0), edgeBand);     // no white-roll ridge
+      // Large-scale lighting only (6 + 14 px blur — natural blotches are
+      // smaller than the lip's volume shading), relative to the face's
+      // exposure (lips sit ~15 % darker than skin), with its contrast eased so
+      // leftover blotches fade while the volume stays.
+      float lumBig = 0.5 * (percL(softRGB(uFrame, vUv, 6.0)) + percL(softRGB(uFrame, vUv, 14.0)));
+      float light = clamp(1.0 + 0.65 * (lumBig / max(0.85 * uFaceLum, 0.08) - 1.0), 0.5, 1.25);
+      vec3 pig = clamp(uLipShade * light * relief, 0.0, 1.0);
+      mk = mix(mk, pig, uLipCover);
+    }
 
     // Ombre: edges are slightly deeper/cooler than centre (natural lip anatomy)
-    float edgeFactor = 1.0 - smoothstep(0.04, 0.82, lipA);
+    // ── Product texture (glitter, metallic, cream…) anchored to the LIPS ──
+    // Coordinates live in the mouth's own frame (corner→corner axis, scaled
+    // by mouth width), so the pattern moves / turns / scales with the lips.
+    // The texture gives colour and pattern; lighting comes from the lip
+    // itself — large-scale volume and fine relief (lip lines) — so the lips'
+    // relief stays visible through it.
+    if (uLipTexOn > 0.5) {
+      vec2 pI = vec2(vUv.x / uTexel.x, (1.0 - vUv.y) / uTexel.y);   // image px, y down
+      vec2 dd = pI - uLipO;
+      vec2 st = vec2(dot(dd, uLipAx) / max(dot(uLipAx, uLipAx), 1.0),
+                     dot(dd, uLipAy) / max(dot(uLipAy, uLipAy), 1.0));
+      vec2 tc = fract(st * uLipTexScale + 0.5);
+      vec3 tcol = texture2D(uLipTex, vec2(tc.x, 1.0 - tc.y)).rgb;
+      float tF = percL(texture2D(uFrame, vUv).rgb);
+      float tB = percL(softRGB(uFrame, vUv, 5.0));
+      float tRel = clamp(tF / max(tB, 0.04), 0.65, 1.35);           // lip lines
+      tRel = mix(tRel, min(tRel, 1.0), edgeBand);
+      float tBig = 0.5 * (percL(softRGB(uFrame, vUv, 6.0)) + percL(softRGB(uFrame, vUv, 14.0)));
+      float tLight = clamp(1.0 + 0.65 * (tBig / max(0.85 * uFaceLum, 0.08) - 1.0), 0.5, 1.25); // volume
+      vec3 texLit = clamp(tcol * tLight * tRel, 0.0, 1.0);
+      mk = mix(mk, texLit, uLipTexMix);
+    }
+    // Deeper tone just INSIDE the lip edge only. With a soft lip→skin fade the
+    // low-alpha zone lies on the skin; darkening it drew a dark halo above the
+    // upper lip.
+    float edgeFactor = (1.0 - smoothstep(0.6, 0.95, lipA)) * smoothstep(0.4, 0.62, lipA);
     vec3 deepShade = blendMultiply(mk, uLipShade * 0.85 + 0.05);
     mk = mix(mk, deepShade, edgeFactor * 0.38);
 
@@ -722,7 +776,7 @@ function makeTex() {
 function initGL() {
   if (gl && prog) return true;
   // Reset on retry — previous attempt may have set gl but failed before prog was ready
-  gl = null; prog = null; canvas = null; tex = {}; loc = {};
+  gl = null; prog = null; canvas = null; tex = {}; loc = {}; lipTexObj = null; lastLipTexSrc = null;
   canvas = document.createElement('canvas');
   gl = canvas.getContext('webgl', { premultipliedAlpha: false, preserveDrawingBuffer: true })
      || canvas.getContext('experimental-webgl');
@@ -751,7 +805,7 @@ function initGL() {
                    'uFndShade','uBlushShade','uHairShade','uEyeShade','uLipShade','uWB','uLipLinerShade','uEyelinerShade','uBrowShade','uBronzerShade','uUnderEyeShade',
                    'uEyeCreaseShade','uEyeHighlightShade',
                    'uFndInt','uBlushInt','uHairInt','uEyeInt','uLashInt','uLipInt',
-                   'uContourInt','uHighlightInt','uUnderEyeInt','uBronzerInt','uNoseContourInt','uLipLinerInt','uEyelinerInt','uBrowInt','uLipPx',
+                   'uContourInt','uHighlightInt','uUnderEyeInt','uBronzerInt','uNoseContourInt','uLipLinerInt','uEyelinerInt','uBrowInt','uLipPx','uLipCover','uLipTex','uLipTexOn','uLipTexMix','uLipTexScale','uLipO','uLipAx','uLipAy',
                    'uLight','uFinish','uFaceLum','uCinema','uGrain','uGlamour','uLightBal','uFaceYaw','uEyeFinish','uEyeCreaseFinish','uEyeHighlightFinish','uCutCrease','uFndFinish','uBlushFinish','uTexel']) {
     loc[u] = gl.getUniformLocation(prog, u);
   }
@@ -789,6 +843,7 @@ function upload(unit, t, src) {
  * glamour:0..1 (luxury beauty grade — glow, split tone, S-curve) } — each region optional.
  */
 export function renderMakeupGL(source, w, h, landmarks, opts) {
+  setActiveLipSeg(opts && opts.lipSeg);   // masks cut the lips along the lipstick's own outline
   if (!glAvailable() || !initGL()) return null;
   if (!landmarks || landmarks.length < 468) return null;
   const { foundation, underEye, contour, blush, highlight, bronzer, noseContour, hair, eyes, lashes, lips, lipLiner, eyeliner, brows, wb, refinedOuter, lipSeg } = opts;
@@ -822,7 +877,7 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
 
   if (changed) {
     const sculptOn = !!(contour || highlight || underEye);
-    upload(1, tex.fnd, foundation ? buildFaceMask(w, h, landmarks) : blank());
+    upload(1, tex.fnd, foundation ? buildFaceMask(w, h, landmarks, { lipSeg }) : blank());
     upload(2, tex.blush, blush ? buildBlushMask(w, h, landmarks) : blank());
     upload(3, tex.hair, (hair && hair.mask) ? hair.mask : blank());
     upload(4, tex.eye, eyes ? buildEyeMask(w, h, landmarks) : blank());
@@ -877,6 +932,33 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
   gl.uniform1i(loc.uLip, 6); gl.uniform1i(loc.uSculpt, 7);
   gl.uniform1i(loc.uLipLiner, 8); gl.uniform1i(loc.uEyeliner, 9); gl.uniform1i(loc.uBrows, 10);
   gl.uniform1i(loc.uExtra, 11);
+  // Lip product texture (anchored to the mouth frame; see shader).
+  const lt = lips && lips.texture;
+  const ltReady = !!(lt && (lt.naturalWidth || lt.videoWidth || lt.width) && lt.complete !== false);
+  if (ltReady) {
+    // makeTex binds on the ACTIVE unit — select ours first, or it would
+    // replace whatever is bound there (e.g. the camera frame on unit 0).
+    if (!lipTexObj) { gl.activeTexture(gl.TEXTURE0 + 12); lipTexObj = makeTex(); }
+    if (lt !== lastLipTexSrc) {
+      gl.activeTexture(gl.TEXTURE0 + 12);
+      gl.bindTexture(gl.TEXTURE_2D, lipTexObj);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, lt);
+      lastLipTexSrc = lt;
+    }
+    gl.activeTexture(gl.TEXTURE0 + 12);
+    gl.bindTexture(gl.TEXTURE_2D, lipTexObj);
+    const La = landmarks[61], Ra = landmarks[291];
+    const ox = (La.x + Ra.x) / 2 * w, oy = (La.y + Ra.y) / 2 * h;
+    const ax = (Ra.x - La.x) * w, ay = (Ra.y - La.y) * h;
+    gl.uniform2f(loc.uLipO, ox, oy);
+    gl.uniform2f(loc.uLipAx, ax, ay);
+    gl.uniform2f(loc.uLipAy, -ay, ax);
+  }
+  gl.uniform1i(loc.uLipTex, 12);
+  gl.uniform1f(loc.uLipTexOn, ltReady ? 1 : 0);
+  gl.uniform1f(loc.uLipTexMix, ltReady ? Math.max(0, Math.min(1, lips.textureMix ?? 0.7)) : 0);
+  gl.uniform1f(loc.uLipTexScale, ltReady ? Math.max(0.2, lips.textureScale ?? 2.0) : 1);
+
 
   gl.uniform3fv(loc.uFndShade, hexToRgb(foundation ? foundation.color : '#000000'));
   gl.uniform3fv(loc.uBlushShade, hexToRgb(blush ? blush.color : '#000000'));
@@ -915,6 +997,7 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
   gl.uniform1f(loc.uUnderEyeInt, underEye ? (underEye.intensity ?? 0.4) : 0);
   gl.uniform1f(loc.uLipLinerInt, lipLiner ? (lipLiner.intensity ?? 0.8) : 0);
   gl.uniform1f(loc.uLipPx, lipSeg && lipSeg.t ? lipSeg.t : 20.0);
+  gl.uniform1f(loc.uLipCover, lips ? Math.max(0, Math.min(1, lips.coverage ?? 0.6)) : 0);
   gl.uniform1f(loc.uEyelinerInt, eyeliner ? (eyeliner.intensity ?? 0.9) * blinkGate : 0);
   gl.uniform1f(loc.uBrowInt, brows ? (brows.intensity ?? 0.6) : 0);
 

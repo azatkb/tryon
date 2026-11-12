@@ -4,7 +4,8 @@ import {
   drawLandmarks, setFeatureProtect, setRegionEdge,
   buildFaceMask, buildBlushMask, buildEyeMask, buildLashMask,
   buildContourMask, buildHighlightMask, buildUnderEyeMask, buildLipMask,
-  buildLipLinerMask, buildEyelinerMask, buildBrowMask, getLastLipSeg, resetLipSeg, setLipRoughness, setLipSymmetry, setLipSoftness,
+  buildLipLinerMask, buildEyelinerMask, buildBrowMask, getLastLipSeg, resetLipSeg, setLipRoughness, setLipSymmetry, setLipSoftness, setLipOpenDetect, getLipModel,
+  UV_PRODUCTS, loadUVMasks, reloadUVMasks, uvMaskCanvas, setUVMaskImage, getUVMaskImage, setUVMasksEnabled, bakeUVMasks, uvTemplate, canvasToPngBlob,
 } from './tryon/index.js';
 import { createMp4Writer, downloadBlob, mp4WriterSupported } from './videoWriter.js';
 import { refineLipContour, drawRefinedContour } from './tryon/lipContourRefine.js';
@@ -40,12 +41,51 @@ function layerFor(region, hex, finish) {
   }
 }
 
+// Scene light gizmo, top-right corner (out of the way of the face): a disc
+// seen from the camera — the dot is where the key light sits (centre = light
+// on the camera axis, edge = from the side; hollow dot = light from behind
+// the camera plane is impossible, so it's always filled), plus the numbers.
+function drawLight(ctx, w, h, lms, L, mirrored = false) {
+  // the camera preview is mirrored by CSS: draw un-mirrored, in screen terms
+  const x = mirrored ? -L.dir[0] : L.dir[0], y = L.dir[1];
+  const az = mirrored ? -L.azimuth : L.azimuth;
+  const R = Math.max(18, Math.round(Math.min(w, h) * 0.045));
+  const pad = Math.round(R * 0.5);
+  const cx = w - pad - R, cy = pad + R;
+  ctx.save();
+  if (mirrored) { ctx.translate(w, 0); ctx.scale(-1, 1); }
+  ctx.globalAlpha = 0.85;
+  ctx.fillStyle = 'rgba(0,0,0,.45)';
+  ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,.35)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx - R, cy); ctx.lineTo(cx + R, cy); ctx.moveTo(cx, cy - R); ctx.lineTo(cx, cy + R); ctx.stroke();
+  // light position on the disc (orthographic view of the light direction)
+  const lx = cx + x * R, ly = cy + y * R;
+  ctx.globalAlpha = 0.4 + 0.6 * Math.min(1, L.conf ?? 1);
+  ctx.strokeStyle = '#ffd54a'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(lx, ly); ctx.stroke();
+  ctx.fillStyle = '#ffd54a';
+  ctx.beginPath(); ctx.arc(lx, ly, Math.max(3, R * 0.16), 0, Math.PI * 2); ctx.fill();
+  ctx.globalAlpha = 0.9;
+  const fs = Math.max(10, Math.round(R * 0.36));
+  ctx.font = `${fs}px sans-serif`; ctx.textAlign = 'right'; ctx.fillStyle = '#fff';
+  ctx.fillText(`az ${Math.round(az)}°  el ${Math.round(L.elevation)}°`, w - pad, cy + R + fs + 4);
+  ctx.fillText(`amb ${Math.round(L.ambientShare * 100)}%  conf ${Math.round((L.conf ?? 0) * 100)}%`, w - pad, cy + R + 2 * fs + 7);
+  ctx.restore();
+}
+
 // Which mask builder draws a region (for the border overlay).
 const MASK_BUILDERS = {
   foundation: buildFaceMask, blush: buildBlushMask, eyes: buildEyeMask,
   mascara: buildLashMask, contour: buildContourMask, highlight: buildHighlightMask,
   concealer: buildUnderEyeMask, lips: buildLipMask,
   lipLiner: buildLipLinerMask, eyeliner: buildEyelinerMask, brows: buildBrowMask,
+};
+// Region (border overlay) -> UV mask key.
+const UV_REGION = {
+  foundation: 'foundation', blush: 'blush', eyes: 'eyes', contour: 'contour', highlight: 'highlight',
+  concealer: 'underEye', eyeliner: 'eyeliner', brows: 'brows',
 };
 const REGION_COLOR = {
   foundation: '#49C0FF', blush: '#FF5AA0', eyes: '#B98CFF', mascara: '#FFC84A',
@@ -92,6 +132,7 @@ export default function DebugApp() {
   const [useGL, setUseGL] = useState(glAvailable());
   const [borders, setBorders] = useState(false);
   const [showPoints, setShowPoints] = useState(false);
+  const [showLight, setShowLight] = useState(true);
   const [protect, setProtect] = useState(true);
   const [tune, setTune] = useState(() => JSON.parse(JSON.stringify(TUNE_DEFAULT)));
   const [panelOpen, setPanelOpen] = useState(true);
@@ -135,13 +176,32 @@ export default function DebugApp() {
     return s;
   });
   const stateRef = useRef({});
-  stateRef.current = { enabled, useGL, borders, showPoints, tune, lipContour, colorSeg };
+  stateRef.current = { enabled, useGL, borders, showPoints, showLight, tune, lipContour, colorSeg };
 
   // feature protection is a module-level flag in the renderer
   useEffect(() => { setFeatureProtect(protect); }, [protect]);
   useEffect(() => { setLipRoughness(lipRough); }, [lipRough]);
   useEffect(() => { setLipSymmetry(lipSym); }, [lipSym]);
   useEffect(() => { setLipSoftness(lipSoft); }, [lipSoft]);
+  const [openDet, setOpenDet] = useState('mp');
+  const openDetRef = useRef('mp'); openDetRef.current = openDet;
+  useEffect(() => { setLipOpenDetect(openDet); }, [openDet]);
+
+  // ── UV masks ──
+  const [uvOn, setUvOn] = useState(true);
+  const [uvKey, setUvKey] = useState('foundation');
+  const [uvLoaded, setUvLoaded] = useState(0);
+  const uvCount = () => setUvLoaded(UV_PRODUCTS.filter((k) => getUVMaskImage(k)).length);
+  useEffect(() => { setUVMasksEnabled(uvOn); }, [uvOn]);
+  useEffect(() => { loadUVMasks().then(uvCount); }, []);
+  const uvBake = async (download) => {
+    const maps = bakeUVMasks({ size: 512 });
+    for (const [k, c] of Object.entries(maps)) {
+      setUVMaskImage(k, c);
+      if (download) { downloadBlob(await canvasToPngBlob(c), `${k}.png`); await new Promise((r) => setTimeout(r, 250)); }
+    }
+    uvCount();
+  };
 
   // push edge-hardness sliders into the renderer's CFG blur values
   useEffect(() => {
@@ -202,9 +262,11 @@ export default function DebugApp() {
       if (!build) continue;
       // Outline the mask the renderer ACTUALLY used for lips / liner.
       const seg = stateRef.current.colorSeg ? getLastLipSeg() : null;
-      const mask = (region === 'lips' || region === 'lipLiner')
+      // UV products: outline the UV mask on the mesh (what the renderer draws).
+      const uvMask = UV_REGION[region] ? uvMaskCanvas(UV_REGION[region], lms, w, h) : null;
+      const mask = uvMask || ((region === 'lips' || region === 'lipLiner')
         ? build(w, h, lms, { lipSeg: seg })
-        : build(w, h, lms);
+        : build(w, h, lms));
 
       // Draw mask into t, tinted with region color
       tx.clearRect(0, 0, w, h);
@@ -236,7 +298,7 @@ export default function DebugApp() {
   // All this workbench does is blit the processed frame and draw its overlays.
   const scratchRef = useRef(null);
   const debugContourBufRef = useRef([]);
-  const onFrame = useCallback(({ processed, source, landmarks, w, h }) => {
+  const onFrame = useCallback(({ processed, source, landmarks, w, h, light }) => {
     const cv = canvasRef.current;
     if (!cv) return;
     if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
@@ -251,12 +313,13 @@ export default function DebugApp() {
     const si = segInfoRef.current;
     if (si) {
       const sg = stateRef.current.colorSeg ? getLastLipSeg() : null;
-      si.textContent = sg ? `d'=${sg.dprime.toFixed(2)} conf=${Math.round(sg.conf * 100)}%` : '';
+      si.textContent = sg ? `d'=${sg.dprime.toFixed(2)} conf=${Math.round(sg.conf * 100)}% · mouth ${sg.open ? 'open ' + Math.round((sg.openRatio || 0) * 100) + '%' : 'closed'}${openDetRef.current === 'predict' ? (getLipModel()?.n >= 8 ? ' · model ✓' : ' · model ' + (getLipModel()?.n || 0) + '/8 (keep mouth closed)') : ''}` : '';
       si.style.color = !sg ? '#888' : sg.conf > 0.7 ? '#4caf50' : sg.conf > 0.3 ? '#ff9800' : '#f44336';
     }
     if (!landmarks) { capture(); return; }
     if (stateRef.current.borders) drawBorders(ctx, w, h, landmarks);
     if (stateRef.current.showPoints) drawLandmarks(ctx, w, h, landmarks);
+    if (stateRef.current.showLight && light) drawLight(ctx, w, h, landmarks, light, !videoModeRef.current);
 
     // Lip contour refinement — sample brightness from the SOURCE frame
     if (stateRef.current.lipContour && source) {
@@ -644,6 +707,7 @@ export default function DebugApp() {
           </div>
           <label className="dbg-row"><input type="checkbox" checked={borders} onChange={(e) => setBorders(e.target.checked)} /> Show mask borders</label>
           <label className="dbg-row"><input type="checkbox" checked={showPoints} onChange={(e) => setShowPoints(e.target.checked)} /> Mesh points</label>
+          <label className="dbg-row"><input type="checkbox" checked={showLight} onChange={(e) => setShowLight(e.target.checked)} /> Scene light (direction)</label>
           <label className="dbg-row"><input type="checkbox" checked={colorSeg} onChange={(e) => setColorSeg(e.target.checked)} /> Lip color seg <span ref={segInfoRef} style={{ marginLeft: 6, fontSize: '.68rem' }} /></label>
           {colorSeg && (
             <label className="dbg-row" style={{ paddingLeft: 18 }}>
@@ -666,12 +730,42 @@ export default function DebugApp() {
               {' '}{lipSoft.toFixed(2)}
             </label>
           )}
+          <label className="dbg-row" style={{ paddingLeft: 18 }}>
+            Inner lip <select value={openDet} onChange={(e) => setOpenDet(e.target.value)} style={{ fontSize: '.68rem' }}>
+              <option value="mp">MediaPipe</option>
+              <option value="predict">Predict (thickness)</option>
+              <option value="pixel">Pixel (exp.)</option>
+            </select>
+          </label>
           <label className="dbg-row"><input type="checkbox" checked={lipContour} onChange={(e) => setLipContour(e.target.checked)} /> Lip contour refine</label>
           <label className="dbg-row"><input type="checkbox" checked={protect} onChange={(e) => setProtect(e.target.checked)} /> Protect features (nose/eyes/lips/brows)</label>
           <label className="dbg-row"><input type="checkbox" checked={useGL} disabled={!glAvailable()} onChange={(e) => setUseGL(e.target.checked)} /> WebGL render</label>
           <label className="dbg-row" style={{marginTop:6}}>
             Cinema <input type="range" min="0" max="1" step="0.01" value={cinema} onChange={(e) => setCinema(+e.target.value)} style={{width:90,verticalAlign:'middle'}} /> {cinema.toFixed(2)}
           </label>
+          <label className="dbg-row"><input type="checkbox" checked={uvOn} onChange={(e) => setUvOn(e.target.checked)} /> UV masks ({uvLoaded}/{UV_PRODUCTS.length})</label>
+          <div className="dbg-row" style={{ gap: 6, flexWrap: 'wrap', paddingLeft: 18 }}>
+            <button style={{ fontSize: '.68rem', padding: '0 6px' }} onClick={() => reloadUVMasks().then(uvCount)} title="Re-read public/uv-masks/*.png (after replacing files)">Reload</button>
+            <button style={{ fontSize: '.68rem', padding: '0 6px' }} onClick={() => uvBake(false)} title="Bake today's procedural masks into UV and use them">Bake</button>
+            <button style={{ fontSize: '.68rem', padding: '0 6px' }} onClick={() => uvBake(true)} title="Bake and download every UV PNG">Bake ⬇</button>
+            <button style={{ fontSize: '.68rem', padding: '0 6px' }} onClick={async () => downloadBlob(await canvasToPngBlob(uvTemplate(1024)), 'uv_template.png')}>Template ⬇</button>
+          </div>
+          <div className="dbg-row" style={{ gap: 6, paddingLeft: 18 }}>
+            <select value={uvKey} onChange={(e) => setUvKey(e.target.value)} style={{ fontSize: '.68rem' }}>
+              {UV_PRODUCTS.map((k) => <option key={k} value={k}>{k}{getUVMaskImage(k) ? ' ✓' : ''}</option>)}
+            </select>
+            <label style={{ cursor: 'pointer', textDecoration: 'underline', fontSize: '.72rem' }}>
+              Import PNG
+              <input type="file" accept="image/*" style={{ display: 'none' }} onChange={(e) => {
+                const f = e.target.files?.[0]; if (!f) return;
+                const img = new Image();
+                img.onload = () => { setUVMaskImage(uvKey, img); uvCount(); };
+                img.src = URL.createObjectURL(f);
+                e.target.value = '';
+              }} />
+            </label>
+            {getUVMaskImage(uvKey) && <button onClick={() => { setUVMaskImage(uvKey, null); uvCount(); }} style={{ fontSize: '.68rem', padding: '0 6px' }} title="Back to the procedural mask">✕</button>}
+          </div>
           <div className="dbg-row" style={{ gap: 6 }}>
             <label style={{ cursor: 'pointer', textDecoration: 'underline' }}>
               {lipTex ? 'Lip texture ✓' : 'Lip texture…'}

@@ -108,6 +108,75 @@ export function smoothLandmarks(cur, smoothed, motion, opts = {}) {
 }
 
 /**
+ * One Euro landmark filter (Casiez et al. 2012), time-based.
+ *
+ * Each point is low-passed with a cutoff that rises with its speed: a still
+ * face gets heavy smoothing (jitter gone), a moving one follows almost raw (no
+ * lag). Speed is max(point speed, whole-face speed): a head turn moves every
+ * point with the SAME cutoff, so the mesh shape is never distorted by points
+ * smoothed differently, while a blink or a lip purse still opens the cutoff
+ * for just those points. Unlike the per-frame EMA it is frame-rate independent.
+ *
+ *   const f = createLandmarkFilter();  f(raw, timeMs) -> smoothed landmarks
+ *   f.reset()
+ *
+ * Units: landmark coordinates (normalised), speeds in units / second.
+ */
+export function createLandmarkFilter(opts = {}) {
+  const minCut = opts.minCutoff ?? 1.2;     // Hz at rest (lower = steadier)
+  const beta = opts.beta ?? 80;             // cutoff gain per unit/s of speed
+  const dCut = opts.dCutoff ?? 1.0;         // speed estimate smoothing
+  const fastCut = opts.fastMinCutoff ?? 2.5;   // lips / eyelids react sooner
+  const lashCut = opts.lashMinCutoff ?? 6.0;   // lash line: almost raw
+  let x = null, dx = null, tPrev = 0, n = 0;
+  const alpha = (cut, dt) => { const r = 2 * Math.PI * cut * dt; return r / (r + 1); };
+  const out = () => {
+    const o = new Array(n);
+    for (let i = 0; i < n; i++) o[i] = { x: x[3 * i], y: x[3 * i + 1], z: x[3 * i + 2] };
+    return o;
+  };
+  function filter(cur, tMs) {
+    if (!cur) return cur;
+    if (!x || n !== cur.length || tMs < tPrev - 1 || tMs - tPrev > 1000) {
+      n = cur.length; x = new Float32Array(n * 3); dx = new Float32Array(n * 3);
+      for (let i = 0; i < n; i++) { x[3 * i] = cur[i].x; x[3 * i + 1] = cur[i].y; x[3 * i + 2] = cur[i].z || 0; }
+      tPrev = tMs;
+      return out();
+    }
+    if (tMs - tPrev < 0.5) return out();     // same frame again
+    const dt = (tMs - tPrev) / 1000;
+    tPrev = tMs;
+    const ad = alpha(dCut, dt);
+    const speed = new Float32Array(n);
+    let g = 0;
+    for (let i = 0; i < n; i++) {
+      const c = cur[i];
+      let sp = 0;
+      for (let k = 0; k < 3; k++) {
+        const raw = k === 0 ? c.x : k === 1 ? c.y : (c.z || 0);
+        const j = 3 * i + k;
+        dx[j] += ad * ((raw - x[j]) / dt - dx[j]);
+        sp += dx[j] * dx[j];
+      }
+      speed[i] = Math.sqrt(sp);
+      g += speed[i];
+    }
+    g /= n;
+    for (let i = 0; i < n; i++) {
+      const base = LASH_SET.has(i) ? lashCut : FAST_SET.has(i) ? fastCut : minCut;
+      const a = alpha(base + beta * Math.max(g, speed[i]), dt);
+      const c = cur[i];
+      x[3 * i] += a * (c.x - x[3 * i]);
+      x[3 * i + 1] += a * (c.y - x[3 * i + 1]);
+      x[3 * i + 2] += a * ((c.z || 0) - x[3 * i + 2]);
+    }
+    return out();
+  }
+  filter.reset = () => { x = null; };
+  return filter;
+}
+
+/**
  * Extrapolate landmarks along their velocity so the mask keeps up with motion
  * instead of trailing one detection behind. prev/cur are landmark arrays.
  */

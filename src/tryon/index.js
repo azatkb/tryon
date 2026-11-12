@@ -42,10 +42,20 @@ export {
 } from './lipRenderer.js';
 
 // Per-pixel lip segmentation from frame colours (lipstick + liner share it).
-export { segmentLipsColor, getLastLipSeg, resetLipSeg, setLipRoughness, getLipRoughness, setLipSymmetry, setLipSoftness } from './lipColorSeg.js';
+export { segmentLipsColor, getLastLipSeg, resetLipSeg, setLipRoughness, getLipRoughness, setLipSymmetry, setLipSoftness, setLipOpenDetect, getLipOpenDetect, getLipModel } from './lipColorSeg.js';
 
 // Lip contour refinement (pixel-based brightness edge detection).
 export { refineLipContour, drawRefinedContour } from './lipContourRefine.js';
 
 // The model loader, for hosts that drive detection themselves.
 export { useFaceLandmarker } from './useFaceLandmarker.js';
+
+// UV-space face masks (MediaPipe canonical UV). PNGs in /uv-masks/<key>.png.
+export {
+  UV_PRODUCTS, loadUVMasks, reloadUVMasks, uvMaskCanvas, setUVMaskImage, getUVMaskImage, setUVMasksEnabled, uvMasksEnabled, uvHas,
+} from './uv/uvMasks.js';
+export { bakeUVMasks, uvTemplate, canvasToPngBlob, canonicalLandmarks } from './uv/bakeUV.js';
+export { UV as FACE_UV, TRI as FACE_TRI } from './uv/faceMeshUV.js';
+// Scene light estimated from the face's own shading (mesh normals vs skin brightness).
+export { estimateFaceLight, createLightTracker } from './uv/faceLight.js';
+export { meshNormals } from './uv/uvMasks.js';

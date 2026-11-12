@@ -21,12 +21,14 @@ import { renderMakeup } from './lipRenderer.js';
 import { renderMakeupGL, glAvailable } from './webglLips.js';
 import { renderMakeupMultiPass, multiPassAvailable } from './webglMultiPass.js';
 import {
-  smoothLandmarks, predictLandmarks, estimateFaceLum, estimateLightBalance, estimateFaceYaw, faceMotion,
+  smoothLandmarks, createLandmarkFilter, predictLandmarks, estimateFaceLum, estimateLightBalance, estimateFaceYaw, faceMotion,
   detectBlink,
 } from './faceMetrics.js';
 import { refineLipContour } from './lipContourRefine.js';
 import { LIPS_OUTER } from './lips.js';
 import { segmentLipsColor, resetLipSeg } from './lipColorSeg.js';
+import { loadUVMasks } from './uv/uvMasks.js';
+import { createLightTracker } from './uv/faceLight.js';
 
 export const DEFAULT_RESOLUTION = { width: 1920, height: 1080 };
 
@@ -43,7 +45,7 @@ export function useTryOn(options = {}) {
     source = 'camera',        // 'camera' | 'element' | 'video'
     sourceEl = null,          // required when source === 'element' (an <img>/<video>)
     renderer = 'auto',        // 'auto' | 'gl' | 'multipass' | 'canvas'
-    smoothing = {},           // { alpha, maxAlpha, gain, predict }
+    smoothing = {},           // { mode: 'oneEuro'|'ema', minCutoff, beta, … | alpha, maxAlpha, gain; predict }
     resolution = DEFAULT_RESOLUTION,
     lumInterval = 20,         // frames between exposure re-measurements
     redrawEveryTick = false,  // true = draw on every rAF even without a new frame
@@ -62,7 +64,7 @@ export function useTryOn(options = {}) {
   // Live mirrors of the props so the rAF loop never reads a stale closure.
   const cfgRef = useRef({});
   cfgRef.current = {
-    layers, getLayers, renderer, smoothing, lumInterval,
+    layers, getLayers, renderer, smoothing, lumInterval, source,
     redrawEveryTick, syncToDetection, contourRefine, lipColorSeg, onFrame,
   };
 
@@ -79,6 +81,9 @@ export function useTryOn(options = {}) {
   const refineBlendRef = useRef(0);       // 0 = pure MP, 1 = pure refined (smooth ramp)
   const refineTickRef = useRef(0);        // frame counter for throttling refine
   const smoothedRef = useRef(null);
+  const euroRef = useRef(null);
+  const lightRef = useRef(null);         // scene light tracker         // One Euro landmark filter (default smoothing)
+  const euroKeyRef = useRef('');
   const prevFullRef = useRef(null);
   const prevMotionRef = useRef(null);
   const frameRef = useRef(0);
@@ -116,7 +121,9 @@ export function useTryOn(options = {}) {
       // data (a segmentation mask that lands between renders, say) — a plain
       // `layers` object can only update when React re-renders.
       const live = cfg.getLayers ? cfg.getLayers(metricsRef.current) : cfg.layers;
-      const withLum = { ...live, faceLum: metricsRef.current.faceLum, lightBal: metricsRef.current.lightBal, faceYaw: metricsRef.current.faceYaw, motion: metricsRef.current.motion, blinkL: metricsRef.current.blinkL, blinkR: metricsRef.current.blinkR };
+      const withLum = { ...live, faceLum: metricsRef.current.faceLum, lightBal: metricsRef.current.lightBal, faceYaw: metricsRef.current.faceYaw, light: metricsRef.current.light, motion: metricsRef.current.motion, blinkL: metricsRef.current.blinkL, blinkR: metricsRef.current.blinkR,
+        // frame clock for motion blur: media time for video files (offline export = real-time look)
+        frameTime: cfg.source === 'video' && typeof src.currentTime === 'number' ? src.currentTime * 1000 : performance.now() };
 
       // Lip contour refinement — async, throttled, with smooth blend.
       // Refine runs every ~4 frames in background. Result blended with MP
@@ -211,6 +218,7 @@ export function useTryOn(options = {}) {
       faceLum: metricsRef.current.faceLum,
       lightBal: metricsRef.current.lightBal,
       faceYaw: metricsRef.current.faceYaw,
+      light: metricsRef.current.light,
       motion: metricsRef.current.motion,
       moving: metricsRef.current.moving,
     });
@@ -240,7 +248,18 @@ export function useTryOn(options = {}) {
     m.motion = m.motion * 0.35 + motion * 0.65;
     m.moving = m.motion > MOVE_THRESH;
 
-    const smoothed = smoothLandmarks(raw, smoothedRef.current, m.motion, cfg.smoothing);
+    let smoothed;
+    if (cfg.smoothing.mode === 'ema') {
+      smoothed = smoothLandmarks(raw, smoothedRef.current, m.motion, cfg.smoothing);
+    } else {
+      // One Euro: time-based. Video files use media time so offline rendering
+      // (seek per frame, any speed) smooths exactly like real-time playback.
+      const sm = cfg.smoothing;
+      const key = `${sm.minCutoff}|${sm.beta}|${sm.dCutoff}|${sm.fastMinCutoff}|${sm.lashMinCutoff}`;
+      if (!euroRef.current || euroKeyRef.current !== key) { euroRef.current = createLandmarkFilter(sm); euroKeyRef.current = key; }
+      const t = cfg.source === 'video' && typeof src.currentTime === 'number' ? src.currentTime * 1000 : performance.now();
+      smoothed = euroRef.current(raw, t);
+    }
     smoothedRef.current = smoothed;
 
     // Prediction only exists to cover the gap between the frame detection ran
@@ -264,6 +283,10 @@ export function useTryOn(options = {}) {
       const bal = estimateLightBalance(src, raw);
       if (bal != null) m.lightBal = m.lightBal * 0.7 + bal * 0.3;
     }
+    // Scene light: direction / contrast fitted from the face's own shading
+    // (mesh normals vs skin brightness). Throttled + eased inside the tracker.
+    if (!lightRef.current) lightRef.current = createLightTracker();
+    m.light = lightRef.current(src, lms);
     // Yaw is cheap (no canvas sampling) — measure every frame for responsiveness
     const yaw = estimateFaceYaw(raw);
     if (yaw != null) m.faceYaw = m.faceYaw * 0.6 + yaw * 0.4;
@@ -281,7 +304,9 @@ export function useTryOn(options = {}) {
   }, [landmarkerRef]);
 
   // Switching source (camera / video / photo) starts the lip mask from scratch.
-  useEffect(() => { resetLipSeg(); }, [source, sourceEl]);
+  useEffect(() => { resetLipSeg(); euroRef.current?.reset(); lightRef.current?.reset(); }, [source, sourceEl]);
+  // UV face masks — products without a PNG keep the procedural mask.
+  useEffect(() => { loadUVMasks(); }, []);
 
   // ---- camera lifecycle + render loop ----
   useEffect(() => {

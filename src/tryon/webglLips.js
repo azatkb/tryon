@@ -14,6 +14,10 @@ import { initLipMesh, renderLipMesh, lipMesh3DAvailable } from './lipMesh3D.js';
 import { setActiveLipSeg, buildLipMask, buildEyeMask, buildFaceMask, buildLashMask, buildBlushMask, buildSculptPack,
          buildExtraPack, buildLipLinerMask, buildEyelinerMask, buildBrowMask, CFG } from './lipRenderer.js';
 import { lash3dAvailable, renderLashes3D } from './lashRenderer3D.js';
+import { uvJobs, uvJobsSig, uvRenderer, uvTargetSize } from './uv/uvMasks.js';
+
+const UV_UNITS = { fnd: 1, blush: 2, eye: 4, sculpt: 7, eyeliner: 9, brows: 10, extra: 11, light: 13 };
+let uvTex = null, lastUVSig = '', lastLightKey = '';
 
 let gl = null, canvas = null, prog = null, quadBuf = null;
 let tex = {}, loc = {};
@@ -69,10 +73,14 @@ uniform float uFndInt, uBlushInt, uHairInt, uEyeInt, uLashInt, uLipInt;
 uniform float uContourInt, uHighlightInt, uUnderEyeInt, uBronzerInt, uNoseContourInt, uLipLinerInt, uEyelinerInt, uBrowInt;
 uniform float uLipPx, uLipCover;
 uniform sampler2D uLipTex;
+uniform sampler2D uLightTex;   // scene light from the mesh: R diffuse, G specular, B facing
+uniform float uLightOn;
+float sceneSpec() { return uLightOn > 0.5 ? texture2D(uLightTex, vUv).g : 0.0; }
 uniform float uLipTexOn, uLipTexMix, uLipTexScale;
 uniform vec2 uLipO, uLipAx, uLipAy;
 
 uniform float uLight, uFinish, uFaceLum, uCinema, uGrain, uGlamour, uLightBal, uFaceYaw;
+uniform float uFaceCx;   // face centre x (0..1, nose bridge) — which side of the FACE a pixel is on
 uniform float uEyeFinish;  // 0=matte, 1=satin, 2=shimmer
 uniform float uEyeCreaseFinish, uEyeHighlightFinish;  // per-zone finish
 uniform float uCutCrease;  // 0=smooth blend, 1=hard cut crease with concealer line
@@ -188,9 +196,15 @@ vec3 sssBlend(vec3 base, vec3 pigment, float strength){
 }
 
 void main(){
-  vec3 outc = clamp(texture2D(uFrame, vUv).rgb * uWB, 0.0, 1.0);
-  vec3 orig = outc;          // preserved for post-processing texture re-injection
-  float skinL = percL(outc);
+  vec3 orig = clamp(texture2D(uFrame, vUv).rgb * uWB, 0.0, 1.0);   // also used for post re-injection
+  // Frequency separation for the face products (foundation … nose contour):
+  // they are applied to the LOW-pass of the skin and the high-pass (pores,
+  // fine hair, sensor grain) goes back on unchanged — product sits ON skin
+  // and carries the camera's own grain instead of an airbrushed fill.
+  vec3 lowF = clamp(softRGB(uFrame, vUv, 2.5) * uWB, 0.0, 1.0);
+  vec3 skinDetail = orig - lowF;
+  vec3 outc = lowF;
+  float skinL = percL(orig);
 
   // ── Exposure normalisation ──────────────────────────────────────────────
   // uFaceLum = EMA mean luminance of the central face patch (0..1).
@@ -228,6 +242,11 @@ void main(){
   // high (0.5+) = full — covers blemishes, only the deepest texture survives.
   float mf = feather(texture2D(uFnd, vUv).a) * uFndInt * skinGate * expI;
   if (mf > 0.001) {
+    // Even out the tone: base makeup pulls local luminance (spots, freckles,
+    // blotches) toward the surrounding skin; large-scale shading is kept.
+    float evenL = 0.5 * (percL(softRGB(uFrame, vUv, 4.0)) + percL(softRGB(uFrame, vUv, 8.0)));
+    evenL = percL(clamp(vec3(evenL) * uWB, 0.0, 1.0));
+    outc = setLum(outc, mix(percL(outc), evenL, smoothstep(0.0, 0.7, mf) * 0.6));
     vec3 tinted = blendColor(outc, uFndShade);
     vec3 texd   = softLight(outc, uFndShade * 0.5 + 0.25);
     // Coverage ramp: sheer → full. Low intensity keeps mostly soft-light
@@ -239,17 +258,20 @@ void main(){
     // cheekbone) simulating light bouncing off a hydrated, cream-textured base.
     if (uFndFinish > 1.5) {
       float dewAmt = (uFndFinish - 1.0) * 0.5;  // 0..0.5
-      float highPt = smoothstep(0.40, 0.75, skinL);
+      // dewy: glow where the real light reflects (scene light), else bright skin
+      float highPt = mix(smoothstep(0.40, 0.75, skinL), clamp(sceneSpec() * 1.4 + 0.25 * smoothstep(0.5, 0.8, skinL), 0.0, 1.0), uLightOn);
       outc += highPt * dewAmt * mf * vec3(0.06, 0.05, 0.03);
     }
     // Natural finish: the tiniest specular lift in highlights
     else if (uFndFinish > 0.5) {
-      float sheen = smoothstep(0.55, 0.85, skinL) * 0.03;
+      float sheen = mix(smoothstep(0.55, 0.85, skinL), clamp(sceneSpec() * 1.2, 0.0, 1.0), uLightOn) * 0.03;
       outc += sheen * mf * vec3(1.0, 0.97, 0.92);
     }
     // Matte/powder: flatten specular slightly
     else {
-      outc = mix(outc, vec3(percL(outc)), smoothstep(0.65, 0.90, skinL) * 0.08 * mf);
+      // matte takes the REAL shine down — where the scene light reflects
+      float shine = smoothstep(0.65, 0.90, skinL) * mix(1.0, 0.4 + 1.6 * sceneSpec(), uLightOn);
+      outc = mix(outc, vec3(percL(outc)), clamp(shine, 0.0, 1.0) * 0.10 * mf);
     }
   }
 
@@ -284,7 +306,7 @@ void main(){
   contourD *= yawFade;
 
   // ── Light-direction fade (existing): real light washes out painted shadow.
-  float side = sign(vUv.x - 0.5);  // –1 left of centre, +1 right
+  float side = clamp((vUv.x - uFaceCx) * 25.0, -1.0, 1.0);   // smooth across the nose, relative to the face (not the image centre)  // –1 left of centre, +1 right
   float sameAsLight = max(0.0, side * uLightBal);  // 0..1, how much this side is lit
   float lightFade = 1.0 - sameAsLight * 0.75;      // keep at least 25% contour
   contourD *= lightFade;
@@ -311,7 +333,7 @@ void main(){
       // within — heavier SSS, less opaque colour overlay.
       outc = sssBlend(outc, uBlushShade, min(mb * 0.85, 1.0));
       // Gentle luminosity where cream catches light
-      float creamSheen = smoothstep(0.45, 0.80, skinL) * 0.04 * mb;
+      float creamSheen = mix(smoothstep(0.45, 0.80, skinL), clamp(sceneSpec() * 1.3, 0.0, 1.0), uLightOn) * 0.05 * mb;
       outc += creamSheen * vec3(1.0, 0.95, 0.88);
     } else {
       // POWDER BLUSH: sits ON skin, more matte deposit, original SSS blend.
@@ -330,7 +352,7 @@ void main(){
     // Wide gates: a narrow smoothstep over face luminance shows up as a banding
     // ring on the cheekbone, so both ramps are stretched well past the data.
     float warmGate  = smoothstep(0.12, 0.72, lum);   // warm glow in mid-bright
-    float specGate  = smoothstep(0.48, 0.96, lum);   // specular only where very bright
+    float specGate  = mix(smoothstep(0.48, 0.96, lum), clamp(sceneSpec() * 1.6 + 0.3 * smoothstep(0.6, 0.95, lum), 0.0, 1.0), uLightOn);   // specular only where very bright
     // Warm champagne base glow
     vec3 warmGlow  = outc + mhi * warmGate * vec3(0.12, 0.09, 0.04) * 0.9;
     // Specular peak: near-white shimmer at the brightest points
@@ -369,6 +391,18 @@ void main(){
     shadow = mix(shadow, vec3(lum * 0.60), 0.18);
     outc = mix(outc, shadow, mnc);
   }
+
+  // ── Skin detail back on top (matte/powder foundation softens pores a bit) ──
+  // Coverage: foundation / concealer hide COLOUR blemishes (redness, spots,
+  // freckle tint) and compress strong local contrast (a spot, a mark), but keep
+  // fine pore texture — like real base makeup. Without this the full detail
+  // layer came back and the real skin "showed through" the product.
+  float cover = clamp(mf + mu, 0.0, 1.0);
+  float dl = dot(skinDetail, vec3(0.299, 0.587, 0.114));
+  vec3 dc = skinDetail - vec3(dl);
+  float dlS = dl / (1.0 + abs(dl) * 14.0 * cover);
+  outc += vec3(dlS) * (1.0 - mf * (uFndFinish < 0.5 ? 0.25 : 0.12)) + dc * (1.0 - 0.85 * cover);
+  vec3 afterBase = outc;   // later layers re-inject detail only for their own change
 
   // ── HAIR ────────────────────────────────────────────────────────────────────
   float mh = feather(texture2D(uHair, vUv).a) * uHairInt * expI;
@@ -455,13 +489,13 @@ void main(){
     if (zoneFin > 1.5) {
       float sparkle = hash21(vUv * 420.0 + fract(uFaceLum * 211.0));
       float sparkleMask = smoothstep(0.72, 0.95, sparkle);
-      float litGate = smoothstep(0.25, 0.65, skinL);
+      float litGate = mix(smoothstep(0.25, 0.65, skinL), clamp(0.25 + sceneSpec() * 2.0, 0.0, 1.0), uLightOn);
       vec3 shimmerCol = mix(vec3(1.0, 0.98, 0.92), zoneShade * 1.5 + 0.5, 0.3);
       outc += sparkleMask * litGate * me * shimmerCol * 0.30;
-      float sheen = smoothstep(0.35, 0.75, skinL) * 0.07;
+      float sheen = mix(smoothstep(0.35, 0.75, skinL), clamp(sceneSpec() * 1.5, 0.0, 1.0), uLightOn) * 0.07;
       outc += sheen * me * vec3(1.0, 0.97, 0.93);
     } else if (zoneFin > 0.5) {
-      float sheen = smoothstep(0.35, 0.78, skinL) * 0.05;
+      float sheen = mix(smoothstep(0.35, 0.78, skinL), clamp(sceneSpec() * 1.3, 0.0, 1.0), uLightOn) * 0.05;
       outc += sheen * me * vec3(1.0, 0.97, 0.93);
     }
   }
@@ -617,11 +651,12 @@ void main(){
       mk = mix(mk, vec3(percL(mk)), smoothstep(0.6, 0.9, lum) * 0.15);
     } else if (uFinish < 1.5) {
       // SATIN: soft-light warmth lifts mid-tones, subtle sheen
-      float sheen = smoothstep(0.5, 0.85, lum) * 0.18;
+      float sheen = mix(smoothstep(0.5, 0.85, lum), clamp(sceneSpec() * 1.4 + 0.3 * smoothstep(0.6, 0.9, lum), 0.0, 1.0), uLightOn) * 0.18;
       mk = mix(mk, mk + sheen, 0.5);
     } else {
       // GLOSS: specular + SSS warmth at the cupid's bow
-      float gloss = smoothstep(0.55, 0.95, lum);
+      // gloss: the highlight sits where the scene light reflects off the lip
+      float gloss = mix(smoothstep(0.55, 0.95, lum), clamp(sceneSpec() * 1.8 + 0.35 * smoothstep(0.65, 0.95, lum), 0.0, 1.0), uLightOn);
       mk += gloss * gloss * vec3(0.40, 0.36, 0.30);
       mk = mix(mk, sssBlend(mk, uLipShade * 1.1, 0.3), 0.25);
     }
@@ -647,7 +682,7 @@ void main(){
   // as a light seam between liner and lipstick; dark creases stay.
   float linZ = max(clamp(mll * 1.6, 0.0, 1.0), edgeBand);
   detail = mix(detail, min(detail, vec3(0.0)), linZ);
-  float delta  = clamp(length(outc - orig) * 5.0, 0.0, 1.0);
+  float delta  = clamp(length(outc - afterBase) * 5.0, 0.0, 1.0);
   float lipZone = feather(texture2D(uLip, vUv).a) * uLipInt;
   float eyeZone = feather(me) * uEyeInt;
   // Lips get 1.1× texture, eyes get 1.2× (eyelid creases/pores under shadow),
@@ -806,7 +841,7 @@ function initGL() {
                    'uEyeCreaseShade','uEyeHighlightShade',
                    'uFndInt','uBlushInt','uHairInt','uEyeInt','uLashInt','uLipInt',
                    'uContourInt','uHighlightInt','uUnderEyeInt','uBronzerInt','uNoseContourInt','uLipLinerInt','uEyelinerInt','uBrowInt','uLipPx','uLipCover','uLipTex','uLipTexOn','uLipTexMix','uLipTexScale','uLipO','uLipAx','uLipAy',
-                   'uLight','uFinish','uFaceLum','uCinema','uGrain','uGlamour','uLightBal','uFaceYaw','uEyeFinish','uEyeCreaseFinish','uEyeHighlightFinish','uCutCrease','uFndFinish','uBlushFinish','uTexel']) {
+                   'uLight','uFinish','uFaceLum','uCinema','uGrain','uGlamour','uLightBal','uFaceYaw','uFaceCx','uEyeFinish','uEyeCreaseFinish','uEyeHighlightFinish','uCutCrease','uFndFinish','uBlushFinish','uTexel','uLightTex','uLightOn']) {
     loc[u] = gl.getUniformLocation(prog, u);
   }
   tex = { frame: makeTex(), fnd: makeTex(), blush: makeTex(), hair: makeTex(), eye: makeTex(), lash: makeTex(), lip: makeTex(), sculpt: makeTex(), lipLiner: makeTex(), eyeliner: makeTex(), brows: makeTex(), extra: makeTex() };
@@ -870,17 +905,24 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
   // refreshes the stored snapshot, and short-circuiting past it would leave
   // that snapshot stale.
   const moved = geometryMoved(landmarks);
+  // UV masks (uv/uvMasks.js): products with a UV map are drawn on the face
+  // mesh on the GPU; the 2D builders below only run for the rest.
+  const uvJ = uvJobs(opts);
+  const uvSig = uvJobsSig(uvJ);
+  const uvOn = new Set(uvJ.map((j) => j.name));
+  const segChanged = !!(lipSeg && lipSeg.version !== lastLipSegVer);
   const changed = moved
     || key !== lastMaskKey
+    || uvSig !== lastUVSig
     || hair?.mask !== lastHairMask
     || lipOverride !== lastLipOverride;
 
   if (changed) {
-    const sculptOn = !!(contour || highlight || underEye);
-    upload(1, tex.fnd, foundation ? buildFaceMask(w, h, landmarks, { lipSeg }) : blank());
-    upload(2, tex.blush, blush ? buildBlushMask(w, h, landmarks) : blank());
+    const sculptOn = !!(contour || highlight || underEye) && !uvOn.has('sculpt');
+    upload(1, tex.fnd, foundation && !uvOn.has('fnd') ? buildFaceMask(w, h, landmarks, { lipSeg }) : blank());
+    upload(2, tex.blush, blush && !uvOn.has('blush') ? buildBlushMask(w, h, landmarks) : blank());
     upload(3, tex.hair, (hair && hair.mask) ? hair.mask : blank());
-    upload(4, tex.eye, eyes ? buildEyeMask(w, h, landmarks) : blank());
+    upload(4, tex.eye, eyes && !uvOn.has('eye') ? buildEyeMask(w, h, landmarks) : blank());
     const lashMot = opts.motion ?? 0;
     const use3dLash = lashes && lash3dAvailable();
     // When 3D lash renderer is available, skip the texture-based mask —
@@ -910,9 +952,9 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
       ? buildSculptPack(w, h, landmarks, { contour: !!contour, highlight: !!highlight, underEye: !!underEye })
       : blank());
     upload(8, tex.lipLiner, lipLiner ? buildLipLinerMask(w, h, landmarks, { refinedOuter, lipSeg }) : blank());
-    upload(9, tex.eyeliner, eyeliner ? buildEyelinerMask(w, h, landmarks) : blank());
-    upload(10, tex.brows, brows ? buildBrowMask(w, h, landmarks) : blank());
-    const extraOn = !!(bronzer || noseContour);
+    upload(9, tex.eyeliner, eyeliner && !uvOn.has('eyeliner') ? buildEyelinerMask(w, h, landmarks) : blank());
+    upload(10, tex.brows, brows && !uvOn.has('brows') ? buildBrowMask(w, h, landmarks) : blank());
+    const extraOn = !!(bronzer || noseContour) && !uvOn.has('extra');
     upload(11, tex.extra, extraOn
       ? buildExtraPack(w, h, landmarks, { bronzer: !!bronzer, noseContour: !!noseContour })
       : blank());
@@ -927,11 +969,31 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
     lastLipSegVer = lipSeg.version;
   }
 
+  // ── UV masks: render on the mesh, cut along the lipstick's own outline ──
+  if (uvJ.length) {
+    // (re-render after a motion-blurred frame, or the blur would stick once the face stops)
+    const lightKey = opts.light && opts.light.dir ? opts.light.dir.map((v) => Math.round(v * 24)).join() : '';
+    if (changed || segChanged || !uvTex || uvRenderer(gl).lastBlurred || lightKey !== lastLightKey) {
+      lastLightKey = lightKey;
+      gl.activeTexture(gl.TEXTURE0 + 6);
+      const lipCut = lips ? gl.getParameter(gl.TEXTURE_BINDING_2D) : null;
+      const [UW, UH] = uvTargetSize(w, h);
+      uvTex = uvRenderer(gl).render(landmarks, UW, UH, uvJ, lipCut, { lightBal: opts.lightBal, light: opts.light, time: opts.frameTime, frameUnit: 0 });
+    }
+    for (const [name, unit] of Object.entries(UV_UNITS)) {
+      if (uvOn.has(name) && uvTex[name]) { gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, uvTex[name]); }
+    }
+  } else {
+    uvTex = null;
+  }
+  lastUVSig = uvSig;
+
   gl.uniform1i(loc.uFrame, 0); gl.uniform1i(loc.uFnd, 1); gl.uniform1i(loc.uBlush, 2);
   gl.uniform1i(loc.uHair, 3); gl.uniform1i(loc.uEye, 4); gl.uniform1i(loc.uLash, 5);
   gl.uniform1i(loc.uLip, 6); gl.uniform1i(loc.uSculpt, 7);
   gl.uniform1i(loc.uLipLiner, 8); gl.uniform1i(loc.uEyeliner, 9); gl.uniform1i(loc.uBrows, 10);
   gl.uniform1i(loc.uExtra, 11);
+  gl.uniform1i(loc.uLightTex, 13); gl.uniform1f(loc.uLightOn, uvTex && uvTex.light ? 1 : 0);
   // Lip product texture (anchored to the mouth frame; see shader).
   const lt = lips && lips.texture;
   const ltReady = !!(lt && (lt.naturalWidth || lt.videoWidth || lt.width) && lt.complete !== false);
@@ -1006,6 +1068,7 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
   gl.uniform1f(loc.uFaceLum, typeof opts.faceLum === 'number' ? opts.faceLum : 0.5);
   gl.uniform1f(loc.uLightBal, typeof opts.lightBal === 'number' ? opts.lightBal : 0);
   gl.uniform1f(loc.uFaceYaw, typeof opts.faceYaw === 'number' ? opts.faceYaw : 0);
+  gl.uniform1f(loc.uFaceCx, landmarks[168] ? landmarks[168].x : 0.5);
   gl.uniform1f(loc.uCinema, typeof opts.cinema === 'number' ? opts.cinema : 0);
   gl.uniform1f(loc.uGrain, typeof opts.grain === 'number' ? opts.grain : CFG.grain.intensity);
   gl.uniform1f(loc.uGlamour, opts.glamour ? 1.0 : 0.0);

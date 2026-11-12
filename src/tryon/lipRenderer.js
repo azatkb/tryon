@@ -103,12 +103,34 @@ function cutFeatures(m, landmarks) {
 let _activeLipSeg = null;
 export function setActiveLipSeg(seg) { _activeLipSeg = seg || null; }
 
+// ── UV bake mode (uv/bakeUV.js) ──
+// The builders run once on the canonical face laid out in UV space. Temporal
+// state (eye-perspective rate limit, lash cache) is isolated so the bake does
+// not leak into live frames and live frames do not bend the bake.
+let _uvBake = false, _bakeSaved = null;
+export function uvBakeBegin() {
+  _bakeSaved = { perspPrev: _perspPrev, perspCached: _perspCached, perspRef: _perspRef, seg: _activeLipSeg };
+  _perspPrev = null; _perspCached = null; _perspRef = null; _activeLipSeg = null;
+  _lashCacheValid = false; _uvBake = true;
+}
+export function uvBakeEnd() {
+  _uvBake = false; _lashCacheValid = false;
+  if (_bakeSaved) {
+    _perspPrev = _bakeSaved.perspPrev; _perspCached = _bakeSaved.perspCached;
+    _perspRef = _bakeSaved.perspRef; _activeLipSeg = _bakeSaved.seg;
+  }
+  _bakeSaved = null;
+}
+
 /**
  * Remove the lips from a face-product mask (destination-out), along the
  * fitted outline, inset ~1.5 px so the product tucks under the lipstick's soft
  * edge, ~1 px soft. Falls back to the smooth MediaPipe outline.
  */
 function cutLips(m, landmarks, seg = _activeLipSeg) {
+  // UV bake: masks keep the lips — the lip cut is applied at render time with
+  // the live fitted outline (uv/uvMasks.js), so it is never baked in.
+  if (_uvBake) return;
   const sx = MW / (seg && seg._w ? seg._w : MW), sy = MH / (seg && seg._h ? seg._h : MH);
   const pts = seg && seg.outerSmooth && seg._w
     ? seg.outerSmooth.map(([x, y]) => [x * sx, y * sy])
@@ -493,6 +515,11 @@ function ensure(w, h) {
   const ls = CFG.lashScale;
   const newLW = Math.max(2, Math.round(w * ls));
   const newLH = Math.max(2, Math.round(h * ls));
+  if (_uvBake) {
+    // Bake frame is large; only the reduced-res mask canvases are needed.
+    for (const c of [maskCv, eyeMaskCv, faceMaskCv, blushMaskCv, contourMaskCv, highlightMaskCv, underEyeMaskCv, bronzerMaskCv, noseContourMaskCv, lipLinerMaskCv, eyelinerMaskCv, browMaskCv, packCv, extraPackCv, refineCv]) { if (c.width !== MW || c.height !== MH) { c.width = MW; c.height = MH; } }
+    return;
+  }
   if (newLW !== LW || newLH !== LH) { _lashCacheValid = false; } // invalidate cache on resize
   LW = newLW; LH = newLH;
   if (lashMaskCv.width !== LW || lashMaskCv.height !== LH) { lashMaskCv.width = LW; lashMaskCv.height = LH; }

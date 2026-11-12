@@ -43,6 +43,26 @@ export function setLipRoughness(v) { edgeRough = Math.max(0, Math.min(1, +v || 0
 let edgeSoft = 1.0;    // lip→skin transition width multiplier (0 = hard cut-out edge)
 /** Lip→skin transition softness: 0 = hard edge, 1 = natural (default), 2 = very soft. */
 export function setLipSoftness(v) { edgeSoft = Math.max(0, Math.min(2, +v || 0)); }
+// Mouth opening from pixels (experimental). Off = MediaPipe decides open/closed
+// and the inner edge is refined around MP's inner contour (previous behaviour).
+// Inner lip edge / mouth opening mode:
+//   'mp'      — MediaPipe's 3D gap decides open/closed, inner edge refined
+//               from colour around MP's inner contour (default, previous)
+//   'predict' — inner edge PREDICTED from the fitted outer contour and this
+//               person's lip thickness (learned while the mouth is closed);
+//               pixels only refine it inside a narrow band
+//   'pixel'   — experimental: opening searched in the pixels
+let openMode = 'mp';
+export function setLipOpenDetect(v) {
+  openMode = v === true ? 'pixel' : v === 'predict' || v === 'pixel' ? v : 'mp';
+  prevInner = null;
+}
+export function getLipOpenDetect() { return openMode; }
+// Per-person lip thickness model ('predict'): upper/lower vermilion thickness
+// per mouth column, in eye-distance units, learned on a closed, still mouth.
+const MC = 51;   // columns corner→corner (= CORNER_R + 1)
+let lipModel = null;
+export function getLipModel() { return lipModel; }
 export function getLipRoughness() { return edgeRough; }
 
 // ── Organic edge texture ────────────────────────────────────────────────
@@ -681,6 +701,260 @@ function normals(pts) {
 }
 
 /**
+ * Keep the OUTER lip outline anatomically sane (runs on the fitted target,
+ * before temporal tracking). Lips can't grow lumps, can't cave in, and keep
+ * MediaPipe's geometry on head turns — the colour fit may only move the edge
+ * by a bounded, smooth amount. In the mouth frame (heights vs along-position):
+ *  1. bounds per column, relative to the LOCAL lip thickness from MP (outer →
+ *     inner): the fit may not make a lip thinner than 70 % / thicker than 135 %
+ *     of MP's — a lump near a thin corner was allowed by the old global limit
+ *  2. robust smoothing: residuals against a wide Gaussian are clamped to a
+ *     small tolerance — spikes ("chunks") and sudden drops are cut back, the
+ *     cupid's bow and real curvature survive
+ *  3. shape: the lower lip falls monotonically from each corner to its lowest
+ *     point (no dents); the upper lip rises from each corner to its peak, and
+ *     the philtrum dip between the peaks is limited
+ * Columns at the silhouette of a turned head are left to the colour fit
+ * (MP is least reliable there).
+ */
+function cleanOuter(tgt, outerD, innerD, persp, vis) {
+  const half = CORNER_R;
+  const pL = [tgt[2 * CORNER_L], tgt[2 * CORNER_L + 1]], pR = [tgt[2 * CORNER_R], tgt[2 * CORNER_R + 1]];
+  const mw = Math.hypot(pR[0] - pL[0], pR[1] - pL[1]);
+  if (mw < 8) return tgt;
+  const axX = (pR[0] - pL[0]) / mw, axY = (pR[1] - pL[1]) / mw;
+  let upX = axY, upY = -axX;
+  const c0 = [(pL[0] + pR[0]) / 2, (pL[1] + pR[1]) / 2];
+  const top = outerD[5 * SUB];
+  if ((top[0] - c0[0]) * upX + (top[1] - c0[1]) * upY < 0) { upX = -upX; upY = -upY; }
+  const hOf = (x, y) => (x - c0[0]) * upX + (y - c0[1]) * upY;
+  const aOf = (x, y) => (x - c0[0]) * axX + (y - c0[1]) * axY;
+  const curve = (pts, idxOf) => {
+    const c2 = [];
+    for (let k = 0; k <= half; k++) { const p2 = pts[idxOf(k)]; c2.push([aOf(p2[0], p2[1]), hOf(p2[0], p2[1])]); }
+    return c2.sort((a2, b2) => a2[0] - b2[0]);
+  };
+  const interp = (c2, a) => {
+    if (a <= c2[0][0]) return c2[0][1];
+    for (let i = 1; i < c2.length; i++) if (a <= c2[i][0]) { const f = (a - c2[i - 1][0]) / Math.max(1e-6, c2[i][0] - c2[i - 1][0]); return c2[i - 1][1] + f * (c2[i][1] - c2[i - 1][1]); }
+    return c2[c2.length - 1][1];
+  };
+  const MU = curve(outerD, (k) => k), MD = curve(outerD, (k) => (K - k) % K);
+  const IU = curve(innerD, (k) => k), ID = curve(innerD, (k) => (K - k) % K);
+  const n = half + 1;
+  const sides = [
+    { idx: (k) => k, sign: 1 },                 // upper: outward = +up
+    { idx: (k) => (K - k) % K, sign: -1 },      // lower: outward = −up
+  ];
+  for (const side of sides) {
+    const A = new Float32Array(n), Hf = new Float32Array(n), Hm = new Float32Array(n), Th = new Float32Array(n), Pz = new Float32Array(n);
+    for (let k = 0; k <= half; k++) {
+      const q = side.idx(k);
+      const x = tgt[2 * q], y = tgt[2 * q + 1];
+      A[k] = aOf(x, y); Hf[k] = hOf(x, y);
+      Hm[k] = interp(side.sign > 0 ? MU : MD, A[k]);
+      const inner = interp(side.sign > 0 ? IU : ID, A[k]);
+      Th[k] = Math.max(1, side.sign * (Hm[k] - inner));      // MP's local lip thickness
+      Pz[k] = vis ? smooth01(0.25, 0.6, vis[q]) : 1;   // silhouette columns: trust the colour fit
+    }
+    // work in "outwardness" o = sign·h (bigger = further from the mouth line)
+    const O = new Float32Array(n), Om = new Float32Array(n);
+    for (let k = 0; k <= half; k++) { O[k] = side.sign * Hf[k]; Om[k] = side.sign * Hm[k]; }
+    // 1. local bounds vs MP thickness (tighter where the side is foreshortened)
+    for (let k = 1; k < half; k++) {
+      const lo = Om[k] - 0.3 * Th[k], hi = Om[k] + 0.4 * Th[k];
+      if (Pz[k] < 1e-3) continue;
+      O[k] = Math.min(hi, Math.max(lo, O[k]));
+    }
+    // 2. robust smoothing: clamp residuals against a wide Gaussian (2 passes)
+    const gauss = (Arr, sg) => {
+      const o = new Float32Array(n), r = Math.ceil(2.5 * sg);
+      for (let k = 0; k <= half; k++) {
+        let sw = 0, sv = 0;
+        for (let d = -r; d <= r; d++) { const j = k + d; if (j < 0 || j > half) continue; const wg = Math.exp(-(d * d) / (2 * sg * sg)); sw += wg; sv += wg * Arr[j]; }
+        o[k] = sv / sw;
+      }
+      return o;
+    };
+    // Robust: MP's own offset error is broad (whole-lip scale), a lump or a
+    // dent is local — fit the deviation with a wide, outlier-down-weighted
+    // Gaussian, then allow only a small tolerance around it.
+    const dev = new Float32Array(n), wts = new Float32Array(n).fill(1);
+    for (let k = 0; k <= half; k++) dev[k] = O[k] - Om[k];
+    let sm = null;
+    for (let pass = 0; pass < 3; pass++) {
+      sm = new Float32Array(n);
+      const sg = 7, r = Math.ceil(2.5 * sg);
+      for (let k = 0; k <= half; k++) {
+        let sw = 0, sv = 0;
+        for (let d = -r; d <= r; d++) { const j = k + d; if (j < 0 || j > half) continue; const wg = Math.exp(-(d * d) / (2 * sg * sg)) * wts[j]; sw += wg; sv += wg * dev[j]; }
+        sm[k] = sw > 1e-6 ? sv / sw : dev[k];
+      }
+      for (let k = 0; k <= half; k++) {
+        const tol = Math.max(0.8, 0.06 * Th[k]);
+        const e = Math.abs(dev[k] - sm[k]) / tol;
+        wts[k] = e <= 1 ? 1 : 1 / (e * e);       // Cauchy-like down-weighting
+      }
+    }
+    for (let k = 1; k < half; k++) {
+      const tol = Math.max(0.8, 0.06 * Th[k]);
+      const r = dev[k] - sm[k];
+      O[k] = Om[k] + sm[k] + Math.max(-tol, Math.min(tol, r));
+    }
+    // 3. shape
+    if (side.sign < 0) {
+      // lower lip: outwardness rises monotonically from each corner to the lowest point
+      let pk = 0; for (let k = 1; k <= half; k++) if (O[k] > O[pk]) pk = k;
+      for (let k = 1; k <= pk; k++) if (O[k] < O[k - 1]) O[k] = O[k - 1] - 0.0;
+      for (let k = half - 1; k >= pk; k--) if (O[k] < O[k + 1]) O[k] = O[k + 1];
+    } else {
+      // upper lip: rise from each corner to its peak; limited philtrum dip
+      const mid = half >> 1;
+      let pl = 1; for (let k = 1; k <= mid; k++) if (O[k] > O[pl]) pl = k;
+      let pr = half - 1; for (let k = half - 1; k >= mid; k--) if (O[k] > O[pr]) pr = k;
+      for (let k = 1; k <= pl; k++) if (O[k] < O[k - 1]) O[k] = O[k - 1];
+      for (let k = half - 1; k >= pr; k--) if (O[k] < O[k + 1]) O[k] = O[k + 1];
+      const floorDip = Math.min(O[pl], O[pr]) - 0.45 * Th[mid];
+      for (let k = pl + 1; k < pr; k++) if (O[k] < floorDip) O[k] = floorDip;
+    }
+    // back to points: move along `up`, weighted by how vertical the outline is
+    // here (near the corners the edge runs vertically — leave it alone)
+    for (let k = 1; k < half; k++) {
+      const q = side.idx(k);
+      const dh = side.sign * O[k] - Hf[k];
+      const cw = smooth01(0, 0.12 * half, Math.min(k, half - k)) * Pz[k];
+      tgt[2 * q] += upX * dh * cw; tgt[2 * q + 1] += upY * dh * cw;
+    }
+  }
+  return tgt;
+}
+
+/**
+ * Make the mouth opening anatomically plausible (all inner-edge modes).
+ * The opening is ONE smooth lens between the lips: no notch, no island, no
+ * step between neighbouring columns, closing smoothly into both corners, and
+ * left/right alike (the better-seen side leads, like the outer contour).
+ * Works in the mouth frame on the inner target curve tgt (K×2, in place):
+ *  1. per column: upper/lower inner-lip thickness as seen from the outer contour
+ *  2. symmetry: thickness blended with the mirrored column (perspective-weighted)
+ *  3. gap: despiked, then its unimodal envelope — rises from each corner to the
+ *     widest point and never dips back (a dent in the opening = a lipstick
+ *     bridge/hole in the cut), Gaussian-smoothed, tapered into the corners
+ *  4. centre line smoothed; edges kept ≥ 1 px inside the outer contour.
+ */
+function cleanInner(tgt, outer, persp, midPt) {
+  const half = CORNER_R;
+  const oL = outer[CORNER_L], oR = outer[CORNER_R];
+  const mw = Math.hypot(oR[0] - oL[0], oR[1] - oL[1]);
+  if (mw < 8) return tgt;
+  const axX = (oR[0] - oL[0]) / mw, axY = (oR[1] - oL[1]) / mw;
+  let upX = axY, upY = -axX;
+  const c0 = [(oL[0] + oR[0]) / 2, (oL[1] + oR[1]) / 2];
+  const topRef = outer[5 * SUB];
+  if ((topRef[0] - c0[0]) * upX + (topRef[1] - c0[1]) * upY < 0) { upX = -upX; upY = -upY; }
+  const hOf = (x, y) => (x - c0[0]) * upX + (y - c0[1]) * upY;
+  const aOf = (x, y) => (x - c0[0]) * axX + (y - c0[1]) * axY;   // along the mouth, 0 = centre
+  const n = half + 1;
+  // outer upper / lower lip as height(along) — inner points sit at their own
+  // along-positions (MP's inner and outer points are not spaced alike)
+  const curve = (idxOf) => {
+    const c2 = [];
+    for (let k = 0; k <= half; k++) { const p2 = outer[idxOf(k)]; c2.push([aOf(p2[0], p2[1]), hOf(p2[0], p2[1])]); }
+    return c2.sort((a2, b2) => a2[0] - b2[0]);
+  };
+  const interp = (c2, a) => {
+    if (a <= c2[0][0]) return c2[0][1];
+    for (let i = 1; i < c2.length; i++) if (a <= c2[i][0]) { const f = (a - c2[i - 1][0]) / Math.max(1e-6, c2[i][0] - c2[i - 1][0]); return c2[i - 1][1] + f * (c2[i][1] - c2[i - 1][1]); }
+    return c2[c2.length - 1][1];
+  };
+  const OU = curve((k) => k), OD = curve((k) => (K - k) % K);
+  const HU = new Float32Array(n), HD = new Float32Array(n), T = new Float32Array(n), B = new Float32Array(n), A = new Float32Array(n);
+  for (let k = 0; k <= half; k++) {
+    const kl = (K - k) % K;
+    const a = 0.5 * (aOf(tgt[2 * k], tgt[2 * k + 1]) + aOf(tgt[2 * kl], tgt[2 * kl + 1]));
+    A[k] = a; HU[k] = interp(OU, a); HD[k] = interp(OD, a);
+    T[k] = hOf(tgt[2 * k], tgt[2 * k + 1]); B[k] = hOf(tgt[2 * kl], tgt[2 * kl + 1]);
+  }
+  // 1–2. symmetry: the opening's own edges (heights in the mouth frame) are
+  // blended with the mirrored along-position — the outer contour's small
+  // errors don't leak in; the better-seen side leads
+  const TU = [], TD = [], PV = [];
+  for (let k = 0; k <= half; k++) { TU.push([A[k], T[k]]); TD.push([A[k], B[k]]); PV.push([A[k], 0.5 * (persp[k] + persp[(K - k) % K])]); }
+  TU.sort((a2, b2) => a2[0] - b2[0]); TD.sort((a2, b2) => a2[0] - b2[0]); PV.sort((a2, b2) => a2[0] - b2[0]);
+  const TS = new Float32Array(T), BS = new Float32Array(B);
+  if (symStrength > 0) {
+    // mirror about the anatomical mouth centre (MP 13/14), each side scaled by
+    // its own half-width — a turned head foreshortens the far side
+    const aL = aOf(oL[0], oL[1]), aR = aOf(oR[0], oR[1]);
+    const aM = midPt ? Math.min(aR - 1, Math.max(aL + 1, aOf(midPt[0], midPt[1]))) : 0.5 * (aL + aR);
+    const mirror = (a) => (a >= aM ? aM - (a - aM) / (aR - aM) * (aM - aL) : aM + (aM - a) / (aM - aL) * (aR - aM));
+    for (let k = 1; k < half; k++) {
+      const am = mirror(A[k]);
+      const pk = interp(PV, A[k]), pm = interp(PV, am);
+      const a = Math.min(0.5, 0.5 * symStrength) * 2 * pm / Math.max(1e-3, pk + pm);   // frontal: ≤ 50 % mirror
+      TS[k] = T[k] + (interp(TU, am) - T[k]) * a; BS[k] = B[k] + (interp(TD, am) - B[k]) * a;
+    }
+  }
+  const tuS = new Float32Array(n), tdS = new Float32Array(n);
+  for (let k = 0; k <= half; k++) { tuS[k] = HU[k] - TS[k]; tdS[k] = BS[k] - HD[k]; }
+  const g = new Float32Array(n), c = new Float32Array(n);
+  for (let k = 0; k <= half; k++) {
+    const t2 = HU[k] - tuS[k], b2 = HD[k] + tdS[k];
+    g[k] = Math.max(0, t2 - b2); c[k] = 0.5 * (t2 + b2);
+  }
+  g[0] = g[half] = 0;
+  // the opening closes INTO the mouth corners — the fitted outer corners,
+  // not MP's (noisier) inner corner points
+  c[0] = hOf(oL[0], oL[1]); c[half] = hOf(oR[0], oR[1]);
+  // 3. despike (median of 5) → unimodal envelope → smooth → corner taper
+  const med = new Float32Array(n), win = [];
+  for (let k = 0; k <= half; k++) {
+    win.length = 0;
+    for (let d = -2; d <= 2; d++) { const j = k + d; if (j >= 0 && j <= half) win.push(g[j]); }
+    win.sort((a2, b2) => a2 - b2); med[k] = win[win.length >> 1];
+  }
+  const Lm = new Float32Array(n), Rm = new Float32Array(n);
+  for (let k = 0, mx = 0; k <= half; k++) { mx = Math.max(mx, med[k]); Lm[k] = mx; }
+  for (let k = half, mx = 0; k >= 0; k--) { mx = Math.max(mx, med[k]); Rm[k] = mx; }
+  const env = new Float32Array(n);
+  for (let k = 0; k <= half; k++) env[k] = Math.min(Lm[k], Rm[k]);
+  const gauss = (A, sg) => {
+    const o = new Float32Array(n), r = Math.ceil(2.5 * sg);
+    for (let k = 0; k <= half; k++) {
+      let sw = 0, sv = 0;
+      for (let d = -r; d <= r; d++) { const j = k + d; if (j < 0 || j > half) continue; const wgt = Math.exp(-(d * d) / (2 * sg * sg)); sw += wgt; sv += wgt * A[j]; }
+      o[k] = sv / sw;
+    }
+    return o;
+  };
+  const cMed = new Float32Array(c);
+  for (let k = 1; k < half; k++) {
+    win.length = 0;
+    for (let d = -2; d <= 2; d++) { const j = k + d; if (j >= 0 && j <= half) win.push(c[j]); }
+    win.sort((a2, b2) => a2 - b2); cMed[k] = win[win.length >> 1];
+  }
+  const gs = gauss(env, 2.0), cs = gauss(cMed, 2.5);
+  cs[0] = c[0]; cs[half] = c[half];
+  const taperN = Math.max(2, 0.12 * half);
+  for (let k = 0; k <= half; k++) gs[k] *= smooth01(0, taperN, Math.min(k, half - k));
+  // 4. rebuild edges, keep a sliver of lip on both sides
+  for (let k = 0; k <= half; k++) {
+    let t2 = cs[k] + 0.5 * gs[k], b2 = cs[k] - 0.5 * gs[k];
+    const lo = HD[k] + 1, hi = HU[k] - 1;
+    if (hi > lo) {
+      if (t2 > hi) { const d = t2 - hi; t2 -= d; b2 = Math.max(lo, b2 - d); }
+      if (b2 < lo) { const d = lo - b2; b2 += d; t2 = Math.min(hi, t2 + d); }
+      if (t2 < b2) t2 = b2 = 0.5 * (t2 + b2);
+    } else { t2 = b2 = 0.5 * (HU[k] + HD[k]); }
+    const kl = (K - k) % K;
+    const du = t2 - T[k], dd = b2 - B[k];
+    tgt[2 * k] += upX * du; tgt[2 * k + 1] += upY * du;
+    if (kl !== k) { tgt[2 * kl] += upX * dd; tgt[2 * kl + 1] += upY * dd; }
+  }
+  return tgt;
+}
+
+/**
  * Fit the lip outline of one frame.
  * @returns {{ outer, outerSmooth, fringe, linerInner, inner, safe, bbox, conf, dprime, version } | null}
  *   Curves are arrays of [x, y] in frame px. `safe` is null unless the mouth
@@ -711,7 +985,6 @@ export function segmentLipsColor(src, w, h, lms, opts = {}) {
   const d3 = (a2, b) => Math.hypot(a2[0] - b[0], a2[1] - b[1], a2[2] - b[2]);
   const gap = d3(p3(13), p3(14)), lipW = d3(p3(61), p3(291));
   const ratio = lipW > 0 ? gap / lipW : 0;
-  cutoutActive = ratio > (cutoutActive ? 0.03 : 0.05);
   const cc = cropCv._ctx;
   cc.imageSmoothingEnabled = true;
   try {
@@ -743,7 +1016,7 @@ export function segmentLipsColor(src, w, h, lms, opts = {}) {
     skinSel[i] = OUT[i] < 0.5 && dOut[i] >= skinLo && dOut[i] <= skinHi && L > 12 && L < 97 ? 1 : 0;
   }
   const S = stats(skinSel), Lp = stats(lipSel);
-  let conf = 0, dprime = 0;
+  let conf = 0, dprime = 0, gridOK = false;
   if (S && Lp) {
     const sw = S.n + Lp.n;
     const cov = S.cov.map((v, k) => (v * S.n + Lp.cov[k] * Lp.n) / sw);
@@ -784,6 +1057,7 @@ export function segmentLipsColor(src, w, h, lms, opts = {}) {
           Lb[i] = (Lc[i + ya + xa] + Lc[i + ya] + Lc[i + ya + xb] + Lc[i + xa] + Lc[i] + Lc[i + xb] + Lc[i + yb + xa] + Lc[i + yb] + Lc[i + yb + xb]) / 9;
         }
       }
+      gridOK = true;
       let mr = 0, mr2 = 0, nr = 0;
       for (let i = 0; i < N; i++) if (skinSel[i]) {
         const r = Math.hypot(Ac[i], Bc[i]) / (Lc[i] + 5);
@@ -815,17 +1089,23 @@ export function segmentLipsColor(src, w, h, lms, opts = {}) {
   const visIn = contourVisibility(lms, w, h, LIPS_INNER);
   const HIDDEN = 0.02;   // strictly turned away — near-grazing parts are still visible
   const rOut = 0.5 * t, rIn = 0.35 * t, step = 0.5;
+  const rOutAt = new Float32Array(K);
+  for (let k = 0; k < K; k++) rOutAt[k] = rOut + 0.6 * t * (1 - smooth01(0.15, 0.6, visOut[k]));
   const nSteps = Math.max(4, Math.ceil((rOut + rIn) / step));
   for (let k = 0; k < K; k++) {
     rawOff[k] = 0;
     wOff[k] = 0;
-    if (conf <= 0 || visOut[k] < 0.3) continue;   // turned away: keep the model shape
+    if (conf <= 0 || visOut[k] < 0.08) continue;   // turned away: keep the model shape
+    // Near the silhouette of a turned head MP pulls the lip points inward —
+    // search further out there (the lip runs right up to the silhouette).
+    const rOutK = rOutAt[k];
     const [bxk, byk] = outerD[k], [nx, ny] = nrm[k];
     const at = (s) => sampleP(bxk + nx * s, byk + ny * s, xf);
-    if (at(rOut) >= 0.5 || at(rOut - step) >= 0.5) continue;
+    if (at(rOutK) >= 0.5 || at(rOutK - step) >= 0.5) continue;
     let found = false;
-    for (let j = 1; j <= nSteps; j++) {
-      const s = rOut - j * step;
+    const nStepsK = Math.max(4, Math.ceil((rOutK + rIn) / step));
+    for (let j = 1; j <= nStepsK; j++) {
+      const s = rOutK - j * step;
       if (at(s) >= 0.5 && at(s - step) >= 0.5 && at(s - 2 * step) >= 0.5) {
         const pa = at(s + step), pb = at(s);
         const f = pb - pa > 1e-4 ? (0.5 - pa) / (pb - pa) : 0.5;
@@ -840,7 +1120,7 @@ export function segmentLipsColor(src, w, h, lms, opts = {}) {
           if (Lat(s2) > rollMin) e2 = s2;
           else if (s2 - edge > 1.5) break;
         }
-        rawOff[k] = Math.min(rOut, e2);
+        rawOff[k] = Math.min(rOutK, e2);
         const pin = (at(s - step) + at(s - 2 * step)) / 2, pout = (at(s + 2 * step) + at(s + 3 * step)) / 2;
         wOff[k] = Math.max(0, Math.min(1, (pin - pout) * 1.6));
         found = true;
@@ -856,10 +1136,12 @@ export function segmentLipsColor(src, w, h, lms, opts = {}) {
     const d = Math.min(Math.abs(k - CORNER_L), K - Math.abs(k - CORNER_L), Math.abs(k - CORNER_R));
     return smooth01(0, 2.5 * SUB, d);
   };
-  regularise(rawOff, wOff, smOff, t, taper, -rIn, rOut, conf, supBuf);
+  regularise(rawOff, wOff, smOff, t, taper, -rIn, rOut + 0.6 * t, conf, supBuf);
+  for (let k = 0; k < K; k++) if (smOff[k] > rOutAt[k]) smOff[k] = rOutAt[k];   // the wider reach only at the silhouette
   // Perspective visibility per contour point (liner width, edge texture and
   // the symmetric shape prior below).
   const { persp, mouth3D } = contourPerspective(lms, w, h);
+  const mouthMid = [(lms[13].x + lms[14].x) * 0.5 * w, (lms[13].y + lms[14].y) * 0.5 * h];   // anatomical mouth centre
   const box = [bx, by, bw, bh];
   let fresh = !prevPts || !prevBox;
   if (!fresh) {
@@ -875,56 +1157,392 @@ export function segmentLipsColor(src, w, h, lms, opts = {}) {
   }
   // Left/right proportion: the side you can barely see gets the seen side's shape.
   symmetriseThickness(tgt, innerD, supBuf, persp);
+  // Lips can't grow lumps, cave in, or lose their geometry on a turn.
+  cleanOuter(tgt, outerD, innerD, persp, visOut);
   // Head motion carried with zero lag, per-point noise damped (see trackContour).
   if (fresh) prevPts.set(tgt);
   else trackContour(prevPts, tgt, K, opts.moving ? 0.22 : 0.12, 0.35 * t);
   for (let k = 0; k < K; k++) outer[k] = [prevPts[2 * k], prevPts[2 * k + 1]];
   const hiddenOuter = hideRuns(outer, visOut, HIDDEN);
   prevBox = box;
-  let inner = innerD;
-  if (cutoutActive && conf > 0 && Lp) {
-    const nIn = normals(innerD);
-    const lipLmin = Lp.mu[0] - 2.2 * Math.sqrt(Lp.cov[0]);
-    const lipLike = (x, y) => sampleGrid(Pb, x, y, xf) >= 0.5 && sampleGrid(Lb, x, y, xf) >= lipLmin;
-    const rB = 0.45 * t;
-    for (let k = 0; k < K; k++) {
-      rawOff[k] = 0;
-      wOff[k] = 0;
-      const o = innerD[(K - k) % K];
-      const gapK = Math.hypot(o[0] - innerD[k][0], o[1] - innerD[k][1]);
-      if (gapK < 3) continue;
-      const rA = 0.45 * gapK;
-      const [bxk, byk] = innerD[k], [nx, ny] = nIn[k];
-      const like = (s2) => lipLike(bxk + nx * s2, byk + ny * s2);
-      if (like(-rA) || like(-rA + step)) continue;
-      const n2 = Math.ceil((rA + rB) / step);
-      for (let j = 1; j <= n2; j++) {
-        const s2 = -rA + j * step;
-        if (like(s2) && like(s2 + step) && like(s2 + 2 * step)) {
-          rawOff[k] = s2 - 0.5 * step;
-          wOff[k] = 1;
-          break;
+  // ── Inner lip edge PREDICTED from the outer contour ('predict' mode) ──
+  // Lip tissue barely compresses: when the mouth opens the lips part, but each
+  // lip keeps (about) its thickness. So
+  //   upper inner edge = upper outer contour − upper-lip thickness
+  //   lower inner edge = lower outer contour + lower-lip thickness
+  //   opening          = outer height − both thicknesses   (> 0 → open)
+  // — the opening follows from geometry even when MP calls the mouth closed
+  // and nothing inside the mouth is visible. Thickness is learned per person
+  // while the mouth is closed and still (outer contour vs the dark contact
+  // seam), stored in eye-distance units; scaled for stretch (smile thins the
+  // lips, ~1/√stretch) and for head pitch (vertical foreshortening). Pixels
+  // only nudge the predicted edge inside a narrow band. Until the model has
+  // seen enough closed frames this returns null → MediaPipe mode.
+  function predictInner() {
+    const half = CORNER_R;
+    const oL = outer[CORNER_L], oR = outer[CORNER_R];
+    const mw = Math.hypot(oR[0] - oL[0], oR[1] - oL[1]);
+    if (mw < 8) return null;
+    const axX = (oR[0] - oL[0]) / mw, axY = (oR[1] - oL[1]) / mw;
+    let upX = axY, upY = -axX;
+    const c0 = [(oL[0] + oR[0]) / 2, (oL[1] + oR[1]) / 2];
+    const topRef = outer[5 * SUB];
+    if ((topRef[0] - c0[0]) * upX + (topRef[1] - c0[1]) * upY < 0) { upX = -upX; upY = -upY; }
+    const hOf = (p2) => (p2[0] - c0[0]) * upX + (p2[1] - c0[1]) * upY;
+    const eyeD = d3(p3(33), p3(263));
+    const vert3 = d3(p3(168), p3(152)), vert2 = Math.hypot(lms[168].x * w - lms[152].x * w, lms[168].y * h - lms[152].y * h);
+    const fore = vert3 > 0 ? vert2 / vert3 : 1;          // 1 = frontal, < 1 = pitched
+    const wRel = eyeD > 0 ? lipW / eyeD : 1;             // mouth width vs face (smile → larger)
+    if (!(eyeD > 4)) return null;
+    const sdL = Math.sqrt(Math.max(1, Lp.cov[0]));
+    const still = !opts.moving;
+
+    // ── learn: closed, still mouth → thickness per column ──
+    const HU = new Float32Array(MC), HD = new Float32Array(MC);
+    for (let k = 0; k <= half; k++) { HU[k] = hOf(outer[k]); HD[k] = hOf(outer[(K - k) % K]); }
+    const calibrated = lipModel && lipModel.n >= 8;
+    if (still && conf > 0.3 && ratio < 0.025) {   // MP: closed (the seam-width check below rejects a parted mouth)
+      const tU = new Float32Array(MC), tD = new Float32Array(MC), ok = new Uint8Array(MC);
+      let good = 0;
+      for (let k = 2; k <= half - 2; k++) {
+        if (visOut[k] < 0.5 || visOut[(K - k) % K] < 0.5) continue;
+        const U = outer[k], D = outer[(K - k) % K], H = HU[k] - HD[k];
+        if (H < 3) continue;
+        // darkest point between 25 % and 80 % of the height (from the bottom)
+        let best = Infinity, bh = 0;
+        const n = Math.max(6, Math.ceil(H / 0.5));
+        const Ls = new Float32Array(n + 1);
+        for (let i = 0; i <= n; i++) {
+          const f = 0.25 + 0.55 * i / n;
+          const L = sampleGrid(Lb, D[0] + (U[0] - D[0]) * f, D[1] + (U[1] - D[1]) * f, xf);
+          Ls[i] = L;
+          if (L > 0 && L < best) { best = L; bh = f; }
+        }
+        if (!(Lp.mu[0] - best > Math.max(4, 0.6 * sdL))) continue;   // no visible seam here
+        // a SEAM is thin; a dark band wider than that means the mouth is a bit open
+        const half2 = (best + Lp.mu[0]) / 2;
+        let wd = 0; for (let i = 0; i <= n; i++) if (Ls[i] < half2) wd++;
+        if (wd * (0.55 * H / n) > Math.max(4, 0.08 * H)) continue;
+        // teeth showing → parted, not a seam
+        let teeth = 0;
+        for (let i = 0; i <= n; i++) if (Ls[i] > Lp.mu[0] + 1.5 * sdL) {
+          const f = 0.25 + 0.55 * i / n, x = D[0] + (U[0] - D[0]) * f, y = D[1] + (U[1] - D[1]) * f;
+          if (Math.hypot(sampleGrid(Ac, x, y, xf), sampleGrid(Bc, x, y, xf)) < 0.5 * Math.hypot(Lp.mu[1], Lp.mu[2])) teeth++;
+        }
+        if (teeth * (0.55 * H / n) > 1.5) continue;
+        tU[k] = (1 - bh) * H / (eyeD * fore); tD[k] = bh * H / (eyeD * fore); ok[k] = 1; good++;
+      }
+      if (good >= 0.5 * (half - 3)) {
+        // fill gaps from neighbours, then blend into the model
+        for (let k = 1; k < half; k++) if (!ok[k]) {
+          let a = k - 1; while (a > 0 && !ok[a]) a--;
+          let b = k + 1; while (b < half && !ok[b]) b++;
+          const ta = ok[a] ? [tU[a], tD[a]] : [0, 0], tb = ok[b] ? [tU[b], tD[b]] : [0, 0];
+          const f = b > a ? (k - a) / (b - a) : 0;
+          tU[k] = ta[0] + (tb[0] - ta[0]) * f; tD[k] = ta[1] + (tb[1] - ta[1]) * f;
+        }
+        // reject a frame that disagrees wildly with what we know (half-open mouth slipped through)
+        let agree = true;
+        if (calibrated) {
+          let dif = 0, tot = 0;
+          for (let k = 5; k <= half - 5; k++) { dif += Math.abs(tU[k] + tD[k] - lipModel.tU[k] - lipModel.tD[k]); tot += lipModel.tU[k] + lipModel.tD[k]; }
+          agree = dif < 0.15 * tot;
+        }
+        if (agree) {
+          if (!lipModel) lipModel = { tU: new Float32Array(tU), tD: new Float32Array(tD), n: 0, wRel: wRel, fore: fore };
+          const a = 1 / Math.min(30, lipModel.n + 1);   // running mean, then slow EMA
+          for (let k = 0; k < MC; k++) { lipModel.tU[k] += (tU[k] - lipModel.tU[k]) * a; lipModel.tD[k] += (tD[k] - lipModel.tD[k]) * a; }
+          lipModel.wRel += (wRel - lipModel.wRel) * a;
+          lipModel.n++;
         }
       }
     }
-    const innerTaper = (k) => {
-      const d = Math.min(Math.abs(k - CORNER_L), K - Math.abs(k - CORNER_L), Math.abs(k - CORNER_R));
-      return smooth01(0.3 * SUB, 1.5 * SUB, d);
+    if (!lipModel || lipModel.n < 8) return null;
+
+    // ── predict ──
+    const kStretch = Math.sqrt(Math.max(0.5, Math.min(2, lipModel.wRel / wRel)));
+    const scale = eyeD * fore * kStretch;
+    const T = new Float32Array(MC), B = new Float32Array(MC), gapA = [];
+    // pixel nudge inside a narrow band: strongest colour change across the edge
+    // Pixel nudge inside a narrow band: the lip→mouth transition, directional —
+    // lip on the lip side, not-lip on the mouth side (so a teeth→gap edge
+    // inside the mouth can't be taken for the lip edge).
+    const edgeAt = (P, hP, hPred, band, dir) => {   // dir +1: lip lies "up" (upper lip), −1: down
+      const base = [P[0] + upX * (hPred - hP), P[1] + upY * (hPred - hP)];
+      const lipP = (d) => {
+        const x = base[0] + upX * d, y = base[1] + upY * d;
+        return sampleGrid(Lb, x, y, xf) >= lipLminP ? sampleGrid(Pb, x, y, xf) : 0;
+      };
+      let best = 0, bestD = 0;
+      for (let d = -band; d <= band; d += 0.5) {
+        const sc = lipP(d + dir * 1.5) - lipP(d - dir * 1.5) - 0.02 * Math.abs(d);   // mild pull to the prediction
+        if (sc > best) { best = sc; bestD = d; }
+      }
+      return best > 0.35 ? bestD * Math.min(1, 0.5 + (best - 0.35)) : 0;
     };
-    regularise(rawOff, wOff, smOff, t, innerTaper, -0.7 * t, 0.2 * t, conf);
-    if (!prevInner || fresh) prevInner = new Float32Array(K * 2).fill(NaN);
-    const tgtIn = new Float32Array(K * 2);
-    for (let k = 0; k < K; k++) {
-      tgtIn[2 * k] = innerD[k][0] + nIn[k][0] * smOff[k];
-      tgtIn[2 * k + 1] = innerD[k][1] + nIn[k][1] * smOff[k];
+    const lipLminP = Lp.mu[0] - 2.2 * sdL;
+    for (let k = 0; k <= half; k++) {
+      const H = HU[k] - HD[k];
+      let tu = lipModel.tU[k] * scale, td = lipModel.tD[k] * scale;
+      if (k === 0 || k === half || H <= 0) { T[k] = B[k] = (HU[k] + HD[k]) / 2; continue; }
+      const gap = H - tu - td;
+      if (gap <= 0) {                 // closed here: contact line splits the height by the thickness ratio
+        const c = HD[k] + H * td / Math.max(1e-3, tu + td);
+        T[k] = B[k] = c;
+      } else {
+        T[k] = HU[k] - tu; B[k] = HD[k] + td;
+        if (k > 0.2 * half && k < 0.8 * half) gapA.push(gap);
+      }
     }
-    if (Number.isNaN(prevInner[0])) prevInner.set(tgtIn);
-    else trackContour(prevInner, tgtIn, K, opts.moving ? 0.3 : 0.15, 0.35 * t);
-    inner = new Array(K);
-    for (let k = 0; k < K; k++) inner[k] = [prevInner[2 * k], prevInner[2 * k + 1]];
-    hideRuns(inner, visIn, HIDDEN);
+    const mid = Math.max(1, Math.floor(0.6 * half) - 1);
+    gapA.sort((p2, q) => p2 - q);
+    const medGap = gapA.length >= 0.3 * mid ? gapA[gapA.length >> 1] : 0;
+    // open: predicted gap clearly above noise (hysteresis), or MP clearly open
+    const thr = Math.max(1.5, (cutoutActive ? 0.012 : 0.022) * lipW);
+    const open = medGap > thr || ratio > (cutoutActive ? 0.07 : 0.1);
+    const tgt = new Float32Array(K * 2);
+    if (open) {
+      for (let k = 1; k < half; k++) {
+        if (T[k] - B[k] > 1) {
+          const band = 0.45 * Math.min(lipModel.tU[k], lipModel.tD[k]) * scale + 1;
+          T[k] += edgeAt(outer[k], HU[k], T[k], band, 1);
+          B[k] += edgeAt(outer[(K - k) % K], HD[k], B[k], band, -1);
+          if (T[k] < B[k]) T[k] = B[k] = (T[k] + B[k]) / 2;
+        }
+      }
+      // smooth along the mouth (one odd column can't notch the edge)
+      const sm = (A) => {
+        const o = new Float32Array(A);
+        for (let k = 1; k < half; k++) {
+          let sw = 0, sv = 0;
+          for (let d = -3; d <= 3; d++) { const j = k + d; if (j < 0 || j > half) continue; const g = Math.exp(-(d * d) / 4.5); sw += g; sv += g * A[j]; }
+          o[k] = sv / sw;
+        }
+        return o;
+      };
+      const Ts = sm(T), Bs = sm(B);
+      for (let k = 0; k <= half; k++) {
+        // column position: the outer column's own along-mouth position
+        const U = outer[k], D = outer[(K - k) % K];
+        const ku = k, kl = (K - k) % K;
+        tgt[2 * ku] = U[0] + upX * (Ts[k] - HU[k]); tgt[2 * ku + 1] = U[1] + upY * (Ts[k] - HU[k]);
+        tgt[2 * kl] = D[0] + upX * (Bs[k] - HD[k]); tgt[2 * kl + 1] = D[1] + upY * (Bs[k] - HD[k]);
+      }
+    }
+    return { open, tgt, openRatio: medGap / Math.max(1, lipW), openCols: gapA.length / mid };
+  }
+
+  // ── Mouth opening, found in the pixels ──
+  // MediaPipe's inner-lip points lag and undershoot: a slightly parted mouth
+  // often reads as closed (lipstick painted over the teeth) and a wide one
+  // has its inner edge a few px off. So the opening is detected here from
+  // colour: along each column of the mouth (mouth frame, works on a tilted
+  // head) walk up and down from the lip-contact line through pixels that are
+  // mouth interior — dark gap / shadow, or teeth (bright, low chroma) — and
+  // stop where lip starts. Those stops ARE the inner lip edges. Columns
+  // without an opening collapse to the contact line, so the corners close
+  // naturally. Openness drives the cut (with hysteresis), not MP's gap.
+  let inner = innerD;
+  let openRatio = 0, openCols = 0;
+  const mouthW2 = Math.hypot(innerD[CORNER_R][0] - innerD[CORNER_L][0], innerD[CORNER_R][1] - innerD[CORNER_L][1]);
+  const predicted = openMode === 'predict' && gridOK && Lp ? predictInner() : null;
+  if (openMode === 'pixel' && gridOK && Lp && mouthW2 > 8) {
+    const sdL = Math.sqrt(Math.max(1, Lp.cov[0]));
+    const darkThr = Math.min(Lp.mu[0] - 2.0 * sdL, 0.72 * Lp.mu[0]);
+    const lipLmin = Lp.mu[0] - 2.2 * sdL;
+    const lipC = Math.hypot(Lp.mu[1], Lp.mu[2]);
+    const teethL = Math.max(Lp.mu[0] + 1.2 * sdL, S ? S.mu[0] - 4 : 0);
+    let teethHits = 0;
+    const interior = (x, y) => {
+      const L = sampleGrid(Lb, x, y, xf);
+      if (L <= 0) return false;                       // off the grid
+      if (L < darkThr) return true;                   // gap / mouth shadow
+      if (L > teethL) {                               // teeth: bright and colourless
+        const c = Math.hypot(sampleGrid(Ac, x, y, xf), sampleGrid(Bc, x, y, xf));
+        if (c < Math.max(6, 0.45 * lipC) && !(sampleGrid(Pb, x, y, xf) >= 0.6 && L >= lipLmin)) { teethHits++; return true; }
+      }
+      return false;
+    };
+    const lipAt = (x, y) => sampleGrid(Pb, x, y, xf) >= 0.5 && sampleGrid(Lb, x, y, xf) >= lipLmin;
+    // mouth frame: along = corner→corner, up = toward the upper lip
+    let axX = (innerD[CORNER_R][0] - innerD[CORNER_L][0]) / mouthW2, axY = (innerD[CORNER_R][1] - innerD[CORNER_L][1]) / mouthW2;
+    let upX = axY, upY = -axX;
+    const mid0 = [(innerD[CORNER_L][0] + innerD[CORNER_R][0]) / 2, (innerD[CORNER_L][1] + innerD[CORNER_R][1]) / 2];
+    const topRef = outerD[5 * SUB];   // landmark 0 (upper lip top)
+    if ((topRef[0] - mid0[0]) * upX + (topRef[1] - mid0[1]) * upY < 0) { upX = -upX; upY = -upY; }
+    const half = CORNER_R;   // upper inner = 0..CORNER_R, lower = K-k
+    const topS = new Float32Array(half + 1), botS = new Float32Array(half + 1), wt = new Float32Array(half + 1);
+    const mids = new Array(half + 1);
+    const stepO = 0.5;
+    const gaps = [];
+    let mpGapMax = 0, teethCols = 0;
+    for (let k = 0; k <= half; k++) {
+      const up = innerD[k], lo = innerD[(K - k) % K];
+      const m = [(up[0] + lo[0]) / 2, (up[1] + lo[1]) / 2];
+      mids[k] = m;
+      const mpGap = (up[0] - lo[0]) * upX + (up[1] - lo[1]) * upY;
+      if (mpGap > mpGapMax) mpGapMax = mpGap;
+      if (k === 0 || k === half) continue;   // corners: contact point
+      const oU = outerD[k], oL = outerD[(K - k) % K];
+      const limUp = 0.85 * ((oU[0] - m[0]) * upX + (oU[1] - m[1]) * upY);
+      const limDn = 0.85 * ((m[0] - oL[0]) * upX + (m[1] - oL[1]) * upY);
+      if (limUp < 1 || limDn < 1) continue;
+      const at = (sv) => interior(m[0] + upX * sv, m[1] + upY * sv);
+      // seed: nearest interior sample to the contact line (MP's line may be off)
+      const seedR = Math.min(0.6 * Math.min(limUp, limDn), 0.3 * t + Math.max(0, mpGap) / 2);
+      let seed = null;
+      for (let d = 0; d <= seedR && seed === null; d += stepO) {
+        if (at(d)) seed = d; else if (d > 0 && at(-d)) seed = -d;
+      }
+      if (seed === null) continue;
+      // Walk out from the seed. Mixed pixels (teeth→gap, gap→lip blur) are
+      // neither class — tolerated for a few px; the walk ends where LIP
+      // starts and stays lip with no interior right behind it.
+      const lip = (sv) => lipAt(m[0] + upX * sv, m[1] + upY * sv);
+      const walk = (dir, lim) => {
+        let last = seed;
+        for (let sv = seed + dir * stepO; Math.abs(sv) <= lim; sv += dir * stepO) {
+          if (at(sv)) { last = sv; continue; }
+          if (lip(sv) && lip(sv + dir * stepO) && lip(sv + 2 * dir * stepO)) {
+            let back = false;
+            for (let j = 3; j <= 6; j++) if (at(sv + dir * j * stepO)) { back = true; break; }
+            if (!back) break;
+          }
+          if (Math.abs(sv - last) > 4) break;
+        }
+        return last;
+      };
+      const hits0 = teethHits;
+      let top = walk(1, limUp) + stepO, bot = walk(-1, limDn) - stepO;   // +½ px: blurred class boundary sits inside the real edge
+      if (teethHits - hits0 >= 4) teethCols++;   // ≥ 2 px of teeth in this column (not a gloss speck)
+      if (top - bot < 1.2) continue;
+      topS[k] = top; botS[k] = bot; wt[k] = 1;
+      if (k > 0.2 * half && k < 0.8 * half) gaps.push(top - bot);
+    }
+    const midCols = Math.max(1, Math.floor(0.6 * half) - 1);
+    openCols = gaps.length / midCols;
+    gaps.sort((p2, q) => p2 - q);
+    const medGap = gaps.length ? gaps[gaps.length >> 1] : 0;
+    openRatio = medGap / mouthW2;
+    // Closed lips have a dark contact seam a few px thick — that is not an
+    // opening. Open = a gap clearly wider than a seam, or teeth showing.
+    const seenTeeth = teethCols >= Math.max(3, 0.25 * midCols);
+    const mpSaysOpen = ratio > (cutoutActive ? 0.03 : 0.05);   // MP's 3D gap agrees → a small gap is real
+    // (sized by the 3D mouth width: a turned head foreshortens the mouth but not the seam)
+    const seamMax = Math.max(3.5, (cutoutActive ? 0.022 : 0.03) * lipW);
+    const minGap = seenTeeth ? 1.5 : mpSaysOpen ? Math.min(seamMax, 4) : seamMax;
+    const pixOpen = openCols >= (cutoutActive ? 0.15 : 0.3) && medGap >= minGap;
+    // MP alone only when the mouth is clearly open (tongue / no teeth visible)
+    cutoutActive = pixOpen || ratio > (cutoutActive ? 0.07 : 0.1);   // MP's 3D gap, only when clearly open
+    if (cutoutActive) {
+      // Columns without a detection: MP's gap if the pixels found nothing in a
+      // mouth MP calls open, else closed (contact line). Then smooth along the
+      // mouth so one noisy column can't notch the edge.
+      const useMP = !pixOpen;
+      const T = new Float32Array(half + 1), B = new Float32Array(half + 1);
+      for (let k = 0; k <= half; k++) {
+        if (wt[k]) { T[k] = topS[k]; B[k] = botS[k]; continue; }
+        if (useMP) {
+          const up = innerD[k], lo = innerD[(K - k) % K], m = mids[k];
+          T[k] = (up[0] - m[0]) * upX + (up[1] - m[1]) * upY;
+          B[k] = (lo[0] - m[0]) * upX + (lo[1] - m[1]) * upY;
+        } else { T[k] = 0; B[k] = 0; }
+      }
+      const sm = (A) => {
+        const o = new Float32Array(half + 1);
+        for (let k = 0; k <= half; k++) {
+          if (k === 0 || k === half) { o[k] = 0; continue; }
+          let sw = 0, sv = 0;
+          for (let d = -3; d <= 3; d++) {
+            const j = k + d; if (j < 1 || j > half - 1) continue;
+            const g = Math.exp(-(d * d) / 4.5) * (wt[j] || useMP ? 1 : 0.35);
+            sw += g; sv += g * A[j];
+          }
+          o[k] = sw ? sv / sw : A[k];
+        }
+        return o;
+      };
+      const Ts = sm(T), Bs = sm(B);
+      if (!prevInner || fresh) prevInner = new Float32Array(K * 2).fill(NaN);
+      const tgtIn = new Float32Array(K * 2);
+      for (let k = 0; k <= half; k++) {
+        const m = mids[k];
+        const ku = k, kl = (K - k) % K;
+        tgtIn[2 * ku] = m[0] + upX * Ts[k]; tgtIn[2 * ku + 1] = m[1] + upY * Ts[k];
+        tgtIn[2 * kl] = m[0] + upX * Bs[k]; tgtIn[2 * kl + 1] = m[1] + upY * Bs[k];
+      }
+      cleanInner(tgtIn, outer, persp, mouthMid);
+      if (Number.isNaN(prevInner[0])) prevInner.set(tgtIn);
+      else trackContour(prevInner, tgtIn, K, opts.moving ? 0.35 : 0.2, 0.35 * t);
+      inner = new Array(K);
+      for (let k = 0; k < K; k++) inner[k] = [prevInner[2 * k], prevInner[2 * k + 1]];
+      hideRuns(inner, visIn, HIDDEN);
+    } else {
+      prevInner = null;
+    }
+  } else if (predicted) {
+    cutoutActive = predicted.open;
+    openRatio = predicted.openRatio; openCols = predicted.openCols;
+    if (cutoutActive) {
+      if (!prevInner || fresh) prevInner = new Float32Array(K * 2).fill(NaN);
+      cleanInner(predicted.tgt, outer, persp, mouthMid);
+      if (Number.isNaN(prevInner[0])) prevInner.set(predicted.tgt);
+      else trackContour(prevInner, predicted.tgt, K, opts.moving ? 0.35 : 0.2, 0.35 * t);
+      inner = new Array(K);
+      for (let k = 0; k < K; k++) inner[k] = [prevInner[2 * k], prevInner[2 * k + 1]];
+      hideRuns(inner, visIn, HIDDEN);
+    } else {
+      prevInner = null;
+    }
   } else {
-    prevInner = null;
+    // Default (previous behaviour): MediaPipe's 3D gap decides open/closed,
+    // the inner edge is refined from colour around MP's inner contour.
+    cutoutActive = ratio > (cutoutActive ? 0.03 : 0.05);
+    if (cutoutActive && conf > 0 && Lp && gridOK) {
+      const nIn = normals(innerD);
+      const lipLmin = Lp.mu[0] - 2.2 * Math.sqrt(Lp.cov[0]);
+      const lipLike = (x, y) => sampleGrid(Pb, x, y, xf) >= 0.5 && sampleGrid(Lb, x, y, xf) >= lipLmin;
+      const rB = 0.45 * t;
+      for (let k = 0; k < K; k++) {
+        rawOff[k] = 0;
+        wOff[k] = 0;
+        const o = innerD[(K - k) % K];
+        const gapK = Math.hypot(o[0] - innerD[k][0], o[1] - innerD[k][1]);
+        if (gapK < 3) continue;
+        const rA = 0.45 * gapK;
+        const [bxk, byk] = innerD[k], [nx, ny] = nIn[k];
+        const like = (s2) => lipLike(bxk + nx * s2, byk + ny * s2);
+        if (like(-rA) || like(-rA + step)) continue;
+        const n2 = Math.ceil((rA + rB) / step);
+        for (let j = 1; j <= n2; j++) {
+          const s2 = -rA + j * step;
+          if (like(s2) && like(s2 + step) && like(s2 + 2 * step)) {
+            rawOff[k] = s2 - 0.5 * step;
+            wOff[k] = 1;
+            break;
+          }
+        }
+      }
+      const innerTaper = (k) => {
+        const d = Math.min(Math.abs(k - CORNER_L), K - Math.abs(k - CORNER_L), Math.abs(k - CORNER_R));
+        return smooth01(0.3 * SUB, 1.5 * SUB, d);
+      };
+      regularise(rawOff, wOff, smOff, t, innerTaper, -0.7 * t, 0.2 * t, conf);
+      if (!prevInner || fresh) prevInner = new Float32Array(K * 2).fill(NaN);
+      const tgtIn = new Float32Array(K * 2);
+      for (let k = 0; k < K; k++) {
+        tgtIn[2 * k] = innerD[k][0] + nIn[k][0] * smOff[k];
+        tgtIn[2 * k + 1] = innerD[k][1] + nIn[k][1] * smOff[k];
+      }
+      cleanInner(tgtIn, outer, persp, mouthMid);
+      if (Number.isNaN(prevInner[0])) prevInner.set(tgtIn);
+      else trackContour(prevInner, tgtIn, K, opts.moving ? 0.3 : 0.15, 0.35 * t);
+      inner = new Array(K);
+      for (let k = 0; k < K; k++) inner[k] = [prevInner[2 * k], prevInner[2 * k + 1]];
+      hideRuns(inner, visIn, HIDDEN);
+    } else {
+      prevInner = null;
+    }
   }
 
   // ── Liner geometry: perspective + thickness cap ──
@@ -966,7 +1584,7 @@ export function segmentLipsColor(src, w, h, lms, opts = {}) {
     for (const [x, y] of outer) { ocx += x; ocy += y; }
     ocx /= outer.length; ocy /= outer.length;
     // Refined inner edge is trustworthy → a looser safety clamp.
-    const shrink = innerRefined ? 0.12 : 0.25;
+    const shrink = innerRefined ? (openMode !== 'mp' ? 0.08 : 0.12) : 0.25;
     safe = outer.map(([x, y]) => [x + (ocx - x) * shrink, y + (ocy - y) * shrink]);
   }
 
@@ -978,6 +1596,9 @@ export function segmentLipsColor(src, w, h, lms, opts = {}) {
     outerSmooth: outer,                    // the regularised fit, for overlays
     linerInner: untangle(linerInner), linerSteps,
     inner: untangle(inner), safe, bbox: box, conf, dprime, version: ++version,
+    // Mouth opening from pixels: open (cut active), gap / mouth width (median
+    // over the middle of the mouth) and the share of columns that are open.
+    open: cutoutActive, openRatio, openCols,
     t,                                     // lip thickness (px) — shaders scale their edge band by it
     _w: w, _h: h,                          // frame size the curves are in
     // Mouth corners: lipstick fades out toward the corner point (references:
@@ -994,4 +1615,4 @@ export function segmentLipsColor(src, w, h, lms, opts = {}) {
 export function getLastLipSeg() { return lastSeg; }
 
 /** Forget temporal state (call on source change). */
-export function resetLipSeg() { prevPts = null; prevBox = null; prevInner = null; lastSeg = null; cutoutActive = false; }
+export function resetLipSeg() { prevPts = null; prevBox = null; prevInner = null; lastSeg = null; cutoutActive = false; lipModel = null; }

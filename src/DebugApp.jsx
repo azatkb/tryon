@@ -180,8 +180,10 @@ export default function DebugApp() {
     s.contour = true;
     return s;
   });
+  const [rawView, setRawView] = useState(false);
+  const rendInfoRef = useRef(null);
   const stateRef = useRef({});
-  stateRef.current = { enabled, useGL, borders, showPoints, showLight, tune, lipContour, colorSeg };
+  stateRef.current = { enabled, useGL, borders, showPoints, showLight, tune, lipContour, colorSeg, rawView };
 
   // feature protection is a module-level flag in the renderer
   useEffect(() => { setFeatureProtect(protect); }, [protect]);
@@ -330,14 +332,17 @@ export default function DebugApp() {
     await new Promise((r) => setTimeout(r, 300));
     downloadBlob(new Blob([JSON.stringify(info)], { type: 'application/json' }), `debug-frame-${stamp}.json`);
   }, [lipCore, lipRough, lipSym, lipSoft, lipCover, colorSeg]);
-  const onFrame = useCallback(({ processed, source, landmarks, w, h, light, fade, jump }) => {
+  const onFrame = useCallback(({ processed, source, landmarks, w, h, light, fade, jump, renderer }) => {
+    if (rendInfoRef.current && rendInfoRef.current.textContent !== renderer) rendInfoRef.current.textContent = renderer || '';
     dumpRef.current = { source, landmarks, w, h };
     if (fadeInfoRef.current) fadeInfoRef.current.textContent = `jump ${((jump || 0) * 100).toFixed(1)}% · makeup ${Math.round((fade ?? 1) * 100)}%`;
     const cv = canvasRef.current;
     if (!cv) return;
     if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
     const ctx = cv.getContext('2d');
-    ctx.drawImage(processed, 0, 0, w, h);
+    // "Raw frame": what the browser decoded, no makeup render — tells a
+    // decode problem (HDR video in Safari) from a render problem.
+    ctx.drawImage(stateRef.current.rawView ? source : processed, 0, 0, w, h);
     // Live recording: every rendered frame goes to the encoder (after overlays).
     const capture = () => {
       const wr = liveWriterRef.current;
@@ -457,18 +462,25 @@ export default function DebugApp() {
   // whole frame comes out blown out. Shown in the panel.
   const [videoColor, setVideoColor] = useState('');
   const detectVideoColor = (v) => {
-    let info = `${v.videoWidth}×${v.videoHeight}`;
-    try {
-      if (typeof VideoFrame !== 'undefined') {
+    const sv = /Version\/([\d.]+).*Safari/.exec(navigator.userAgent);
+    let info = `${v.videoWidth}×${v.videoHeight}` + (sv ? ` · Safari ${sv[1]}` : '');
+    const probe = () => {
+      try {
+        if (typeof VideoFrame === 'undefined') return ' · no WebCodecs';
         const vf = new VideoFrame(v);
         const cs = vf.colorSpace || {};
-        info += ` · ${cs.transfer || '?'} / ${cs.primaries || '?'}${cs.fullRange ? ' full' : ''}`;
-        if (cs.transfer === 'hlg' || cs.transfer === 'pq') info += ' · HDR!';
+        let r = ` · ${cs.transfer || '?'} / ${cs.primaries || '?'}${cs.fullRange ? ' full' : ''}`;
+        if (cs.transfer === 'hlg' || cs.transfer === 'pq') r += ' · HDR!';
         vf.close();
-      }
-    } catch (_) { /* not readable yet / unsupported */ }
-    setVideoColor(info);
+        return r;
+      } catch (e) { return ` · VideoFrame: ${(e && e.message) || e}`; }
+    };
+    // the first decoded frame may not be readable at 'loadeddata' yet
+    const done = () => setVideoColor(info + probe());
+    if (typeof v.requestVideoFrameCallback === 'function') { let ok = false; v.requestVideoFrameCallback(() => { ok = true; done(); }); setTimeout(() => { if (!ok) done(); }, 1500); }
+    else setTimeout(done, 300);
   };
+
 
   const toggleVideoPause = useCallback(() => {
     const v = videoElRef.current;
@@ -743,9 +755,12 @@ export default function DebugApp() {
               </button>
             )}
             {videoMode && videoUrl && videoColor && (
-              <span title="Decoded video: size · transfer / primaries. HDR (hlg / pq) is drawn blown-out by some Safari versions."
-                style={{ fontSize: '.68rem', color: /HDR/.test(videoColor) ? '#ff9800' : '#888' }}>{videoColor}</span>
+              <span title="Decoded video: size · browser · transfer / primaries"
+                style={{ fontSize: '.68rem', color: /HDR/.test(videoColor) ? '#ff9800' : '#888' }}>{videoColor} · <span ref={rendInfoRef} /></span>
             )}
+            <label style={{ fontSize: '.68rem', color: '#aaa', cursor: 'pointer' }} title="Show the decoded frame without any render — to tell a decoding problem from a render problem">
+              <input type="checkbox" checked={rawView} onChange={(e) => setRawView(e.target.checked)} /> raw frame
+            </label>
             {photoMode && photoUrl && (
               <button onClick={downloadCombined} style={{ fontSize: '.72rem', padding: '3px 10px', borderRadius: 12,
                 border: '1px solid #4caf50', background: '#4caf50', color: '#fff', cursor: 'pointer', fontWeight: 600 }}>

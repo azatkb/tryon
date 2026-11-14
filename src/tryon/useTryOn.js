@@ -92,6 +92,7 @@ export function useTryOn(options = {}) {
   // Per-frame metrics the host may want (motion gating, exposure, landmarks).
   // A ref, not state: these change every frame and must not drive re-renders.
   const metricsRef = useRef({ fade: 1, jump: 0, motion: 0, faceLum: 0.5, lightBal: 0, faceYaw: 0, blinkL: 1, blinkR: 1, landmarks: null, moving: false });
+  const rendererUsedRef = useRef('none');   // which renderer actually drew the last frame (diagnostics)
 
   // The hidden <video> is owned here so a host only has to provide a canvas.
   if (!videoRef.current && typeof document !== 'undefined' && source === 'camera') {
@@ -208,14 +209,14 @@ export function useTryOn(options = {}) {
       pctx.globalAlpha = Math.min(1, fade);
       if (!done && useMP) {
         const mpc = renderMakeupMultiPass(src, w, h, lms, withLum);
-        if (mpc) { pctx.drawImage(mpc, 0, 0, w, h); done = true; }
+        if (mpc) { pctx.drawImage(mpc, 0, 0, w, h); done = true; rendererUsedRef.current = 'webgl-multipass'; }
       }
       if (!done && (useGL || cfg.renderer === 'auto')) {
         const glc = renderMakeupGL(src, w, h, lms, withLum);
-        if (glc) { pctx.drawImage(glc, 0, 0, w, h); done = true; }
+        if (glc) { pctx.drawImage(glc, 0, 0, w, h); done = true; rendererUsedRef.current = 'webgl-single'; }
       }
       pctx.globalAlpha = 1;
-      if (!done) renderMakeup(pctx, w, h, lms, withLum);
+      if (!done) { renderMakeup(pctx, w, h, lms, withLum); rendererUsedRef.current = 'canvas2d'; }
     }
 
     cfg.onFrame?.({
@@ -227,6 +228,7 @@ export function useTryOn(options = {}) {
       fade: metricsRef.current.fade, jump: metricsRef.current.jump,
       motion: metricsRef.current.motion,
       moving: metricsRef.current.moving,
+      renderer: rendererUsedRef.current,
     });
     return proc;
   }, []);

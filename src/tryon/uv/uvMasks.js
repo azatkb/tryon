@@ -16,7 +16,7 @@
 // Masks come from /uv-masks/<key>.png (see loadUVMasks). Missing files simply
 // leave that product on the old procedural path.
 
-import { UV, TRI, UV_COUNT } from './faceMeshUV.js';
+import { UV, TRI, UV_COUNT, CANON_Z } from './faceMeshUV.js';
 import { LIPS_INNER } from '../lips.js';
 import { FACE_OVAL } from '../regions.js';
 
@@ -100,11 +100,11 @@ export function reloadUVMasks(base) {
 const VS = `
 attribute vec3 aPos;
 attribute vec2 aUV;
-attribute vec3 aGeo;     // facing (n·view), light response, concavity response
+attribute vec4 aGeo;     // facing (n·view), light response, concavity response, RIGID facing (canonical normal × head pose)
 attribute vec3 aNrm;     // smoothed surface normal (image space, out of the face)
 attribute vec4 aEye;     // eye coords (eye widths): s 0 outer … 1 inner corner, h above the upper lash line, brow height, height over the LOWER lash line
 varying vec2 vT;
-varying vec3 vGeo;
+varying vec4 vGeo;
 varying vec3 vNrm;
 varying vec4 vEye;
 void main() { vT = aUV; vGeo = aGeo; vNrm = aNrm; vEye = aEye; gl_Position = vec4(aPos, 1.0); }`;
@@ -112,7 +112,7 @@ void main() { vT = aUV; vGeo = aGeo; vNrm = aNrm; vEye = aEye; gl_Position = vec
 const FS = `
 precision mediump float;
 varying vec2 vT;
-varying vec3 vGeo;
+varying vec4 vGeo;
 varying vec3 vNrm;
 varying vec4 vEye;
 uniform vec3 uL;                   // key light direction (toward the light)
@@ -139,7 +139,10 @@ uniform float uEyeLower;           // smudge under the lower lashes at the outer
 //           corner (uEyeShape.w) — soft at both ends, no vertical edge
 //   density dense lid at the lash line → crease (~0.45) → fades to nothing at
 //           the top. The level also selects the host shader's zone colour.
-float eyeShadow(vec4 E) {
+// returns (alpha, crease weight): the crease / outer-V tone is placed by
+// POSITION, not by mask level (level-based zones put the deep tone on every
+// soft edge — a dark rim round the whole shadow)
+vec2 eyeShadow(vec4 E) {
   float s = E.x, h = E.y, hb = max(E.z, 0.08), hl = E.w;
   float wing = max(uEyeShape.z, 0.05);
   float e = max(0.0, -s);                                   // past the outer corner (eye widths)
@@ -179,7 +182,11 @@ float eyeShadow(vec4 E) {
     g *= 1.0 - smoothstep(0.2 * tl, tl, d);                  // soft downward
     low = g * 0.7 * fl * fl * (3.0 - 2.0 * fl);
   }
-  return max(up, low);
+  // crease tone: upper part of the shadow, the outer V and the wing; the lid,
+  // the inner end and the soft lower edges stay in the lid tone
+  float cw = max(smoothstep(0.35, 0.85, hn), 0.75 * smoothstep(0.35, -0.15, s));
+  if (low > up) cw = 0.6 * smoothstep(0.6, 0.0, s);
+  return vec2(max(up, low), clamp(cw, 0.0, 1.0));
 }
 
 void main() {
@@ -188,13 +195,25 @@ void main() {
   else if (uCutMode > 0.5) cut = smoothstep(0.85, 1.0, texture2D(uCutScr, gl_FragCoord.xy / uSize).a);
   // Grazing angle: where the skin turns away from the camera, less product is
   // seen (and real powder/cream reads thinner) — no "sticker" at the silhouette.
-  float keep = (1.0 - cut) * mix(1.0, smoothstep(0.06, 0.55, vGeo.x), uGraze);
+  // uGraze 0..1: how much of the fade toward the silhouette; above 1 the
+  // fade also starts earlier (products that sit on the front of the face —
+  // blush — must not ride the far cheek's side out to the silhouette)
+  // Facing for the fade: the smaller of the live mesh's (vGeo.x) and the RIGID
+  // one (vGeo.w — the canonical face turned by the head pose). On a turn
+  // MediaPipe flattens the far cheek and slides it out to the silhouette, so
+  // its own normals still "face the camera" there; the rigid head knows that
+  // cheek is turned away (blush stood on the far edge of the face).
+  float gx = max(uGraze - 1.0, 0.0);
+  float fz = min(vGeo.x, vGeo.w);
+  float keep = (1.0 - cut) * mix(1.0, smoothstep(0.06 + 0.3 * gx, 0.55 + 0.25 * gx, fz), min(uGraze, 1.0));
   // Surface turned away from the camera (smoothed normals — robust where the
   // noisy mesh flips single triangles): nothing is drawn there. E.g. the far
   // eye of a head in profile: its liner/shadow must not land on the nose.
   keep *= smoothstep(-0.08, 0.0, vGeo.x);   // only CLEARLY turned-away surface is dropped
   if (uMode > 2.5) {
-    gl_FragColor = vec4(vec3(uW), eyeShadow(vEye) * keep * uW);
+    vec2 es = eyeShadow(vEye);
+    // R = crease weight, G = 0 marks "zones by position" for the host shader
+    gl_FragColor = vec4(es.y * uW, 0.0, 0.0, es.x * keep * uW);
     return;
   }
   if (uMode > 1.5) {
@@ -294,15 +313,56 @@ export function lightDir(light, lightBal) {
  *                key light — the glow sits where the surface faces the light
  *   z concave  = contour response: stronger in hollows, weaker on bumps
  */
+// Canonical face (cm, y up, z toward the camera) and its smoothed normals.
+const CANON = (() => {
+  const cm = 0.0636;
+  const P = new Float32Array(UV_COUNT * 3), Nn = new Float32Array(UV_COUNT * 3);
+  for (let i = 0; i < UV_COUNT; i++) { P[3 * i] = (UV[2 * i] - 0.5) / cm; P[3 * i + 1] = (UV[2 * i + 1] - 0.5) / cm; P[3 * i + 2] = CANON_Z[i]; }
+  for (let t = 0; t < TRI.length; t += 3) {
+    const a = 3 * TRI[t], b = 3 * TRI[t + 1], c = 3 * TRI[t + 2];
+    const ux = P[b] - P[a], uy = P[b + 1] - P[a + 1], uz = P[b + 2] - P[a + 2];
+    const vx = P[c] - P[a], vy = P[c + 1] - P[a + 1], vz = P[c + 2] - P[a + 2];
+    let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    if (nz < 0) { nx = -nx; ny = -ny; nz = -nz; }   // canonical face looks at +z
+    for (const q of [a, b, c]) { Nn[q] += nx; Nn[q + 1] += ny; Nn[q + 2] += nz; }
+  }
+  for (let pass = 0; pass < 2; pass++) {             // smooth like the live normals
+    const T = Float32Array.from(Nn);
+    for (let i = 0; i < UV_COUNT; i++) for (const j of NEIGH[i]) { Nn[3 * i] += T[3 * j]; Nn[3 * i + 1] += T[3 * j + 1]; Nn[3 * i + 2] += T[3 * j + 2]; }
+  }
+  for (let i = 0; i < UV_COUNT; i++) { const l = Math.hypot(Nn[3 * i], Nn[3 * i + 1], Nn[3 * i + 2]) || 1; Nn[3 * i] /= l; Nn[3 * i + 1] /= l; Nn[3 * i + 2] /= l; }
+  return { P, N: Nn };
+})();
+/** Head-pose basis from 4 stable points (outer eye corners, forehead, chin). */
+function poseBasis(get) {
+  const a = get(33), b = get(263), t = get(10), c = get(152);
+  let X = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+  let l = Math.hypot(...X) || 1; X = X.map((v) => v / l);
+  let Y = [t[0] - c[0], t[1] - c[1], t[2] - c[2]];
+  const d = Y[0] * X[0] + Y[1] * X[1] + Y[2] * X[2];
+  Y = [Y[0] - d * X[0], Y[1] - d * X[1], Y[2] - d * X[2]];
+  l = Math.hypot(...Y) || 1; Y = Y.map((v) => v / l);
+  const Z = [X[1] * Y[2] - X[2] * Y[1], X[2] * Y[0] - X[0] * Y[2], X[0] * Y[1] - X[1] * Y[0]];
+  return [X, Y, Z];
+}
+const CANON_BASIS = poseBasis((i) => [CANON.P[3 * i], CANON.P[3 * i + 1], CANON.P[3 * i + 2]]);
+
 function computeGeo(landmarks, W, H, L, out, nrm) {
   meshNormals(landmarks, W, H, nrm, _P);
+  // rigid head pose: live basis (pixels, y up, z toward the camera)
+  const LB = poseBasis((i) => [landmarks[i].x * W, -landmarks[i].y * H, -(landmarks[i].z || 0) * W]);
+  const [Xk, Yk, Zk] = CANON_BASIS, [Xc, Yc, Zc] = LB;
   const [lx, ly, lz] = L;
   let hx = lx, hy = ly, hz = lz - 1;         // half vector with view (0,0,-1)
   const hl = Math.hypot(hx, hy, hz) || 1; hx /= hl; hy /= hl; hz /= hl;
   for (let i = 0; i < UV_COUNT; i++) {
-    const k = 3 * i;
+    const k = 3 * i, o = 4 * i;
     const nx = nrm[k], ny = nrm[k + 1], nz = nrm[k + 2];
     const facing = -nz;
+    // canonical normal turned into the live pose; its z = facing the camera
+    const cx0 = CANON.N[k], cy0 = CANON.N[k + 1], cz0 = CANON.N[k + 2];
+    const ca = cx0 * Xk[0] + cy0 * Xk[1] + cz0 * Xk[2], cb = cx0 * Yk[0] + cy0 * Yk[1] + cz0 * Yk[2], cc = cx0 * Zk[0] + cy0 * Zk[1] + cz0 * Zk[2];
+    const rigid = ca * Xc[2] + cb * Yc[2] + cc * Zc[2];
     const lam = Math.max(0, nx * lx + ny * ly + nz * lz);
     const spec = Math.pow(Math.max(0, nx * hx + ny * hy + nz * hz), 10);
     const nb = NEIGH[i];
@@ -315,9 +375,10 @@ function computeGeo(landmarks, W, H, L, out, nrm) {
     const m = nb.length || 1;
     cx = cx / m - _P[k]; cy = cy / m - _P[k + 1]; cz = cz / m - _P[k + 2];
     const conc = (cx * nx + cy * ny + cz * nz) / ((el / m) || 1);    // >0 hollow
-    out[k] = facing;
-    out[k + 1] = Math.min(1.4, 0.4 + 0.45 * lam + 0.75 * spec);
-    out[k + 2] = Math.min(1.35, Math.max(0.55, 1 + 2.2 * conc));
+    out[o] = facing;
+    out[o + 1] = Math.min(1.4, 0.4 + 0.45 * lam + 0.75 * spec);
+    out[o + 2] = Math.min(1.35, Math.max(0.55, 1 + 2.2 * conc));
+    out[o + 3] = rigid;
   }
   return out;
 }
@@ -482,7 +543,7 @@ function createRenderer(gl) {
   const prevPos = new Float32Array(UV_COUNT * 3), subPos = new Float32Array(UV_COUNT * 3);
   let prevT = -1;
   const geoBuf = gl.createBuffer(), nrmBuf = gl.createBuffer();
-  const geo = new Float32Array(UV_COUNT * 3), nrm = new Float32Array(UV_COUNT * 3);
+  const geo = new Float32Array(UV_COUNT * 4), nrm = new Float32Array(UV_COUNT * 3);
   const eyeBuf = gl.createBuffer(), eyeC = new Float32Array(UV_COUNT * 4);
   const state = { blurred: false };
   const idxBuf = gl.createBuffer();
@@ -591,7 +652,7 @@ function createRenderer(gl) {
     gl.enable(gl.DEPTH_TEST);
     gl.bindBuffer(gl.ARRAY_BUFFER, posBuf); gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
     gl.bindBuffer(gl.ARRAY_BUFFER, uvBuf); gl.enableVertexAttribArray(aUV); gl.vertexAttribPointer(aUV, 2, gl.FLOAT, false, 0, 0);
-    gl.bindBuffer(gl.ARRAY_BUFFER, geoBuf); gl.enableVertexAttribArray(aGeo); gl.vertexAttribPointer(aGeo, 3, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, geoBuf); gl.enableVertexAttribArray(aGeo); gl.vertexAttribPointer(aGeo, 4, gl.FLOAT, false, 0, 0);
     gl.bindBuffer(gl.ARRAY_BUFFER, nrmBuf); gl.enableVertexAttribArray(aNrm); gl.vertexAttribPointer(aNrm, 3, gl.FLOAT, false, 0, 0);
     if (aEye >= 0) { gl.bindBuffer(gl.ARRAY_BUFFER, eyeBuf); gl.enableVertexAttribArray(aEye); gl.vertexAttribPointer(aEye, 4, gl.FLOAT, false, 0, 0); }
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
@@ -658,7 +719,7 @@ function createRenderer(gl) {
     gl.vertexAttribPointer(aUV, 2, gl.FLOAT, false, 0, 0);
     gl.bindBuffer(gl.ARRAY_BUFFER, geoBuf);
     gl.enableVertexAttribArray(aGeo);
-    gl.vertexAttribPointer(aGeo, 3, gl.FLOAT, false, 0, 0);
+    gl.vertexAttribPointer(aGeo, 4, gl.FLOAT, false, 0, 0);
     gl.bindBuffer(gl.ARRAY_BUFFER, nrmBuf);
     gl.enableVertexAttribArray(aNrm);
     gl.vertexAttribPointer(aNrm, 3, gl.FLOAT, false, 0, 0);
@@ -810,7 +871,7 @@ export function uvJobs(o) {
   // graze: how much the product thins toward the silhouette (0 = not at all)
   const A = (name, on, key, cut, graze) => { if (on && images[key]) jobs.push({ name, mode: 'alpha', keys: [key], cut, graze, skirt: key === 'foundation' }); };
   A('fnd', o.foundation, 'foundation', true, 0);   // base covers the whole face, up to its real edge
-  A('blush', o.blush, 'blush', true, 0.8);
+  A('blush', o.blush, 'blush', true, 1.5);   // > 1: fades early toward the silhouette (far cheek)
   if (o.eyes && eyeProcedural) jobs.push({ name: 'eye', mode: 'eyeProc', keys: [], cut: false, graze: 0.5 });
   else A('eye', o.eyes, 'eyes', false, 0.5);
   A('eyeliner', o.eyeliner, 'eyeliner', false, 0.2);

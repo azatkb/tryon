@@ -1,0 +1,1005 @@
+{
+  "looks": [
+    {
+      "key": "natural",
+      "name": "Natural",
+      "sub": "Sheer pink gloss · bare nude lid · brown lashes · pink flush",
+      "lips": {
+        "deepHex": "#9A5E54",
+        "hex": "#D58C80",
+        "amount": 55,
+        "finish": "sheershine"
+      },
+      "cheeks": {
+        "hex": "#EEA297",
+        "amount": 18
+      },
+      "eyes": {
+        "hexes": [
+          "#DCB598",
+          "#DAB5A7",
+          "#8C684B"
+        ],
+        "liner": true,
+        "linerHex": "#5C4236",
+        "lashes": true,
+        "amount": 60
+      },
+      "contour": 0
+    },
+    {
+      "key": "everyday",
+      "name": "Everyday",
+      "sub": "Satin rose-nude lip · taupe lid · thin liner",
+      "lips": {
+        "deepHex": "#8C5246",
+        "hex": "#C2807A",
+        "amount": 60,
+        "finish": "satin"
+      },
+      "cheeks": {
+        "hex": "#E59A8E",
+        "amount": 18
+      },
+      "eyes": {
+        "hexes": [
+          "#C8A690",
+          "#A27D68",
+          "#7C5946"
+        ],
+        "liner": true,
+        "linerHex": "#4E3428",
+        "lashes": true,
+        "amount": 80
+      },
+      "contour": 0
+    },
+    {
+      "key": "professional",
+      "name": "Professional",
+      "sub": "Satin mauve lip · matte taupe eye · neat lashes",
+      "lips": {
+        "deepHex": "#74414A",
+        "hex": "#A8676B",
+        "amount": 65,
+        "finish": "matte"
+      },
+      "cheeks": {
+        "hex": "#DE968C",
+        "amount": 16
+      },
+      "eyes": {
+        "hexes": [
+          "#C2A592",
+          "#977462",
+          "#6C4F40"
+        ],
+        "liner": true,
+        "linerHex": "#3E2B22",
+        "lashes": true,
+        "amount": 85
+      },
+      "contour": 10
+    },
+    {
+      "key": "soft-glam",
+      "name": "Soft Glam",
+      "sub": "Satin pink-nude lip · champagne shimmer lid · lashes · soft sculpt",
+      "lips": {
+        "deepHex": "#7A4A3E",
+        "hex": "#B4786A",
+        "amount": 70,
+        "finish": "satin"
+      },
+      "cheeks": {
+        "hex": "#EEA297",
+        "amount": 24
+      },
+      "eyes": {
+        "spread": 1.4,
+        "hexes": [
+          "#CFA690",
+          "#9E6A5E",
+          "#6A463A"
+        ],
+        "liner": true,
+        "linerHex": "#4A3226",
+        "lashes": true,
+        "amount": 95
+      },
+      "contour": 15,
+      "liner": {
+        "hex": "#8D5B4A",
+        "amount": 68
+      },
+      "hl": {
+        "hex": "#F1D6C8"
+      }
+    },
+    {
+      "key": "date-night",
+      "name": "Date Night",
+      "sub": "Wine-berry gloss · plum smoky eye · winged liner · lashes",
+      "lips": {
+        "deepHex": "#6A1F3A",
+        "hex": "#8C494F",
+        "amount": 78,
+        "finish": "gloss"
+      },
+      "cheeks": {
+        "hex": "#E16B62",
+        "amount": 20
+      },
+      "eyes": {
+        "spread": 1.2,
+        "hexes": [
+          "#B88C9A",
+          "#7E4E66",
+          "#563245"
+        ],
+        "liner": true,
+        "lashes": true,
+        "amount": 100,
+        "finish": "shimmer",
+        "lower": 1
+      },
+      "contour": 10,
+      "liner": {
+        "hex": "#5E2239",
+        "amount": 68
+      },
+      "hl": {
+        "hex": "#EBC9C2"
+      }
+    },
+    {
+      "key": "glam",
+      "name": "Glam",
+      "sub": "Red matte lip · warm brown smoky eye · lashes · sculpt",
+      "lips": {
+        "deepHex": "#6E4434",
+        "hex": "#A8705F",
+        "amount": 78,
+        "finish": "satin"
+      },
+      "cheeks": {
+        "hex": "#C47A66",
+        "amount": 24
+      },
+      "eyes": {
+        "spread": 1.25,
+        "hexes": [
+          "#A9785A",
+          "#6E4430",
+          "#3E2618"
+        ],
+        "liner": true,
+        "lashes": true,
+        "wing": true,
+        "lower": 1.4
+      },
+      "contour": 35,
+      "liner": {
+        "hex": "#8A5A50",
+        "amount": 70
+      },
+      "hl": {
+        "hex": "#F3D9C3"
+      }
+    },
+    {
+      "key": "smoky-eye",
+      "name": "Smoky Eye",
+      "sub": "Charcoal smoky eye · kohl · nude lip",
+      "lips": {
+        "deepHex": "#7B4B3B",
+        "hex": "#C48E86",
+        "amount": 55,
+        "finish": "satin"
+      },
+      "cheeks": {
+        "hex": "#D99A8C",
+        "amount": 12
+      },
+      "eyes": {
+        "spread": 1.35,
+        "hexes": [
+          "#3E3433",
+          "#716664",
+          "#1A1515"
+        ],
+        "liner": true,
+        "linerHex": "#141010",
+        "lashes": true,
+        "amount": 100,
+        "lower": 1.6
+      },
+      "contour": 15
+    },
+    {
+      "key": "bronzed",
+      "name": "Bronzed",
+      "sub": "Bronze shimmer lid · terracotta flush · glossy caramel-nude lip",
+      "lips": {
+        "deepHex": "#94502F",
+        "hex": "#B07A66",
+        "amount": 60,
+        "finish": "gloss"
+      },
+      "cheeks": {
+        "hex": "#9C6B52",
+        "amount": 34
+      },
+      "eyes": {
+        "spread": 1.35,
+        "hexes": [
+          "#B07850",
+          "#8A5634",
+          "#5A3620"
+        ],
+        "liner": true,
+        "linerHex": "#4A2E1E",
+        "lashes": true,
+        "lashHex": "#2E1C12",
+        "amount": 90
+      },
+      "contour": 35,
+      "hl": {
+        "hex": "#F2D3A8"
+      }
+    },
+    {
+      "key": "latte",
+      "name": "Latte Makeup",
+      "photoOnly": true,
+      "sub": "Warm brown eye · bronzed cheeks · glossy brown-nude lip",
+      "lips": {
+        "deepHex": "#6E4434",
+        "hex": "#A87866",
+        "amount": 66,
+        "finish": "gloss"
+      },
+      "cheeks": {
+        "hex": "#B0705A",
+        "amount": 26
+      },
+      "eyes": {
+        "spread": 1.2,
+        "hexes": [
+          "#A87656",
+          "#7A4A30",
+          "#4A2A1A"
+        ],
+        "liner": true,
+        "linerHex": "#3E2618",
+        "lashes": true,
+        "amount": 100,
+        "wing": true
+      },
+      "contour": 25,
+      "liner": {
+        "hex": "#7A4E3C",
+        "amount": 62
+      },
+      "hl": {
+        "hex": "#F0D2B0"
+      }
+    },
+    {
+      "key": "douyin",
+      "name": "Douyin Pink",
+      "photoOnly": true,
+      "sub": "Coral flush across cheeks and nose · red-coral lip · pink lid",
+      "lips": {
+        "deepHex": "#8A2228",
+        "hex": "#C83A3A",
+        "amount": 75,
+        "finish": "satin"
+      },
+      "cheeks": {
+        "hex": "#F07A70",
+        "amount": 34
+      },
+      "eyes": {
+        "hexes": [
+          "#F0B4A8",
+          "#E08A80",
+          "#B05A58"
+        ],
+        "lashes": true,
+        "amount": 75,
+        "lower": 0.6
+      },
+      "contour": 0,
+      "liner": {
+        "hex": "#A8262C",
+        "amount": 60
+      },
+      "hl": {
+        "hex": "#F6DCD0"
+      }
+    },
+    {
+      "key": "old-hollywood",
+      "name": "Old Hollywood",
+      "photoOnly": true,
+      "sub": "Black winged liner · red matte lip · champagne lid",
+      "lips": {
+        "hex": "#B01E2A",
+        "amount": 88,
+        "finish": "matte"
+      },
+      "cheeks": {
+        "hex": "#D88A84",
+        "amount": 18
+      },
+      "eyes": {
+        "hexes": [
+          "#E6CCB4",
+          "#B89078",
+          "#5A4038"
+        ],
+        "liner": true,
+        "linerHex": "#141010",
+        "lashes": true,
+        "wing": true,
+        "amount": 85
+      },
+      "contour": 15,
+      "liner": {
+        "hex": "#94161F",
+        "amount": 66
+      },
+      "hl": {
+        "hex": "#F3DCC8"
+      }
+    },
+    {
+      "key": "red-lip",
+      "name": "Red Lip Classic",
+      "photoOnly": true,
+      "sub": "Classic red lip · neutral eye · defined lashes",
+      "lips": {
+        "hex": "#B3202A",
+        "amount": 88,
+        "finish": "satin"
+      },
+      "cheeks": {
+        "hex": "#D8948A",
+        "amount": 16
+      },
+      "eyes": {
+        "hexes": [
+          "#D8BCA8",
+          "#A88270",
+          "#5E4438"
+        ],
+        "liner": true,
+        "linerHex": "#2A1C18",
+        "lashes": true,
+        "amount": 80
+      },
+      "contour": 15,
+      "liner": {
+        "hex": "#94161F",
+        "amount": 66
+      },
+      "hl": {
+        "hex": "#F3DCC8"
+      }
+    },
+    {
+      "key": "siren",
+      "name": "Siren Eyes",
+      "photoOnly": true,
+      "sub": "Smoky brown wing · deep outer corner · nude-brown lip",
+      "lips": {
+        "deepHex": "#6A4438",
+        "hex": "#9A6A5E",
+        "amount": 70,
+        "finish": "matte"
+      },
+      "cheeks": {
+        "hex": "#B07868",
+        "amount": 18
+      },
+      "eyes": {
+        "spread": 1.25,
+        "hexes": [
+          "#A87E64",
+          "#6E4A38",
+          "#2E1E18"
+        ],
+        "liner": true,
+        "linerHex": "#1A1210",
+        "lashes": true,
+        "wing": true,
+        "amount": 100,
+        "lower": 1.2
+      },
+      "contour": 30,
+      "liner": {
+        "hex": "#6A4438",
+        "amount": 64
+      },
+      "hl": {
+        "hex": "#F0D2B8"
+      }
+    },
+    {
+      "key": "monochrome-rosy",
+      "name": "Monochrome Rosy",
+      "photoOnly": true,
+      "sub": "One rose shade on lid, cheeks and lips",
+      "lips": {
+        "deepHex": "#7E4048",
+        "hex": "#C27C80",
+        "amount": 66,
+        "finish": "satin"
+      },
+      "cheeks": {
+        "hex": "#D88A8E",
+        "amount": 28
+      },
+      "eyes": {
+        "hexes": [
+          "#E0B0B0",
+          "#C48486",
+          "#8E5A60"
+        ],
+        "lashes": true,
+        "amount": 80
+      },
+      "contour": 0,
+      "liner": {
+        "hex": "#A0646A",
+        "amount": 58
+      },
+      "hl": {
+        "hex": "#F4D8D4"
+      }
+    }
+  ],
+  "refs": {
+    "natural": {
+      "eyes": {
+        "hexes": [
+          "#E2BCA8",
+          "#CFA08E",
+          "#A27866"
+        ],
+        "spread": 0.75,
+        "amount": 60,
+        "wing": false,
+        "liner": false,
+        "lashHex": "#2E2018"
+      },
+      "lips": {
+        "hex": "#D08A88",
+        "deepHex": "#A8625F",
+        "finish": "gloss",
+        "amount": 55,
+        "nude": true
+      },
+      "cheeks": "#F29A9A",
+      "brz": "#C8957A"
+    },
+    "everyday": {
+      "eyes": {
+        "hexes": [
+          "#C9A08C",
+          "#9A7060",
+          "#6A4A3C"
+        ],
+        "spread": 1,
+        "amount": 100,
+        "wing": false,
+        "linerHex": "#4A3226"
+      },
+      "lips": {
+        "hex": "#C47A7C",
+        "deepHex": "#985458",
+        "finish": "satin",
+        "amount": 74,
+        "nude": true
+      },
+      "cheeks": "#EE9480",
+      "brz": "#A8764F"
+    },
+    "date-night": {
+      "eyes": {
+        "hexes": [
+          "#9A6470",
+          "#6E3A4E",
+          "#3A1E28"
+        ],
+        "spread": 1.2,
+        "wing": true,
+        "linerHex": "#1A0E10",
+        "finish": "shimmer",
+        "lower": 1
+      },
+      "lips": {
+        "hex": "#8E2E44",
+        "deepHex": "#5E1A2A",
+        "finish": "gloss",
+        "amount": 86
+      },
+      "cheeks": "#D8707A",
+      "brz": "#8E5A48"
+    },
+    "bronzed": {
+      "eyes": {
+        "hexes": [
+          "#B87848",
+          "#965834",
+          "#5A321C"
+        ],
+        "spread": 1.25,
+        "wing": false,
+        "linerHex": "#3E2416",
+        "finish": "shimmer"
+      },
+      "lips": {
+        "hex": "#B57058",
+        "deepHex": "#8A4A36",
+        "finish": "gloss",
+        "amount": 72,
+        "nude": true
+      },
+      "cheeks": "#D27A5C",
+      "brz": "#7E4A2C"
+    },
+    "smoky-eye": {
+      "eyes": {
+        "hexes": [
+          "#4A4240",
+          "#3E3634",
+          "#141214"
+        ],
+        "spread": 1.3,
+        "wing": false,
+        "linerHex": "#141014",
+        "lower": 2,
+        "lowerLiner": true,
+        "finish": "shimmer"
+      },
+      "lips": {
+        "hex": "#A86A6C",
+        "deepHex": "#7E4848",
+        "finish": "satin",
+        "amount": 70,
+        "nude": true
+      },
+      "cheeks": "#C9988A",
+      "brz": "#8E6A58"
+    },
+    "professional": {
+      "eyes": {
+        "hexes": [
+          "#A68A7C",
+          "#7C6458",
+          "#4A3A34"
+        ],
+        "spread": 1,
+        "amount": 110,
+        "wing": false,
+        "linerHex": "#1E1614",
+        "lower": 0,
+        "lowerLiner": false
+      },
+      "lips": {
+        "hex": "#955A6A",
+        "deepHex": "#74404E",
+        "finish": "satin",
+        "amount": 80
+      },
+      "cheeks": "#CC8A88",
+      "brz": "#8A5A40"
+    },
+    "soft-glam": {
+      "eyes": {
+        "hexes": [
+          "#E6C4A4",
+          "#9E6A5E",
+          "#5A362E"
+        ],
+        "spread": 1.3,
+        "amount": 110,
+        "wing": false,
+        "linerHex": "#3A2418",
+        "lower": 0.6,
+        "finish": "shimmer"
+      },
+      "lips": {
+        "hex": "#BC7470",
+        "deepHex": "#8A4A44",
+        "finish": "satin",
+        "amount": 80,
+        "nude": true
+      },
+      "cheeks": "#EC8E8C",
+      "brz": "#A8724F"
+    },
+    "glam": {
+      "eyes": {
+        "hexes": [
+          "#8A5A40",
+          "#66402A",
+          "#4A2A18"
+        ],
+        "spread": 1.2,
+        "wing": false,
+        "linerHex": "#1A0E08",
+        "lower": 1,
+        "lowerLiner": false
+      },
+      "lips": {
+        "hex": "#8E1C1E",
+        "deepHex": "#5A0A10",
+        "finish": "matte",
+        "amount": 92
+      },
+      "cheeks": "#C27060",
+      "brz": "#8A5432"
+    }
+  },
+  "banuba": {
+    "natural": {
+      "fnd": [
+        "natural",
+        0.25
+      ],
+      "conc": 0.35,
+      "con": 0,
+      "hl": 0.2,
+      "blush": [
+        "#F0A090",
+        "cream_shine",
+        0.3
+      ],
+      "lip": [
+        "#C87A7A",
+        "balm",
+        0.5
+      ],
+      "liner": null,
+      "eyes": [
+        [
+          "#E6BCA8",
+          "matte",
+          0.15
+        ]
+      ],
+      "el": null,
+      "lash": [
+        "natural",
+        "mid"
+      ],
+      "brow": 0.25
+    },
+    "everyday": {
+      "fnd": [
+        "natural",
+        0.35
+      ],
+      "conc": 0.45,
+      "con": 0,
+      "hl": 0.15,
+      "blush": [
+        "#E8778E",
+        "cream_shine",
+        0.55
+      ],
+      "lip": [
+        "#C2566E",
+        "balm",
+        0.7
+      ],
+      "liner": null,
+      "eyes": [
+        [
+          "#C8907E",
+          "matte",
+          0.35
+        ]
+      ],
+      "el": null,
+      "lash": [
+        "natural",
+        "high"
+      ],
+      "brow": 0.35,
+      "sh": 1
+    },
+    "professional": {
+      "fnd": [
+        "matte",
+        0.5
+      ],
+      "conc": 0.5,
+      "con": 0.25,
+      "hl": 0.1,
+      "blush": [
+        "#B87868",
+        "matte",
+        0.25
+      ],
+      "lip": [
+        "#8A4A55",
+        "matte_velvet",
+        0.85
+      ],
+      "liner": 0.3,
+      "eyes": [
+        [
+          "#8A7468",
+          "matte",
+          0.7
+        ],
+        [
+          "#5E4C44",
+          "matte",
+          0.75
+        ],
+        [
+          "#3A2E2A",
+          "matte",
+          0.55
+        ]
+      ],
+      "el": [
+        "#1A1414",
+        "matte_liquid",
+        0.55
+      ],
+      "lash": [
+        "lengthening",
+        "high"
+      ],
+      "brow": 0.45,
+      "sh": 1
+    },
+    "soft-glam": {
+      "fnd": [
+        "radiance",
+        0.55
+      ],
+      "conc": 0.6,
+      "con": 0.3,
+      "hl": 0.85,
+      "blush": [
+        "#E8907A",
+        "cream_shine",
+        0.45
+      ],
+      "lip": [
+        "#C88478",
+        "satin",
+        0.85
+      ],
+      "liner": 0.3,
+      "eyes": [
+        [
+          "#E8C8B0",
+          "shimmer",
+          0.9
+        ],
+        [
+          "#A07060",
+          "matte",
+          0.6
+        ],
+        [
+          "#5A3C30",
+          "matte",
+          0.4
+        ]
+      ],
+      "el": [
+        "#4A3020",
+        "matte_cream",
+        0.45
+      ],
+      "lash": [
+        "lengthening",
+        "high"
+      ],
+      "brow": 0.45,
+      "sh": 1
+    },
+    "date-night": {
+      "fnd": [
+        "radiance",
+        0.55
+      ],
+      "conc": 0.6,
+      "con": 0.35,
+      "hl": 0.5,
+      "blush": [
+        "#C86478",
+        "cream_shine",
+        0.45
+      ],
+      "lip": [
+        "#6E1830",
+        "glossy_cream_shimmer",
+        1
+      ],
+      "liner": 0.55,
+      "gloss": 0.85,
+      "eyes": [
+        [
+          "#6A3A50",
+          "shimmer",
+          0.75
+        ],
+        [
+          "#4A1E34",
+          "matte",
+          0.95
+        ],
+        [
+          "#1A0A14",
+          "matte",
+          1
+        ]
+      ],
+      "el": [
+        "#000000",
+        "matte_liquid",
+        1
+      ],
+      "lash": [
+        "lengthandvolume",
+        "high"
+      ],
+      "brow": 0.5,
+      "sh": 1
+    },
+    "glam": {
+      "fnd": [
+        "matte",
+        0.7
+      ],
+      "conc": 0.65,
+      "con": 0.7,
+      "hl": 0.55,
+      "blush": [
+        "#B86A50",
+        "matte",
+        0.45
+      ],
+      "lip": [
+        "#B0141E",
+        "matte_velvet",
+        1
+      ],
+      "liner": 0.6,
+      "eyes": [
+        [
+          "#6A4430",
+          "matte",
+          0.9
+        ],
+        [
+          "#3A2418",
+          "matte",
+          1
+        ],
+        [
+          "#140C08",
+          "matte",
+          1
+        ]
+      ],
+      "el": [
+        "#000000",
+        "matte_dark",
+        1
+      ],
+      "lash": [
+        "lengthandvolume",
+        "high"
+      ],
+      "brow": 0.65,
+      "sh": 1
+    },
+    "smoky-eye": {
+      "fnd": [
+        "matte",
+        0.5
+      ],
+      "conc": 0.55,
+      "con": 0.25,
+      "hl": 0.25,
+      "blush": [
+        "#B07A6A",
+        "matte",
+        0.2
+      ],
+      "lip": [
+        "#C0968A",
+        "matte",
+        0.75
+      ],
+      "liner": 0.15,
+      "eyes": [
+        [
+          "#5A5658",
+          "shimmer",
+          0.95
+        ],
+        [
+          "#2E2C2E",
+          "matte",
+          1
+        ],
+        [
+          "#0E0C0E",
+          "matte",
+          1
+        ]
+      ],
+      "el": [
+        "#000000",
+        "matte_dark",
+        1
+      ],
+      "lash": [
+        "lengthandvolume",
+        "high"
+      ],
+      "brow": 0.5,
+      "sh": 1
+    },
+    "bronzed": {
+      "fnd": [
+        "radiance",
+        0.5
+      ],
+      "conc": 0.45,
+      "con": 0.65,
+      "hl": 0.7,
+      "blush": [
+        "#C8704A",
+        "cream_shine",
+        0.5
+      ],
+      "lip": [
+        "#A8492E",
+        "cream_shine",
+        0.85
+      ],
+      "liner": 0.3,
+      "eyes": [
+        [
+          "#8A5A3A",
+          "shimmer",
+          0.75
+        ],
+        [
+          "#5E3820",
+          "matte",
+          0.8
+        ],
+        [
+          "#3A2010",
+          "matte",
+          0.6
+        ]
+      ],
+      "el": [
+        "#3A2010",
+        "matte_cream",
+        0.6
+      ],
+      "lash": [
+        "lengthening",
+        "high"
+      ],
+      "brow": 0.45,
+      "sh": 1
+    }
+  }
+}

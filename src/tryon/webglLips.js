@@ -81,6 +81,7 @@ uniform vec2 uLipO, uLipAx, uLipAy;
 
 uniform float uLight, uFinish, uFaceLum, uCinema, uGrain, uGlamour, uLightBal, uFaceYaw;
 uniform float uFaceCx;   // face centre x (0..1, nose bridge) — which side of the FACE a pixel is on
+uniform vec2 uSkinPts[4]; // skin reference points (frame uv): forehead, chin, both cheeks
 uniform float uEyeFinish;  // 0=matte, 1=satin, 2=shimmer
 uniform float uEyeCreaseFinish, uEyeHighlightFinish;  // per-zone finish
 uniform float uCutCrease;  // 0=smooth blend, 1=hard cut crease with concealer line
@@ -195,6 +196,19 @@ vec3 sssBlend(vec3 base, vec3 pigment, float strength){
   return mix(base, mix(col, soft, sssFactor * 0.5), strength);
 }
 
+// Is this pixel skin-coloured LIKE THIS FACE? Chroma (shading-free) vs a few
+// points known to be on the skin; the best match counts (a point that is off
+// the face on a turn doesn't matter). On a turned head the far cheek of the
+// mesh hangs past the real silhouette — blush / bronzer / contour landed on
+// the hood / wall there.
+vec2 chromaOf(vec3 c) { return c.rg / (c.r + c.g + c.b + 0.03); }
+float faceSkinGate(vec3 c) {
+  vec2 q = chromaOf(c);
+  float d = 1.0;
+  for (int i = 0; i < 4; i++) d = min(d, distance(q, chromaOf(softRGB(uFrame, uSkinPts[i], 5.0))));
+  return 1.0 - smoothstep(0.05, 0.10, d);
+}
+
 void main(){
   vec3 orig = clamp(texture2D(uFrame, vUv).rgb * uWB, 0.0, 1.0);   // also used for post re-injection
   // Frequency separation for the face products (foundation … nose contour):
@@ -221,6 +235,7 @@ void main(){
     clamp(0.24 + expOff * 0.30, 0.10, 0.40),
     skinL
   );
+  skinGate *= faceSkinGate(lowF);
 
   // Sculpt pack: r=contour g=highlight b=under-eye.
   // These masks are built from blurred gradients — they have no hard edge to
@@ -458,6 +473,14 @@ void main(){
 
     float wTotal = wLid + wCrease + wHigh + 0.001;
     wLid /= wTotal; wCrease /= wTotal; wHigh /= wTotal;
+    // Procedural (adaptive) eyeshadow from the UV mesh carries its zones by
+    // position: G = 0 marks it, R = crease weight. Level-based zones put the
+    // deep / highlight tone on every soft edge (a rim round the shadow).
+    vec4 eyeTx = texture2D(uEye, vUv);
+    if (eyeTx.g < 0.02 && eyeTx.a > 0.001) {   // white-RGB masks (UV image / 2D builder) keep level zones
+      float cwz = clamp(eyeTx.r, 0.0, 1.0);
+      wCrease = cwz; wLid = 1.0 - cwz; wHigh = 0.0; cutLine = 0.0;
+    }
 
     // Resolve zone colours — fall back to lid shade when zone is inactive (black)
     vec3 creaseCol = (uEyeCreaseShade.r + uEyeCreaseShade.g + uEyeCreaseShade.b > 0.01)
@@ -841,7 +864,7 @@ function initGL() {
                    'uEyeCreaseShade','uEyeHighlightShade',
                    'uFndInt','uBlushInt','uHairInt','uEyeInt','uLashInt','uLipInt',
                    'uContourInt','uHighlightInt','uUnderEyeInt','uBronzerInt','uNoseContourInt','uLipLinerInt','uEyelinerInt','uBrowInt','uLipPx','uLipCover','uLipTex','uLipTexOn','uLipTexMix','uLipTexScale','uLipO','uLipAx','uLipAy',
-                   'uLight','uFinish','uFaceLum','uCinema','uGrain','uGlamour','uLightBal','uFaceYaw','uFaceCx','uEyeFinish','uEyeCreaseFinish','uEyeHighlightFinish','uCutCrease','uFndFinish','uBlushFinish','uTexel','uLightTex','uLightOn']) {
+                   'uLight','uFinish','uFaceLum','uCinema','uGrain','uGlamour','uLightBal','uFaceYaw','uFaceCx','uSkinPts[0]','uSkinPts','uEyeFinish','uEyeCreaseFinish','uEyeHighlightFinish','uCutCrease','uFndFinish','uBlushFinish','uTexel','uLightTex','uLightOn']) {
     loc[u] = gl.getUniformLocation(prog, u);
   }
   tex = { frame: makeTex(), fnd: makeTex(), blush: makeTex(), hair: makeTex(), eye: makeTex(), lash: makeTex(), lip: makeTex(), sculpt: makeTex(), lipLiner: makeTex(), eyeliner: makeTex(), brows: makeTex(), extra: makeTex() };
@@ -1066,6 +1089,8 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
   gl.uniform1f(loc.uLightBal, typeof opts.lightBal === 'number' ? opts.lightBal : 0);
   gl.uniform1f(loc.uFaceYaw, typeof opts.faceYaw === 'number' ? opts.faceYaw : 0);
   gl.uniform1f(loc.uFaceCx, landmarks[168] ? landmarks[168].x : 0.5);
+  { const P = (i) => (landmarks[i] ? [landmarks[i].x, 1 - landmarks[i].y] : [0.5, 0.5]);
+    gl.uniform2fv(loc.uSkinPts, new Float32Array([...P(151), ...P(199), ...P(50), ...P(280)])); }
   gl.uniform1f(loc.uCinema, typeof opts.cinema === 'number' ? opts.cinema : 0);
   gl.uniform1f(loc.uGrain, typeof opts.grain === 'number' ? opts.grain : CFG.grain.intensity);
   gl.uniform1f(loc.uGlamour, opts.glamour ? 1.0 : 0.0);

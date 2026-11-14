@@ -8,6 +8,7 @@ const DebugApp  = lazy(() => import('./DebugApp.jsx'));
 const AppPage   = lazy(() => import('./App.jsx'));
 const PhotoPage = lazy(() => import('./PhotoPage.jsx'));
 const LiveTryOn = lazy(() => import('./LiveTryOn.jsx'));
+const TryOnPage = lazy(() => import('./TryOnPage.jsx'));
 const EmbedView = lazy(() =>
   import('./tryon/index.js').then(m => ({
     default: () => (
@@ -29,6 +30,7 @@ const EmbedView = lazy(() =>
 // '/photo' → Qwen Image Edit via RunPod
 // '/app'   → lesson app
 // '/embed' → bare TryOnCanvas component
+// '/tryon' → live try-on with the product catalogue (src/data/*.json)
 function Router() {
   const [path, setPath] = useState(window.location.pathname);
 
@@ -49,6 +51,7 @@ function Router() {
     <Suspense fallback={loading}>
       {path === '/photo' ? <PhotoPage /> :
        path === '/live'  ? <LiveTryOn /> :
+       path === '/tryon' ? <TryOnPage /> :
        path === '/app'   ? <AppPage /> :
        path === '/embed' ? <EmbedView /> :
        /* '/' and everything else */ <DebugApp />}

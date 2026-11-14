@@ -16,6 +16,8 @@ export default function TryOnCanvas({
   resolution,
   mirrored = true,
   active = true,
+  source = 'camera',   // 'camera' | 'video' (sourceEl = a playing <video>)
+  sourceEl = null,
   className = '',
   style,
   onOverlay,          // (ctx, { landmarks, w, h, faceLum }) => void — draw on top
@@ -36,7 +38,7 @@ export default function TryOnCanvas({
   }, [onOverlay, onReady]);
 
   const { ready, error, camError, faceSeen } = useTryOn({
-    layers, renderer, smoothing, resolution, active, onFrame: handleFrame,
+    layers, renderer, smoothing, resolution, active, onFrame: handleFrame, source, sourceEl,
   });
 
   return (

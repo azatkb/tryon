@@ -6,7 +6,7 @@ import {
   buildContourMask, buildHighlightMask, buildUnderEyeMask, buildLipMask,
   buildLipLinerMask, buildEyelinerMask, buildBrowMask, getLastLipSeg, resetLipSeg, setLipRoughness, setLipSymmetry, setLipSoftness, setLipOpenDetect, getLipModel, setLipCore, setLipPixelCut,
   UV_PRODUCTS, loadUVMasks, reloadUVMasks, uvMaskCanvas, setUVMaskImage, getUVMaskImage, setUVMasksEnabled, bakeUVMasks, uvTemplate, canvasToPngBlob,
-  setEyeShadowProcedural, setEyeShadowShape, getEyeShadowShape,
+  setEyeShadowProcedural, setEyeShadowShape, getEyeShadowShape, setLashStyle, getLashStyle,
 } from './tryon/index.js';
 import { createMp4Writer, downloadBlob, mp4WriterSupported } from './videoWriter.js';
 import { refineLipContour, drawRefinedContour } from './tryon/lipContourRefine.js';
@@ -209,6 +209,9 @@ export default function DebugApp() {
   const [eyeShape, setEyeShape] = useState(() => getEyeShadowShape());
   useEffect(() => { setEyeShadowProcedural(eyeAdaptive); }, [eyeAdaptive]);
   useEffect(() => { setEyeShadowShape(eyeShape); }, [eyeShape]);
+  // Mascara (3D strand lashes) style
+  const [lashStyle, setLashStyleS] = useState(() => getLashStyle());
+  useEffect(() => { setLashStyle(lashStyle); }, [lashStyle]);
   useEffect(() => { loadUVMasks().then(uvCount); }, []);
   const uvBake = async (download) => {
     const maps = bakeUVMasks({ size: 512 });
@@ -427,7 +430,7 @@ export default function DebugApp() {
     if (photoMode && imgRef.current && ready) {
       redrawStill(imgRef.current);
     }
-  }, [photoMode, layers, ready, redrawStill, colorSeg, lipRough, lipSym, lipSoft, eyeAdaptive, eyeShape, pixCut]);
+  }, [photoMode, layers, ready, redrawStill, colorSeg, lipRough, lipSym, lipSoft, eyeAdaptive, eyeShape, pixCut, lashStyle]);
 
   // Back to camera
   const exitPhoto = useCallback(() => {
@@ -845,6 +848,15 @@ export default function DebugApp() {
             <label key={k} className="dbg-row" style={{ paddingLeft: 36, fontSize: '.72rem' }}>
               {label} <input type="range" min={lo} max={hi} step="0.01" value={eyeShape[k]}
                 onChange={(e) => setEyeShape((s) => ({ ...s, [k]: +e.target.value }))} style={{ width: 90, verticalAlign: 'middle' }} /> {eyeShape[k].toFixed(2)}
+            </label>
+          ))}
+          <div className="dbg-row" style={{ fontSize: '.74rem', marginTop: 4 }}>Mascara (3D lashes)
+            <button style={{ fontSize: '.66rem', padding: '0 6px', marginLeft: 6 }} onClick={() => setLashStyleS({ length: 1, volume: 1, curl: 1, clump: 1, lower: 1, density: 1 })}>Reset</button>
+          </div>
+          {[['length', 'Length', 0.5, 1.6], ['volume', 'Volume', 0.4, 2], ['curl', 'Curl', 0, 1.8], ['clump', 'Clumps', 0, 1.5], ['density', 'Density', 0.5, 1.6], ['lower', 'Lower lashes', 0, 1.5]].map(([k, label, lo, hi]) => (
+            <label key={k} className="dbg-row" style={{ paddingLeft: 18, fontSize: '.72rem' }}>
+              {label} <input type="range" min={lo} max={hi} step="0.01" value={lashStyle[k]}
+                onChange={(e) => setLashStyleS((s) => ({ ...s, [k]: +e.target.value }))} style={{ width: 90, verticalAlign: 'middle' }} /> {lashStyle[k].toFixed(2)}
             </label>
           ))}
           <div className="dbg-row" style={{ gap: 6, flexWrap: 'wrap', paddingLeft: 18 }}>

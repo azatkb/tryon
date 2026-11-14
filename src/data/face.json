@@ -1,0 +1,86 @@
+{
+  "products": [
+    {
+      "id": "6ac5afe3a54b8711ba9be91a",
+      "tab": "Cheeks",
+      "brand": "Rare Beauty",
+      "name": "Soft Pinch Liquid Blush",
+      "image": "https://cdn.shopify.com/s/files/1/0314/1143/7703/files/ECOMM-SP-LIQUID-BLUSH-DEWY-HOPE.jpg",
+      "shades": [
+        {
+          "name": "Hope",
+          "hex": "#EEA297",
+          "amount": 26
+        },
+        {
+          "name": "Charm",
+          "hex": "#F7726F",
+          "amount": 26
+        },
+        {
+          "name": "Joy",
+          "hex": "#E16B62",
+          "amount": 26
+        },
+        {
+          "name": "Spirited",
+          "hex": "#B86A97",
+          "amount": 26
+        },
+        {
+          "name": "Charisma",
+          "hex": "#C2386B",
+          "amount": 26
+        }
+      ]
+    },
+    {
+      "id": "6ac74f0d6ec0d328531d1a38",
+      "tab": "Cheeks",
+      "brand": "MAC",
+      "name": "Skinfinish Colourstruck Blurring Blush with 12HR Buildable Wear",
+      "image": "https://www.sephora.com/productimages/sku/s2968303-main-zoom-1.jpg",
+      "shades": [
+        {
+          "name": "Snob",
+          "hex": "#EB9CBB",
+          "amount": 26
+        },
+        {
+          "name": "Blushbaby",
+          "hex": "#EA848E",
+          "amount": 26
+        },
+        {
+          "name": "Your Heroine",
+          "hex": "#CF76B2",
+          "amount": 26
+        },
+        {
+          "name": "Velvet Teddy",
+          "hex": "#C07D74",
+          "amount": 26
+        },
+        {
+          "name": "Film Noir Buff",
+          "hex": "#85544D",
+          "amount": 26
+        }
+      ]
+    }
+  ],
+  "coverage": {
+    "sheer": {
+      "cover": 0.3,
+      "smooth": 0.2
+    },
+    "medium": {
+      "cover": 0.5,
+      "smooth": 0.32
+    },
+    "full": {
+      "cover": 0.62,
+      "smooth": 0.4
+    }
+  }
+}

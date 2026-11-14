@@ -1,0 +1,74 @@
+{
+  "products": [
+    {
+      "id": "6ac5afedc512d69b391c7a54",
+      "tab": "Eyes",
+      "brand": "Makeup by Mario",
+      "name": "Master Mattes Cream Eyeshadow",
+      "image": "https://cdn.shopify.com/s/files/1/0275/4822/1505/files/MBM_MMLWCE_PACKSHOT_BISQUE.jpg",
+      "shades": [
+        {
+          "name": "Soft Nude",
+          "hexes": [
+            "#DCB598",
+            "#DAB5A7",
+            "#8C684B"
+          ]
+        },
+        {
+          "name": "Warm Brown",
+          "hexes": [
+            "#DCB598",
+            "#875038",
+            "#54382B"
+          ],
+          "liner": true
+        },
+        {
+          "name": "Rosy Mauve",
+          "hexes": [
+            "#DAB5A7",
+            "#C17D76",
+            "#A07467"
+          ]
+        }
+      ],
+      "finish": "matte"
+    },
+    {
+      "id": "6ac5afedc512d69b391c7a48",
+      "tab": "Eyes",
+      "brand": "Makeup by Mario",
+      "name": "Soft Shimmer Cream Eyeshadow",
+      "image": "https://cdn.shopify.com/s/files/1/0275/4822/1505/files/MBM_SEPHORA_SS_CREAMSHADOW_PACKSHOT_HONEYCRYSTAL_2000X2000_1d36212b-97c9-4714-af02-322afb4bf399.jpg",
+      "shades": [
+        {
+          "name": "Bronze Glow",
+          "hexes": [
+            "#E4C2A6",
+            "#A57B69",
+            "#A26547"
+          ],
+          "lashes": true
+        },
+        {
+          "name": "Plum Smoke",
+          "hexes": [
+            "#E0BFB4",
+            "#B2766A",
+            "#8E6B65"
+          ],
+          "liner": true,
+          "lashes": true
+        }
+      ],
+      "finish": "shimmer"
+    }
+  ],
+  "finishLabels": {
+    "matte": "Matte",
+    "shimmer": "Shimmer",
+    "metallic": "Metallic",
+    "glitter": "Glitter"
+  }
+}

@@ -1,0 +1,685 @@
+{
+  "products": [
+    {
+      "id": "6ac71ad8662ec499bb04e449",
+      "tab": "Lips",
+      "brand": "Charlotte Tilbury",
+      "name": "Matte Revolution Hydrating Lipstick",
+      "image": "https://media.ulta.com/i/ulta/2619356",
+      "shades": [
+        {
+          "name": "Pillow Talk",
+          "hex": "#D97373",
+          "amount": 68
+        },
+        {
+          "name": "Catwalking",
+          "hex": "#BF6854",
+          "amount": 68
+        },
+        {
+          "name": "First Dance",
+          "hex": "#BF4B60",
+          "amount": 68
+        },
+        {
+          "name": "Cinematic Red",
+          "hex": "#B32128",
+          "amount": 68
+        },
+        {
+          "name": "Fame Flame",
+          "hex": "#B11920",
+          "amount": 68
+        },
+        {
+          "name": "Red Carpet Red",
+          "hex": "#930015",
+          "amount": 68
+        }
+      ],
+      "finish": "matte"
+    },
+    {
+      "id": "6ac74f0b7c184a18a4c86876",
+      "tab": "Lips",
+      "brand": "MAC",
+      "name": "M·A·Cximal Silky Matte 12HR Wear Lipstick",
+      "image": "https://www.sephora.com/productimages/sku/s2837425-main-zoom.jpg",
+      "shades": [
+        {
+          "name": "Acting Natural",
+          "hex": "#DBA687",
+          "amount": 68
+        },
+        {
+          "name": "Yash",
+          "hex": "#A76452",
+          "amount": 68
+        },
+        {
+          "name": "Kinda Sexy",
+          "hex": "#964941",
+          "amount": 68
+        },
+        {
+          "name": "Twig Twist",
+          "hex": "#883B41",
+          "amount": 68
+        },
+        {
+          "name": "Russian Red",
+          "hex": "#992024",
+          "amount": 68
+        },
+        {
+          "name": "Sin",
+          "hex": "#462227",
+          "amount": 68
+        }
+      ],
+      "finish": "matte"
+    },
+    {
+      "id": "6ac71adea7dd2117266e32a3",
+      "tab": "Lips",
+      "brand": "Dior",
+      "name": "Rouge Dior Lipstick",
+      "image": "https://media.ulta.com/i/ulta/2618575",
+      "shades": [
+        {
+          "name": "219 Rose Montaigne",
+          "hex": "#ED9788",
+          "amount": 68
+        },
+        {
+          "name": "200 Nude Touch",
+          "hex": "#BF6759",
+          "amount": 68
+        },
+        {
+          "name": "434 Promenade",
+          "hex": "#B64F50",
+          "amount": 68
+        },
+        {
+          "name": "824 Saint Germain",
+          "hex": "#8C494F",
+          "amount": 68
+        },
+        {
+          "name": "413 Destiny",
+          "hex": "#6B3F34",
+          "amount": 68
+        },
+        {
+          "name": "600 Nude Gown",
+          "hex": "#422C2E",
+          "amount": 68
+        }
+      ],
+      "finish": "satin"
+    },
+    {
+      "id": "6ac5aff0343b9b6f6bdbf169",
+      "tab": "Lips",
+      "brand": "Makeup by Mario",
+      "name": "Ultra Suede® Lipstick",
+      "image": "https://cdn.shopify.com/s/files/1/0275/4822/1505/products/MBM_UltraSuede_Lipstick_sierra-soft-peachy-nude-pink_Uncapped_Ecom_COMP_Final_2_0016ff90-287d-46a2-bf0b-2f620a63ee72.jpg",
+      "shades": [
+        {
+          "name": "Lauren",
+          "hex": "#B87C7C",
+          "amount": 68
+        },
+        {
+          "name": "Brielle",
+          "hex": "#A45F5E",
+          "amount": 68
+        },
+        {
+          "name": "Annie",
+          "hex": "#A35A56",
+          "amount": 68
+        },
+        {
+          "name": "Nikki",
+          "hex": "#A24B47",
+          "amount": 68
+        },
+        {
+          "name": "Alicia",
+          "hex": "#AC373A",
+          "amount": 68
+        },
+        {
+          "name": "Maurice",
+          "hex": "#5F3E36",
+          "amount": 68
+        }
+      ],
+      "finish": "satin"
+    },
+    {
+      "id": "6ac73e51105136e86871f3c6",
+      "tab": "Lips",
+      "finish": "liquid",
+      "brand": "Maybelline",
+      "name": "SuperStay Matte Ink Liquid Lipstick",
+      "image": "https://media.ulta.com/i/ulta/2510218",
+      "shades": [
+        {
+          "name": "Seductress",
+          "hex": "#BA887F"
+        },
+        {
+          "name": "Lover",
+          "hex": "#B37481"
+        },
+        {
+          "name": "Pioneer",
+          "hex": "#AC454F"
+        },
+        {
+          "name": "Ruler",
+          "hex": "#AF5562"
+        },
+        {
+          "name": "Founder",
+          "hex": "#8E4857"
+        },
+        {
+          "name": "Charmer",
+          "hex": "#8A2F27"
+        }
+      ]
+    },
+    {
+      "id": "6ac73e51105136e86871f3cf",
+      "tab": "Lips",
+      "finish": "vinyl",
+      "brand": "Maybelline",
+      "name": "Super Stay Vinyl Ink Liquid Lipcolor",
+      "image": "https://media.ulta.com/i/ulta/2596491",
+      "shades": [
+        {
+          "name": "Peachy",
+          "hex": "#CF7474"
+        },
+        {
+          "name": "Cheeky",
+          "hex": "#BD7979"
+        },
+        {
+          "name": "Wicked",
+          "hex": "#C8304F"
+        },
+        {
+          "name": "Red-Hot",
+          "hex": "#E73E3E"
+        },
+        {
+          "name": "Royal",
+          "hex": "#933441"
+        },
+        {
+          "name": "Fearless",
+          "hex": "#522E33"
+        }
+      ]
+    },
+    {
+      "id": "6ac7dd34288f6d990c2f99d6",
+      "tab": "Lips",
+      "finish": "gloss",
+      "brand": "Huda Beauty",
+      "name": "Faux Filler Shiny Non-Sticky Lip Gloss",
+      "image": "https://www.sephora.com/productimages/sku/s2954667-main-zoom.jpg",
+      "shades": [
+        {
+          "name": "Honey",
+          "hex": "#DD7651"
+        },
+        {
+          "name": "She Flirty",
+          "hex": "#E89A9C"
+        },
+        {
+          "name": "Sugar Baby",
+          "hex": "#E87175"
+        },
+        {
+          "name": "Bombshell",
+          "hex": "#963B39"
+        },
+        {
+          "name": "She Fire",
+          "hex": "#845351"
+        },
+        {
+          "name": "Posh",
+          "hex": "#6D2D2C"
+        }
+      ]
+    },
+    {
+      "id": "6ac73df95a57d6be2a26cb6e",
+      "tab": "Lips",
+      "finish": "shimmer",
+      "brand": "Fenty Beauty",
+      "name": "Gloss Bomb Universal Lip Luminizer",
+      "image": "https://www.sephora.com/productimages/sku/s2327245-main-zoom.jpg",
+      "shades": [
+        {
+          "name": "Fenty Glow",
+          "hex": "#E6917B"
+        },
+        {
+          "name": "$weetmouth",
+          "hex": "#E89DA2"
+        },
+        {
+          "name": "FU$$Y",
+          "hex": "#E49FA8"
+        },
+        {
+          "name": "Riri",
+          "hex": "#D06E7F"
+        },
+        {
+          "name": "Hot Chocolit",
+          "hex": "#875D5A"
+        }
+      ]
+    },
+    {
+      "id": "6ac73e5f4eae6bc08bd2ea9e",
+      "tab": "Lips",
+      "finish": "glitter",
+      "brand": "NYX",
+      "name": "Butter Gloss Bling Lip Gloss",
+      "image": "https://media.ulta.com/i/ulta/2623780",
+      "shades": [
+        {
+          "name": "Dripped Out",
+          "hex": "#EC9B8A"
+        },
+        {
+          "name": "She Got Money",
+          "hex": "#EA93A7"
+        },
+        {
+          "name": "Big Spender",
+          "hex": "#C87374"
+        },
+        {
+          "name": "Pay Me In Gold",
+          "hex": "#B68D72"
+        },
+        {
+          "name": "Hustla",
+          "hex": "#AE7A69"
+        }
+      ]
+    },
+    {
+      "id": "6ac71ada449b428d263533b9",
+      "tab": "Lips",
+      "finish": "metallic",
+      "brand": "Charlotte Tilbury",
+      "name": "Lip Lustre Lip Gloss",
+      "image": "https://media.ulta.com/i/ulta/2619346",
+      "shades": [
+        {
+          "name": "Blondie",
+          "hex": "#D98B84"
+        },
+        {
+          "name": "Candy Darling",
+          "hex": "#FF92BA"
+        },
+        {
+          "name": "Sweet Stiletto",
+          "hex": "#BA685E"
+        },
+        {
+          "name": "Red Vixen",
+          "hex": "#B8010A"
+        },
+        {
+          "name": "Unleash Me",
+          "hex": "#730823"
+        }
+      ]
+    },
+    {
+      "id": "6ac74f0b7c184a18a4c86875",
+      "tab": "Lips",
+      "finish": "sheershine",
+      "brand": "MAC",
+      "name": "Lustreglass Sheer-Shine Lipstick",
+      "image": "https://www.sephora.com/productimages/sku/s3016748-main-zoom.jpg",
+      "shades": [
+        {
+          "name": "Thanks, It's MAC!",
+          "hex": "#D37671"
+        },
+        {
+          "name": "Hug Me",
+          "hex": "#A76156"
+        },
+        {
+          "name": "Syrup",
+          "hex": "#B86670"
+        },
+        {
+          "name": "Beam There, Done That",
+          "hex": "#A83D53"
+        },
+        {
+          "name": "Cockney",
+          "hex": "#D32229"
+        },
+        {
+          "name": "I Deserve This",
+          "hex": "#683C25"
+        }
+      ]
+    },
+    {
+      "id": "6ac74f27aed9780c6f6e6a77",
+      "tab": "Lips",
+      "finish": "oil",
+      "brand": "Rare Beauty",
+      "name": "Soft Pinch Tinted Lip Oil",
+      "image": "https://www.sephora.com/productimages/sku/s2640159-main-zoom.jpg",
+      "shades": [
+        {
+          "name": "Hope",
+          "hex": "#E0828D"
+        },
+        {
+          "name": "Happy",
+          "hex": "#DE6771"
+        },
+        {
+          "name": "Delight",
+          "hex": "#AF544E"
+        },
+        {
+          "name": "Wonder",
+          "hex": "#C25268"
+        },
+        {
+          "name": "Honesty",
+          "hex": "#9C4636"
+        },
+        {
+          "name": "Affection",
+          "hex": "#80294C"
+        }
+      ]
+    },
+    {
+      "id": "6ac7ddf6a5a6b56d0d11ca98",
+      "tab": "Lips",
+      "finish": "balm",
+      "brand": "Summer Fridays",
+      "name": "Lip Butter Balm",
+      "image": "https://www.sephora.com/productimages/sku/s2968907-main-zoom.jpg",
+      "shades": [
+        {
+          "name": "Pink Sugar",
+          "hex": "#E6BCBD"
+        },
+        {
+          "name": "Poppy",
+          "hex": "#DD8880"
+        },
+        {
+          "name": "Vanilla Beige",
+          "hex": "#AA7D74"
+        },
+        {
+          "name": "Cherry",
+          "hex": "#B7455D"
+        },
+        {
+          "name": "Iced Coffee",
+          "hex": "#A77A63"
+        },
+        {
+          "name": "Brown Sugar",
+          "hex": "#845C5F"
+        }
+      ]
+    },
+    {
+      "id": "6ac7208d84a91fcbb664546b",
+      "tab": "Lips",
+      "finish": "stain",
+      "brand": "Benefit",
+      "name": "Benetint Lip & Cheek Stain",
+      "image": "https://www.sephora.com/productimages/sku/s2869519-main-zoom.jpg",
+      "shades": [
+        {
+          "name": "ChaChatint",
+          "hex": "#F05A50"
+        },
+        {
+          "name": "Playtint",
+          "hex": "#CD3248"
+        },
+        {
+          "name": "Gogotint",
+          "hex": "#DD2B47"
+        },
+        {
+          "name": "Raspberry",
+          "hex": "#9A1F3A"
+        },
+        {
+          "name": "Dark Cherry",
+          "hex": "#5E231D"
+        }
+      ]
+    }
+  ],
+  "liner": [
+    {
+      "id": "6ac71ad8662ec499bb04e44d",
+      "tab": "Liner",
+      "finish": "liner",
+      "brand": "Charlotte Tilbury",
+      "name": "Lip Cheat Lip Liner",
+      "image": "https://media.ulta.com/i/ulta/2619395",
+      "shades": [
+        {
+          "name": "Pillow Talk",
+          "hex": "#C47D7B"
+        },
+        {
+          "name": "Iconic Nude",
+          "hex": "#8D5B4A"
+        },
+        {
+          "name": "Pillow Talk Deep",
+          "hex": "#6E4139"
+        },
+        {
+          "name": "Mark Of A Kiss",
+          "hex": "#943733"
+        },
+        {
+          "name": "Kiss 'N' Tell",
+          "hex": "#AB1C25"
+        },
+        {
+          "name": "Berry Naughty",
+          "hex": "#5E2239"
+        }
+      ]
+    }
+  ],
+  "finishes": {
+    "matte": {
+      "op": 0.8,
+      "flat": 0.95,
+      "kill": 1,
+      "spec": 0,
+      "hi": 0,
+      "spark": 0,
+      "mult": 0.34,
+      "deep": 0.86,
+      "tex": 1.1,
+      "edge": 3
+    },
+    "liquid": {
+      "op": 0.86,
+      "flat": 0.85,
+      "kill": 1,
+      "spec": 0,
+      "hi": 0,
+      "spark": 0,
+      "mult": 0.15,
+      "deep": 0.94,
+      "tex": 0.6,
+      "edge": 2
+    },
+    "satin": {
+      "gl": 0.35,
+      "shin": 10,
+      "op": 0.82,
+      "flat": 1,
+      "spec": 0.4,
+      "hi": 0.5,
+      "spark": 0,
+      "mult": 0.25,
+      "tex": 1,
+      "edge": 3
+    },
+    "sheershine": {
+      "gl": 0.9,
+      "shin": 45,
+      "op": 0.7,
+      "flat": 0.85,
+      "spec": 0.7,
+      "hi": 0.32,
+      "spark": 0,
+      "mult": 0.32,
+      "edge": 3
+    },
+    "vinyl": {
+      "gl": 1.6,
+      "shin": 90,
+      "op": 0.9,
+      "flat": 0.75,
+      "spec": 1.1,
+      "hi": 0.62,
+      "spark": 0,
+      "mult": 0.2,
+      "edge": 2
+    },
+    "gloss": {
+      "gl": 1.3,
+      "shin": 70,
+      "op": 0.72,
+      "flat": 0.95,
+      "spec": 0.75,
+      "hi": 0.52,
+      "spark": 0,
+      "mult": 0.45,
+      "edge": 3
+    },
+    "shimmer": {
+      "gl": 0.8,
+      "shin": 30,
+      "op": 0.5,
+      "flat": 0.9,
+      "spec": 1,
+      "hi": 0.55,
+      "spark": 0.9,
+      "dens": 0.7,
+      "size": 0.8,
+      "tint": "light",
+      "mult": 0.42,
+      "edge": 3
+    },
+    "glitter": {
+      "gl": 0.7,
+      "shin": 30,
+      "op": 0.55,
+      "flat": 0.9,
+      "spec": 0.9,
+      "hi": 0.5,
+      "spark": 1.2,
+      "dens": 0.62,
+      "size": 1.1,
+      "tint": "gold",
+      "mult": 0.4,
+      "edge": 3
+    },
+    "metallic": {
+      "gl": 1,
+      "shin": 20,
+      "op": 0.75,
+      "flat": 1,
+      "spec": 1,
+      "hi": 0.55,
+      "spark": 0.4,
+      "dens": 0.8,
+      "size": 0.8,
+      "tint": "light",
+      "metal": 1,
+      "mult": 0.2,
+      "edge": 3
+    },
+    "oil": {
+      "gl": 1.4,
+      "shin": 80,
+      "op": 0.34,
+      "flat": 1,
+      "spec": 1.3,
+      "hi": 0.75,
+      "spark": 0,
+      "mult": 0.55,
+      "edge": 4
+    },
+    "balm": {
+      "gl": 0.7,
+      "shin": 40,
+      "op": 0.3,
+      "flat": 1,
+      "spec": 0.55,
+      "hi": 0.3,
+      "spark": 0,
+      "mult": 0.55,
+      "edge": 4
+    },
+    "stain": {
+      "op": 0.7,
+      "flat": 0.8,
+      "spec": 0.1,
+      "hi": 0,
+      "spark": 0,
+      "mult": 0.6,
+      "center": 1,
+      "edge": 4
+    }
+  },
+  "finishLabels": {
+    "matte": "Matte",
+    "liquid": "Liquid matte",
+    "satin": "Satin",
+    "sheershine": "Sheer shine",
+    "vinyl": "Vinyl shine",
+    "gloss": "Gloss",
+    "shimmer": "Shimmer gloss",
+    "glitter": "Glitter gloss",
+    "metallic": "Metallic",
+    "oil": "Lip oil",
+    "balm": "Tinted balm",
+    "stain": "Stain",
+    "liner": "Liner"
+  }
+}

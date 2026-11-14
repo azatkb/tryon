@@ -164,6 +164,15 @@ export default function TryOnPage() {
   const [chosen, setChosen] = useState({});      // category → "productIdx:shadeIdx"
   const [amount, setAmount] = useState(ONE);     // per-category intensity multiplier
   const [panelOpen, setPanelOpen] = useState(true);
+  // Picking something closes the sheet so the face is visible. Only where the
+  // panel covers the camera (phone layout); the desktop side panel stays open.
+  const closeTimer = useRef(0);
+  const autoClose = () => {
+    if (!window.matchMedia?.('(max-width: 899px)').matches) return;
+    clearTimeout(closeTimer.current);
+    closeTimer.current = setTimeout(() => setPanelOpen(false), 160);   // let the tap highlight show first
+  };
+  useEffect(() => () => clearTimeout(closeTimer.current), []);
 
   // ── source: camera, or a local video file ──
   const [videoUrl, setVideoUrl] = useState(null);
@@ -201,6 +210,7 @@ export default function TryOnPage() {
     const ls = lookSelection(lk);
     setChosen((c) => { const n = { ...c }; for (const k of Object.keys(ls)) delete n[k]; return n; });
     setSel((x) => ({ ...x, ...ls }));     // foundation / concealer / brows stay
+    autoClose();
   };
   const clearAll = () => { setLook(null); setChosen({}); setSel(EMPTY); };
 
@@ -214,11 +224,13 @@ export default function TryOnPage() {
     else if (cat === 'foundation') v = { hex: hexOf(s), finish, coverage: sel.foundation?.coverage || 'medium' };
     else v = { hex: hexOf(s), finish, amount: s.amount ?? p.amount };
     setSel((x) => ({ ...x, [cat]: v }));
+    autoClose();
   };
   const clearCat = (cat) => {
     setLook(null);
     setChosen((c) => ({ ...c, [cat]: undefined }));
     setSel((x) => ({ ...x, [cat]: null }));
+    autoClose();
   };
   const patch = (cat, o) => { setLook(null); setSel((x) => (x[cat] ? { ...x, [cat]: { ...x[cat], ...o } } : x)); };
 
@@ -248,11 +260,11 @@ export default function TryOnPage() {
       </header>
 
       <section className={`tp-panel${panelOpen ? '' : ' tp-panel--closed'}`}>
-        <button className="tp-handle" onClick={() => setPanelOpen((o) => !o)} aria-label="Toggle panel"><span /></button>
+        <button className="tp-handle" onClick={() => { clearTimeout(closeTimer.current); setPanelOpen((o) => !o); }} aria-label="Toggle panel"><span /></button>
         <nav className="tp-tabs">
           {GROUPS.map((g) => (
             <button key={g.key} className={`tp-tab tp-tab--group${group === g.key ? ' is-on' : ''}${g.cats.some(([c]) => sel[c]) ? ' has' : ''}`}
-              onClick={() => { setGroup(g.key); setPanelOpen(true); }}>
+              onClick={() => { clearTimeout(closeTimer.current); setGroup(g.key); setPanelOpen(true); }}>
               {g.label}
             </button>
           ))}

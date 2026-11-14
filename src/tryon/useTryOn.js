@@ -52,6 +52,7 @@ export function useTryOn(options = {}) {
     syncToDetection = true,   // show the frame detection actually ran on (no mask drift)
     contourRefine = true,     // enable/disable lip contour refinement (luminance, legacy)
     lipColorSeg = true,       // per-pixel colour segmentation of the lips (overrides contourRefine)
+    motionFade = true,        // hide makeup during jumps / whip turns (true | false | { lo, hi, recover })
     active = true,
     onFrame,
     onError,
@@ -64,7 +65,7 @@ export function useTryOn(options = {}) {
   // Live mirrors of the props so the rAF loop never reads a stale closure.
   const cfgRef = useRef({});
   cfgRef.current = {
-    layers, getLayers, renderer, smoothing, lumInterval, source,
+    layers, getLayers, renderer, smoothing, lumInterval, source, motionFade,
     redrawEveryTick, syncToDetection, contourRefine, lipColorSeg, onFrame,
   };
 
@@ -90,7 +91,7 @@ export function useTryOn(options = {}) {
 
   // Per-frame metrics the host may want (motion gating, exposure, landmarks).
   // A ref, not state: these change every frame and must not drive re-renders.
-  const metricsRef = useRef({ motion: 0, faceLum: 0.5, lightBal: 0, faceYaw: 0, blinkL: 1, blinkR: 1, landmarks: null, moving: false });
+  const metricsRef = useRef({ fade: 1, jump: 0, motion: 0, faceLum: 0.5, lightBal: 0, faceYaw: 0, blinkL: 1, blinkR: 1, landmarks: null, moving: false });
 
   // The hidden <video> is owned here so a host only has to provide a canvas.
   if (!videoRef.current && typeof document !== 'undefined' && source === 'camera') {
@@ -201,8 +202,11 @@ export function useTryOn(options = {}) {
 
       const useMP = cfg.renderer === 'multipass' || (cfg.renderer === 'auto' && multiPassAvailable());
       const useGL = !useMP && (cfg.renderer === 'gl' || (cfg.renderer === 'auto' && glAvailable()));
-      let done = false;
-      if (useMP) {
+      // Motion fade: cross-fade made-up → original frame (fully off = skip render)
+      const fade = metricsRef.current.fade ?? 1;
+      let done = fade < 0.02;
+      pctx.globalAlpha = Math.min(1, fade);
+      if (!done && useMP) {
         const mpc = renderMakeupMultiPass(src, w, h, lms, withLum);
         if (mpc) { pctx.drawImage(mpc, 0, 0, w, h); done = true; }
       }
@@ -210,6 +214,7 @@ export function useTryOn(options = {}) {
         const glc = renderMakeupGL(src, w, h, lms, withLum);
         if (glc) { pctx.drawImage(glc, 0, 0, w, h); done = true; }
       }
+      pctx.globalAlpha = 1;
       if (!done) renderMakeup(pctx, w, h, lms, withLum);
     }
 
@@ -219,6 +224,7 @@ export function useTryOn(options = {}) {
       lightBal: metricsRef.current.lightBal,
       faceYaw: metricsRef.current.faceYaw,
       light: metricsRef.current.light,
+      fade: metricsRef.current.fade, jump: metricsRef.current.jump,
       motion: metricsRef.current.motion,
       moving: metricsRef.current.moving,
     });
@@ -247,6 +253,29 @@ export function useTryOn(options = {}) {
     const m = metricsRef.current;
     m.motion = m.motion * 0.35 + motion * 0.65;
     m.moving = m.motion > MOVE_THRESH;
+
+    // ── Motion fade ──
+    // Choppy input (dropped frames, low fps) or a whip turn: MediaPipe and
+    // the frame can disagree by more than the makeup can hide. Measure the
+    // per-frame jump in face widths; above `lo` the makeup fades, above `hi`
+    // it's off. It drops instantly and comes back smoothly once the face
+    // settles (`recover` per second) — no makeup sliding off the face.
+    if (isFresh) {
+      const mf = cfg.motionFade;
+      const fw = raw[234] && raw[454] ? Math.hypot(raw[454].x - raw[234].x, raw[454].y - raw[234].y) : 0;
+      const jump = fw > 1e-3 ? motion / fw : 0;
+      m.jump = jump;
+      const now = performance.now();
+      const dt = m.fadeT ? Math.min(0.5, (now - m.fadeT) / 1000) : 0;
+      m.fadeT = now;
+      if (mf === false) m.fade = 1;
+      else {
+        const lo = mf?.lo ?? 0.04, hi = mf?.hi ?? 0.11, rec = mf?.recover ?? 5;
+        const t = Math.min(1, Math.max(0, (jump - lo) / (hi - lo)));
+        const target = 1 - t * t * (3 - 2 * t);
+        m.fade = target < m.fade ? target : m.fade + (target - m.fade) * Math.min(1, dt * rec);
+      }
+    }
 
     let smoothed;
     if (cfg.smoothing.mode === 'ema') {
@@ -481,7 +510,7 @@ export function useTryOn(options = {}) {
     try { lms = fl.detect(img)?.faceLandmarks?.[0] || null; } catch (e) { onError?.(e); }
     lastResRef.current = { faceLandmarks: lms ? [lms] : [] };
     const m = metricsRef.current;
-    m.landmarks = lms; m.raw = lms; m.motion = 0; m.moving = false;
+    m.landmarks = lms; m.raw = lms; m.motion = 0; m.moving = false; m.fade = 1; m.jump = 0;
     if (lms) {
       const lum = estimateFaceLum(img, lms);
       if (lum != null) m.faceLum = lum;

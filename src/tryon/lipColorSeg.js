@@ -53,6 +53,7 @@ export function setLipSoftness(v) { edgeSoft = Math.max(0, Math.min(2, +v || 0))
 //               pixels only refine it inside a narrow band
 //   'pixel'   — experimental: opening searched in the pixels
 let openMode = 'mp';
+const OUTER_RULES = false;
 export function setLipOpenDetect(v) {
   openMode = v === true ? 'pixel' : v === 'predict' || v === 'pixel' ? v : 'mp';
   prevInner = null;
@@ -571,6 +572,46 @@ function contourVisibility(lms, w, h, IDX) {
 }
 
 /**
+ * Push contour points outward (along the contour normal) as long as the
+ * pixels stay lip-coloured — applied to the silhouette run of a turned head
+ * (and its neighbours), where the outline came from geometry, not colour.
+ * Small gaps (highlights) are bridged; growth is smoothed along the run and
+ * limited to ~0.9× lip thickness.
+ */
+function growOverLip(pts, vis, thr, t, xf) {
+  const n = pts.length, sw = new Float32Array(n);
+  let any = false;
+  // selection fades in toward the silhouette (no step where it starts)
+  for (let k = 0; k < n; k++) { sw[k] = 1 - smooth01(thr, thr + 0.35, vis[k]); if (sw[k] > 0.01) any = true; }
+  if (!any) return;
+  const nr = normals(pts), off = new Float32Array(n), wt = new Float32Array(n);
+  const step = 0.5, maxOut = 0.9 * t, gapMax = Math.max(1.5, 0.08 * t);
+  for (let k = 0; k < n; k++) {
+    if (sw[k] <= 0.01) continue;
+    const [x, y] = pts[k], [nx, ny] = nr[k];
+    const lip = (sv) => sampleP(x + nx * sv, y + ny * sv, xf) >= 0.5;
+    if (!lip(-1) && !lip(-2.5)) continue;          // no lip evidence here: unknown (weight 0), not "zero growth"
+    let last = 0, gap = 0;
+    for (let sv = step; sv <= maxOut; sv += step) {
+      if (lip(sv)) { last = sv; gap = 0; } else if ((gap += step) > gapMax) break;
+    }
+    off[k] = last; wt[k] = 1;
+  }
+  // weighted smoothing along the contour; unknown points take their neighbours' value
+  const sm = new Float32Array(n);
+  for (let k = 0; k < n; k++) {
+    if (sw[k] <= 0.01) continue;
+    let s0 = 0, s1 = 0;
+    for (let d = -6; d <= 6; d++) { const j = (k + d + n) % n; const g = Math.exp(-(d * d) / 12) * wt[j]; s0 += g; s1 += g * off[j]; }
+    sm[k] = s0 > 1e-3 ? s1 / s0 : 0;
+  }
+  for (let k = 0; k < n; k++) {
+    const g = sm[k] * sw[k];
+    if (g > 0.25) pts[k] = [pts[k][0] + nr[k][0] * g, pts[k][1] + nr[k][1] * g];
+  }
+}
+
+/**
  * Replace each run of hidden points (vis < thr) by a straight chord between
  * the visible points on either side — the silhouette. In profile this removes
  * the far half that would otherwise fold over the near one. Returns the
@@ -842,7 +883,7 @@ function cleanOuter(tgt, outerD, innerD, persp, vis) {
  *     bridge/hole in the cut), Gaussian-smoothed, tapered into the corners
  *  4. centre line smoothed; edges kept ≥ 1 px inside the outer contour.
  */
-function cleanInner(tgt, outer, persp, midPt) {
+function cleanInner(tgt, outer, persp, midPt, mpOuter = null, mpInner = null) {
   const half = CORNER_R;
   const oL = outer[CORNER_L], oR = outer[CORNER_R];
   const mw = Math.hypot(oR[0] - oL[0], oR[1] - oL[1]);
@@ -857,9 +898,9 @@ function cleanInner(tgt, outer, persp, midPt) {
   const n = half + 1;
   // outer upper / lower lip as height(along) — inner points sit at their own
   // along-positions (MP's inner and outer points are not spaced alike)
-  const curve = (idxOf) => {
+  const curve = (idxOf, pts = outer) => {
     const c2 = [];
-    for (let k = 0; k <= half; k++) { const p2 = outer[idxOf(k)]; c2.push([aOf(p2[0], p2[1]), hOf(p2[0], p2[1])]); }
+    for (let k = 0; k <= half; k++) { const p2 = pts[idxOf(k)]; c2.push([aOf(p2[0], p2[1]), hOf(p2[0], p2[1])]); }
     return c2.sort((a2, b2) => a2[0] - b2[0]);
   };
   const interp = (c2, a) => {
@@ -937,15 +978,28 @@ function cleanInner(tgt, outer, persp, midPt) {
   cs[0] = c[0]; cs[half] = c[half];
   const taperN = Math.max(2, 0.12 * half);
   for (let k = 0; k <= half; k++) gs[k] *= smooth01(0, taperN, Math.min(k, half - k));
-  // 4. rebuild edges, keep a sliver of lip on both sides
+  // 4. rebuild edges. Each lip keeps at least ~60 % of the thickness MP's
+  //    mesh gives it here (min 1 px): a wrong inner edge (gloss read as teeth,
+  //    a smile, a stale thickness model) can never cut the lipstick down to a
+  //    thin rim — the opening is between the lips, not through them.
+  let MOU = null, MIU = null, MOD = null, MID = null;
+  if (mpOuter && mpInner) {
+    MOU = curve((k) => k, mpOuter); MOD = curve((k) => (K - k) % K, mpOuter);
+    MIU = curve((k) => k, mpInner); MID = curve((k) => (K - k) % K, mpInner);
+  }
   for (let k = 0; k <= half; k++) {
     let t2 = cs[k] + 0.5 * gs[k], b2 = cs[k] - 0.5 * gs[k];
-    const lo = HD[k] + 1, hi = HU[k] - 1;
+    let minU = 1, minD = 1;
+    if (MOU) {
+      minU = Math.max(1, 0.6 * (interp(MOU, A[k]) - interp(MIU, A[k])));
+      minD = Math.max(1, 0.6 * (interp(MID, A[k]) - interp(MOD, A[k])));
+    }
+    const lo = HD[k] + minD, hi = HU[k] - minU;
     if (hi > lo) {
       if (t2 > hi) { const d = t2 - hi; t2 -= d; b2 = Math.max(lo, b2 - d); }
       if (b2 < lo) { const d = lo - b2; b2 += d; t2 = Math.min(hi, t2 + d); }
       if (t2 < b2) t2 = b2 = 0.5 * (t2 + b2);
-    } else { t2 = b2 = 0.5 * (HU[k] + HD[k]); }
+    } else { t2 = b2 = HD[k] + (HU[k] - HD[k]) * minD / Math.max(1e-3, minU + minD); }
     const kl = (K - k) % K;
     const du = t2 - T[k], dd = b2 - B[k];
     tgt[2 * k] += upX * du; tgt[2 * k + 1] += upY * du;
@@ -1157,13 +1211,21 @@ export function segmentLipsColor(src, w, h, lms, opts = {}) {
   }
   // Left/right proportion: the side you can barely see gets the seen side's shape.
   symmetriseThickness(tgt, innerD, supBuf, persp);
-  // Lips can't grow lumps, cave in, or lose their geometry on a turn.
-  cleanOuter(tgt, outerD, innerD, persp, visOut);
+  // Shape rules for the outer edge (cleanOuter) are OFF: on a real profile
+  // frame they clamped the fit to MP's own (too thin) lip at the front and
+  // cut a spike into the upper lip. The colour fit + regularisation alone
+  // follow the real lip there. Kept for experiments: OUTER_RULES = true.
+  if (OUTER_RULES) cleanOuter(tgt, outerD, innerD, persp, visOut);
   // Head motion carried with zero lag, per-point noise damped (see trackContour).
   if (fresh) prevPts.set(tgt);
   else trackContour(prevPts, tgt, K, opts.moving ? 0.22 : 0.12, 0.35 * t);
   for (let k = 0; k < K; k++) outer[k] = [prevPts[2 * k], prevPts[2 * k + 1]];
   const hiddenOuter = hideRuns(outer, visOut, HIDDEN);
+  // The part of the mouth MP calls "turned away" is replaced by a silhouette
+  // curve — but real lips protrude: on a turn they bulge past that curve and
+  // showed as bare lip beyond the lipstick. Grow the silhouette outward over
+  // whatever is still lip-coloured, so the lipstick always covers the lip.
+  if (conf > 0) growOverLip(outer, visOut, HIDDEN, t, xf);
   prevBox = box;
   // ── Inner lip edge PREDICTED from the outer contour ('predict' mode) ──
   // Lip tissue barely compresses: when the mouth opens the lips part, but each
@@ -1201,7 +1263,8 @@ export function segmentLipsColor(src, w, h, lms, opts = {}) {
     const HU = new Float32Array(MC), HD = new Float32Array(MC);
     for (let k = 0; k <= half; k++) { HU[k] = hOf(outer[k]); HD[k] = hOf(outer[(K - k) % K]); }
     const calibrated = lipModel && lipModel.n >= 8;
-    if (still && conf > 0.3 && ratio < 0.025) {   // MP: closed (the seam-width check below rejects a parted mouth)
+    const frontal = visOut[CORNER_L] > 0.3 && visOut[CORNER_R] > 0.3;   // learn only on a near-frontal mouth
+    if (still && frontal && conf > 0.3 && ratio < 0.025) {   // MP: closed (the seam-width check below rejects a parted mouth)
       const tU = new Float32Array(MC), tD = new Float32Array(MC), ok = new Uint8Array(MC);
       let good = 0;
       for (let k = 2; k <= half - 2; k++) {
@@ -1260,6 +1323,22 @@ export function segmentLipsColor(src, w, h, lms, opts = {}) {
     if (!lipModel || lipModel.n < 8) return null;
 
     // ── predict ──
+    // Sanity: the model must roughly agree with MP's own lip thickness here
+    // (a model learned on another face / a bad frame would cut the lipstick
+    // down to a rim). Way off → forget it, fall back to MP, relearn.
+    {
+      const kStr = Math.sqrt(Math.max(0.5, Math.min(2, lipModel.wRel / wRel)));
+      const sc = eyeD * fore * kStr;
+      const rs = [];
+      for (let k = Math.round(0.25 * half); k <= Math.round(0.75 * half); k++) {
+        const ou = outerD[k], od = outerD[(K - k) % K], iu = innerD[k], id = innerD[(K - k) % K];
+        const mpT = Math.abs(hOf(ou) - hOf(iu)) + Math.abs(hOf(id) - hOf(od));
+        if (mpT > 2) rs.push((lipModel.tU[k] + lipModel.tD[k]) * sc / mpT);
+      }
+      rs.sort((p2, q) => p2 - q);
+      const med = rs.length ? rs[rs.length >> 1] : 1;
+      if (med < 0.45 || med > 2.2) { lipModel = null; return null; }
+    }
     const kStretch = Math.sqrt(Math.max(0.5, Math.min(2, lipModel.wRel / wRel)));
     const scale = eyeD * fore * kStretch;
     const T = new Float32Array(MC), B = new Float32Array(MC), gapA = [];
@@ -1471,7 +1550,7 @@ export function segmentLipsColor(src, w, h, lms, opts = {}) {
         tgtIn[2 * ku] = m[0] + upX * Ts[k]; tgtIn[2 * ku + 1] = m[1] + upY * Ts[k];
         tgtIn[2 * kl] = m[0] + upX * Bs[k]; tgtIn[2 * kl + 1] = m[1] + upY * Bs[k];
       }
-      cleanInner(tgtIn, outer, persp, mouthMid);
+      cleanInner(tgtIn, outer, persp, mouthMid, outerD, innerD);
       if (Number.isNaN(prevInner[0])) prevInner.set(tgtIn);
       else trackContour(prevInner, tgtIn, K, opts.moving ? 0.35 : 0.2, 0.35 * t);
       inner = new Array(K);
@@ -1485,7 +1564,7 @@ export function segmentLipsColor(src, w, h, lms, opts = {}) {
     openRatio = predicted.openRatio; openCols = predicted.openCols;
     if (cutoutActive) {
       if (!prevInner || fresh) prevInner = new Float32Array(K * 2).fill(NaN);
-      cleanInner(predicted.tgt, outer, persp, mouthMid);
+      cleanInner(predicted.tgt, outer, persp, mouthMid, outerD, innerD);
       if (Number.isNaN(prevInner[0])) prevInner.set(predicted.tgt);
       else trackContour(prevInner, predicted.tgt, K, opts.moving ? 0.35 : 0.2, 0.35 * t);
       inner = new Array(K);
@@ -1534,7 +1613,7 @@ export function segmentLipsColor(src, w, h, lms, opts = {}) {
         tgtIn[2 * k] = innerD[k][0] + nIn[k][0] * smOff[k];
         tgtIn[2 * k + 1] = innerD[k][1] + nIn[k][1] * smOff[k];
       }
-      cleanInner(tgtIn, outer, persp, mouthMid);
+      cleanInner(tgtIn, outer, persp, mouthMid, outerD, innerD);
       if (Number.isNaN(prevInner[0])) prevInner.set(tgtIn);
       else trackContour(prevInner, tgtIn, K, opts.moving ? 0.3 : 0.15, 0.35 * t);
       inner = new Array(K);
@@ -1616,3 +1695,6 @@ export function getLastLipSeg() { return lastSeg; }
 
 /** Forget temporal state (call on source change). */
 export function resetLipSeg() { prevPts = null; prevBox = null; prevInner = null; lastSeg = null; cutoutActive = false; lipModel = null; }
+
+/** Debug: the last frame's lip-probability grids (GW×GH over seg.bbox). */
+export function getLipGrids() { return { Q, Pb, Lb, GW, GH }; }

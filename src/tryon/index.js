@@ -38,7 +38,7 @@ export { setFeatureProtect, setRegionBlur, setRegionEdge, edgeRangeFor } from '.
 export {
   buildFaceMask, buildBlushMask, buildEyeMask, buildLashMask,
   buildContourMask, buildHighlightMask, buildUnderEyeMask, buildLipMask,
-  buildLipLinerMask, buildEyelinerMask, buildBrowMask, buildSculptPack,
+  buildLipLinerMask, buildEyelinerMask, buildBrowMask, buildSculptPack, setLipCore,
 } from './lipRenderer.js';
 
 // Per-pixel lip segmentation from frame colours (lipstick + liner share it).

@@ -128,6 +128,7 @@ export function createLandmarkFilter(opts = {}) {
   const dCut = opts.dCutoff ?? 1.0;         // speed estimate smoothing
   const fastCut = opts.fastMinCutoff ?? 2.5;   // lips / eyelids react sooner
   const lashCut = opts.lashMinCutoff ?? 6.0;   // lash line: almost raw
+  const snap = opts.snap ?? 0.05;           // jump (× face width per frame) that resets the filter
   let x = null, dx = null, tPrev = 0, n = 0;
   const alpha = (cut, dt) => { const r = 2 * Math.PI * cut * dt; return r / (r + 1); };
   const out = () => {
@@ -144,6 +145,18 @@ export function createLandmarkFilter(opts = {}) {
       return out();
     }
     if (tMs - tPrev < 0.5) return out();     // same frame again
+    // A jump (choppy video, dropped frames, a whip turn): the filtered mesh
+    // would trail the face for several frames — snap to the detection instead.
+    if (snap > 0 && cur[234] && cur[454]) {
+      const fw = Math.hypot(cur[454].x - cur[234].x, cur[454].y - cur[234].y) || 1e-3;
+      let d = 0;
+      for (let i = 0; i < n; i++) d += Math.hypot(cur[i].x - x[3 * i], cur[i].y - x[3 * i + 1]);
+      if (d / n > snap * fw) {
+        for (let i = 0; i < n; i++) { x[3 * i] = cur[i].x; x[3 * i + 1] = cur[i].y; x[3 * i + 2] = cur[i].z || 0; dx[3 * i] = dx[3 * i + 1] = dx[3 * i + 2] = 0; }
+        tPrev = tMs;
+        return out();
+      }
+    }
     const dt = (tMs - tPrev) / 1000;
     tPrev = tMs;
     const ad = alpha(dCut, dt);

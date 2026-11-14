@@ -634,7 +634,7 @@ function segCanvas(cv, w, h) {
   if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
   return cv;
 }
-function drawLipSeg(cv, seg, w, h, liner = false) {
+function drawLipSeg(cv, seg, w, h, liner = false, lms = null) {
   lipSegTmpCv = segCanvas(lipSegTmpCv, w, h);
   const ctx = cv.getContext('2d');
   ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -699,9 +699,48 @@ function drawLipSeg(cv, seg, w, h, liner = false) {
     ctx.globalCompositeOperation = 'destination-out';
     ctx.drawImage(lipSegTmpCv, 0, 0);
   }
+  if (!liner && lms && LIP_CORE) {
+    // ── Lipstick core from MediaPipe's own lip mesh, independent of the
+    // colour fit ──
+    // The fitted outline decides the EDGE; the body of the lips is always
+    // painted: MP's outer lip polygon, eroded so it never reaches the edge,
+    // minus the mouth opening (the fitted cut and, when MP sees it open, MP's
+    // own inner polygon). Whatever the colour fit loses on a turn, a tilt,
+    // in hard light or gloss, the core keeps covered.
+    const tc = lipSegTmpCv.getContext('2d');
+    tc.setTransform(1, 0, 0, 1, 0, 0);
+    tc.globalCompositeOperation = 'source-over';
+    tc.filter = 'none';
+    tc.clearRect(0, 0, w, h);
+    const P = (i) => [lms[i].x * w, lms[i].y * h];
+    const outerMP = LIPS_OUTER.map(P);
+    const e = Math.max(2, 0.18 * (seg.t || 10));
+    // soft where the core meets the fitted lipstick (inside the lip), hard
+    // against the mouth opening (that edge is the fitted cut itself)
+    tc.filter = canvasFilterSupported() ? `blur(${Math.max(1, 0.4 * e)}px)` : 'none';
+    tc.fillStyle = '#fff';
+    traceSmooth(tc, outerMP); tc.fill();
+    tc.globalCompositeOperation = 'destination-out';
+    tc.lineJoin = 'round'; tc.lineWidth = 2 * e; tc.strokeStyle = '#000';
+    traceSmooth(tc, outerMP); tc.stroke();
+    tc.filter = 'none';
+    if (seg.safe && seg.inner) { path(tc, seg.inner); tc.fill(); }
+    if (mouthOpenRatio(lms, w, h) > 0.03) {
+      const innerMP = LIPS_INNER.map(P);
+      traceSmooth(tc, innerMP); tc.fill();
+      tc.lineWidth = e; traceSmooth(tc, innerMP); tc.stroke();
+    }
+    tc.globalCompositeOperation = 'source-over';
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.drawImage(lipSegTmpCv, 0, 0);
+  }
   ctx.globalCompositeOperation = 'source-over';
   return cv;
 }
+
+// MP-mesh lipstick core under the fitted outline (see drawLipSeg).
+let LIP_CORE = true;
+export function setLipCore(v) { LIP_CORE = !!v; }
 
 /** Lip gap / mouth width, measured on MediaPipe's 3D points (pose-invariant). */
 function mouthOpenRatio(lm, w, h) {
@@ -722,7 +761,7 @@ export function buildLipMask(w, h, landmarks, opts = {}) {
   if (opts.lipSeg) {
     // Fitted outline — shares its edge with the liner. Full resolution.
     lipSegCv = segCanvas(lipSegCv, w, h);
-    return drawLipSeg(lipSegCv, opts.lipSeg, w, h, false);
+    return drawLipSeg(lipSegCv, opts.lipSeg, w, h, false, landmarks);
   }
   if (opts.refinedOuter) {
     // Use pixel-refined contour (scaled from frame coords to mask coords)

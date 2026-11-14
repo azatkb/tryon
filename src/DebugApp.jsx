@@ -4,7 +4,7 @@ import {
   drawLandmarks, setFeatureProtect, setRegionEdge,
   buildFaceMask, buildBlushMask, buildEyeMask, buildLashMask,
   buildContourMask, buildHighlightMask, buildUnderEyeMask, buildLipMask,
-  buildLipLinerMask, buildEyelinerMask, buildBrowMask, getLastLipSeg, resetLipSeg, setLipRoughness, setLipSymmetry, setLipSoftness, setLipOpenDetect, getLipModel,
+  buildLipLinerMask, buildEyelinerMask, buildBrowMask, getLastLipSeg, resetLipSeg, setLipRoughness, setLipSymmetry, setLipSoftness, setLipOpenDetect, getLipModel, setLipCore,
   UV_PRODUCTS, loadUVMasks, reloadUVMasks, uvMaskCanvas, setUVMaskImage, getUVMaskImage, setUVMasksEnabled, bakeUVMasks, uvTemplate, canvasToPngBlob,
 } from './tryon/index.js';
 import { createMp4Writer, downloadBlob, mp4WriterSupported } from './videoWriter.js';
@@ -133,6 +133,9 @@ export default function DebugApp() {
   const [borders, setBorders] = useState(false);
   const [showPoints, setShowPoints] = useState(false);
   const [showLight, setShowLight] = useState(true);
+  const [motionFade, setMotionFade] = useState(true);
+  const [fadeSens, setFadeSens] = useState(1);
+  const fadeInfoRef = useRef(null);
   const [protect, setProtect] = useState(true);
   const [tune, setTune] = useState(() => JSON.parse(JSON.stringify(TUNE_DEFAULT)));
   const [panelOpen, setPanelOpen] = useState(true);
@@ -185,6 +188,8 @@ export default function DebugApp() {
   useEffect(() => { setLipSoftness(lipSoft); }, [lipSoft]);
   const [openDet, setOpenDet] = useState('mp');
   const openDetRef = useRef('mp'); openDetRef.current = openDet;
+  const [lipCore, setLipCoreS] = useState(true);
+  useEffect(() => { setLipCore(lipCore); }, [lipCore]);
   useEffect(() => { setLipOpenDetect(openDet); }, [openDet]);
 
   // ── UV masks ──
@@ -298,7 +303,27 @@ export default function DebugApp() {
   // All this workbench does is blit the processed frame and draw its overlays.
   const scratchRef = useRef(null);
   const debugContourBufRef = useRef([]);
-  const onFrame = useCallback(({ processed, source, landmarks, w, h, light }) => {
+  // Last raw frame + landmarks, for "Save debug frame" (exact repro offline).
+  const dumpRef = useRef(null);
+  const saveDebugFrame = useCallback(async () => {
+    const d = dumpRef.current;
+    if (!d || !d.source || !d.landmarks) return;
+    const c = document.createElement('canvas'); c.width = d.w; c.height = d.h;
+    c.getContext('2d').drawImage(d.source, 0, 0, d.w, d.h);          // original pixels, no makeup, not mirrored
+    const stamp = Date.now();
+    downloadBlob(await canvasToPngBlob(c), `debug-frame-${stamp}.png`);
+    const seg = getLastLipSeg();
+    const info = {
+      w: d.w, h: d.h, landmarks: d.landmarks.map((p) => [p.x, p.y, p.z || 0]),
+      settings: { openMode: openDetRef.current, lipCore, lipRough, lipSym, lipSoft, lipCover, colorSeg },
+      seg: seg ? { conf: seg.conf, dprime: seg.dprime, open: seg.open, t: seg.t, outer: seg.outerSmooth, inner: seg.inner } : null,
+    };
+    await new Promise((r) => setTimeout(r, 300));
+    downloadBlob(new Blob([JSON.stringify(info)], { type: 'application/json' }), `debug-frame-${stamp}.json`);
+  }, [lipCore, lipRough, lipSym, lipSoft, lipCover, colorSeg]);
+  const onFrame = useCallback(({ processed, source, landmarks, w, h, light, fade, jump }) => {
+    dumpRef.current = { source, landmarks, w, h };
+    if (fadeInfoRef.current) fadeInfoRef.current.textContent = `jump ${((jump || 0) * 100).toFixed(1)}% · makeup ${Math.round((fade ?? 1) * 100)}%`;
     const cv = canvasRef.current;
     if (!cv) return;
     if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
@@ -348,6 +373,8 @@ export default function DebugApp() {
     sourceEl: tryOnEl,
     renderer: useGL ? 'auto' : 'canvas',
     lipColorSeg: colorSeg,
+    // sensitivity > 1 = hides on smaller jumps
+    motionFade: motionFade ? { lo: 0.04 / fadeSens, hi: 0.11 / fadeSens, recover: 5 } : false,
     onFrame,
   });
 
@@ -708,6 +735,14 @@ export default function DebugApp() {
           <label className="dbg-row"><input type="checkbox" checked={borders} onChange={(e) => setBorders(e.target.checked)} /> Show mask borders</label>
           <label className="dbg-row"><input type="checkbox" checked={showPoints} onChange={(e) => setShowPoints(e.target.checked)} /> Mesh points</label>
           <label className="dbg-row"><input type="checkbox" checked={showLight} onChange={(e) => setShowLight(e.target.checked)} /> Scene light (direction)</label>
+          <label className="dbg-row"><input type="checkbox" checked={motionFade} onChange={(e) => setMotionFade(e.target.checked)} /> Hide on fast motion</label>
+          {motionFade && (
+            <label className="dbg-row" style={{ paddingLeft: 18 }}>
+              Sensitivity <input type="range" min="0.5" max="3" step="0.1" value={fadeSens}
+                onChange={(e) => setFadeSens(+e.target.value)} style={{ width: 90, verticalAlign: 'middle' }} />
+              {' '}{fadeSens.toFixed(1)} <span ref={fadeInfoRef} style={{ color: '#aaa', marginLeft: 6 }} />
+            </label>
+          )}
           <label className="dbg-row"><input type="checkbox" checked={colorSeg} onChange={(e) => setColorSeg(e.target.checked)} /> Lip color seg <span ref={segInfoRef} style={{ marginLeft: 6, fontSize: '.68rem' }} /></label>
           {colorSeg && (
             <label className="dbg-row" style={{ paddingLeft: 18 }}>
@@ -730,6 +765,7 @@ export default function DebugApp() {
               {' '}{lipSoft.toFixed(2)}
             </label>
           )}
+          <label className="dbg-row" style={{ paddingLeft: 18 }}><input type="checkbox" checked={lipCore} onChange={(e) => setLipCoreS(e.target.checked)} /> Lip core (MP mesh, always painted)</label>
           <label className="dbg-row" style={{ paddingLeft: 18 }}>
             Inner lip <select value={openDet} onChange={(e) => setOpenDet(e.target.value)} style={{ fontSize: '.68rem' }}>
               <option value="mp">MediaPipe</option>
@@ -749,6 +785,7 @@ export default function DebugApp() {
             <button style={{ fontSize: '.68rem', padding: '0 6px' }} onClick={() => uvBake(false)} title="Bake today's procedural masks into UV and use them">Bake</button>
             <button style={{ fontSize: '.68rem', padding: '0 6px' }} onClick={() => uvBake(true)} title="Bake and download every UV PNG">Bake ⬇</button>
             <button style={{ fontSize: '.68rem', padding: '0 6px' }} onClick={async () => downloadBlob(await canvasToPngBlob(uvTemplate(1024)), 'uv_template.png')}>Template ⬇</button>
+            <button style={{ fontSize: '.68rem', padding: '0 6px' }} onClick={saveDebugFrame} title="Original frame (no makeup) + landmarks + settings — send both files to reproduce exactly">Save debug frame</button>
           </div>
           <div className="dbg-row" style={{ gap: 6, paddingLeft: 18 }}>
             <select value={uvKey} onChange={(e) => setUvKey(e.target.value)} style={{ fontSize: '.68rem' }}>

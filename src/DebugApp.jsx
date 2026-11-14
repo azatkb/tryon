@@ -7,6 +7,7 @@ import {
   buildLipLinerMask, buildEyelinerMask, buildBrowMask, getLastLipSeg, resetLipSeg, setLipRoughness, setLipSymmetry, setLipSoftness, setLipOpenDetect, getLipModel, setLipCore, setLipPixelCut,
   UV_PRODUCTS, loadUVMasks, reloadUVMasks, uvMaskCanvas, setUVMaskImage, getUVMaskImage, setUVMasksEnabled, bakeUVMasks, uvTemplate, canvasToPngBlob,
   setEyeShadowProcedural, setEyeShadowShape, getEyeShadowShape, setLashStyle, getLashStyle,
+  setLashLineDetect, drawLashLine,
 } from './tryon/index.js';
 import { createMp4Writer, downloadBlob, mp4WriterSupported } from './videoWriter.js';
 import { refineLipContour, drawRefinedContour } from './tryon/lipContourRefine.js';
@@ -134,6 +135,8 @@ export default function DebugApp() {
   const [useGL, setUseGL] = useState(glAvailable());
   const [borders, setBorders] = useState(false);
   const [showPoints, setShowPoints] = useState(false);
+  const [lashDetect, setLashDetect] = useState(true);     // lash-line detector (roots onto the real lash line)
+  const [showLashLine, setShowLashLine] = useState(false);
   const [showLight, setShowLight] = useState(true);
   const [motionFade, setMotionFade] = useState(false);
   const [fadeSens, setFadeSens] = useState(1);
@@ -183,7 +186,8 @@ export default function DebugApp() {
   const [rawView, setRawView] = useState(false);
   const rendInfoRef = useRef(null);
   const stateRef = useRef({});
-  stateRef.current = { enabled, useGL, borders, showPoints, showLight, tune, lipContour, colorSeg, rawView };
+  stateRef.current = { enabled, useGL, borders, showPoints, showLight, tune, lipContour, colorSeg, rawView, showLashLine };
+  useEffect(() => { setLashLineDetect(lashDetect); }, [lashDetect]);
 
   // feature protection is a module-level flag in the renderer
   useEffect(() => { setFeatureProtect(protect); }, [protect]);
@@ -361,6 +365,7 @@ export default function DebugApp() {
     if (!landmarks) { capture(); return; }
     if (stateRef.current.borders) drawBorders(ctx, w, h, landmarks);
     if (stateRef.current.showPoints) drawLandmarks(ctx, w, h, landmarks);
+    if (stateRef.current.showLashLine) drawLashLine(ctx);
     if (stateRef.current.showLight && light) drawLight(ctx, w, h, landmarks, light, !videoModeRef.current);
 
     // Lip contour refinement — sample brightness from the SOURCE frame
@@ -430,7 +435,7 @@ export default function DebugApp() {
     if (photoMode && imgRef.current && ready) {
       redrawStill(imgRef.current);
     }
-  }, [photoMode, layers, ready, redrawStill, colorSeg, lipRough, lipSym, lipSoft, eyeAdaptive, eyeShape, pixCut, lashStyle]);
+  }, [photoMode, layers, ready, redrawStill, colorSeg, lipRough, lipSym, lipSoft, eyeAdaptive, eyeShape, pixCut, lashStyle, lashDetect]);
 
   // Back to camera
   const exitPhoto = useCallback(() => {
@@ -850,6 +855,10 @@ export default function DebugApp() {
                 onChange={(e) => setEyeShape((s) => ({ ...s, [k]: +e.target.value }))} style={{ width: 90, verticalAlign: 'middle' }} /> {eyeShape[k].toFixed(2)}
             </label>
           ))}
+          <label className="dbg-row" title="Finds the real lash line in the camera frame and puts the lash roots on it (MediaPipe lid points can be a few px off)">
+            <input type="checkbox" checked={lashDetect} onChange={(e) => setLashDetect(e.target.checked)} /> Lash line detect
+            <label style={{ marginLeft: 10, fontSize: '.72rem' }}><input type="checkbox" checked={showLashLine} onChange={(e) => setShowLashLine(e.target.checked)} /> show</label>
+          </label>
           <div className="dbg-row" style={{ fontSize: '.74rem', marginTop: 4 }}>Mascara (3D lashes)
             <button style={{ fontSize: '.66rem', padding: '0 6px', marginLeft: 6 }} onClick={() => setLashStyleS({ length: 1, volume: 1, curl: 1, clump: 1, lower: 1, density: 1 })}>Reset</button>
           </div>

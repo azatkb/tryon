@@ -30,6 +30,7 @@ export {
 export { renderMakeupGL, glAvailable } from './webglLips.js';
 export { renderMakeup, drawLandmarks, drawSegMask } from './lipRenderer.js';
 export { lash3dAvailable, renderLashes3D, resetLash3d, setLashStyle, getLashStyle, resetLashStyle } from './lashRenderer3D.js';
+export { setLashLineDetect, getLashLineDetect, getLastLashLine, drawLashLine } from './lashLineDetect.js';
 
 // Render tuning — module-level switches in the Canvas renderer.
 export { setFeatureProtect, setRegionBlur, setRegionEdge, edgeRangeFor } from './lipRenderer.js';

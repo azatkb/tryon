@@ -14,6 +14,7 @@
 // All randomness is per-strand deterministic, so nothing flickers.
 
 import { EYE_R_LASH, EYE_L_LASH } from './regions.js';
+import { updateLashLine, lineOffsetAt } from './lashLineDetect.js';
 
 const EYE_R_LOW = [33, 7, 163, 144, 145, 153, 154, 155, 133];
 const EYE_L_LOW = [263, 249, 390, 373, 374, 380, 381, 382, 362];
@@ -312,7 +313,8 @@ function lidCurve(L, lm, ids, W, H) {
   return L;
 }
 // point at arc-length fraction s (+ offset along dir·amt) → out[0..2]
-function lidAt(L, s, dir, amt, out) {
+const _corr = [0, 0];
+function lidAt(L, s, dir, amt, out, corr = null) {
   const d = clamp(s, 0, 1) * L.total, cum = L.cum, pts = L.pts;
   let k = 1;
   while (k < L.m - 1 && cum[k] < d) k++;
@@ -321,6 +323,10 @@ function lidAt(L, s, dir, amt, out) {
   out[0] = pts[a] + (pts[b] - pts[a]) * f + dir[0] * amt;
   out[1] = pts[a + 1] + (pts[b + 1] - pts[a + 1]) * f + dir[1] * amt;
   out[2] = pts[a + 2] + (pts[b + 2] - pts[a + 2]) * f + dir[2] * amt;
+  if (corr) {                       // detected lash line (image-space nudge)
+    lineOffsetAt(corr, s, _corr);
+    out[0] += _corr[0]; out[1] += _corr[1];
+  }
   return out;
 }
 
@@ -414,7 +420,7 @@ let _clumpBuf = new Float64Array(12 * 64);
 const _sBuf = new Float64Array(12);
 const _root = [0, 0, 0];
 
-function buildEye(lm, W, H, hf, side, eyeW, open, A, hasEyeliner) {
+function buildEye(lm, W, H, hf, side, eyeW, open, A, hasEyeliner, corr) {
   const G = GENES[side];
   const up = lidCurve(side === 'R' ? LIDS.RU : LIDS.LU, lm, side === 'R' ? EYE_R_LASH : EYE_L_LASH, W, H);
   const lo = lidCurve(side === 'R' ? LIDS.RL : LIDS.LL, lm, side === 'R' ? EYE_R_LOW : EYE_L_LOW, W, H);
@@ -455,7 +461,10 @@ function buildEye(lm, W, H, hf, side, eyeW, open, A, hasEyeliner) {
   // lash-line ribbon (under the strands)
   if (!hasEyeliner) {
     const lift = eyeW * 0.004;
-    const q = up.pts2.map((p) => [p[0] + Y[0] * lift, p[1] + Y[1] * lift]);
+    const q = up.pts2.map((p, i) => {
+      if (corr) lineOffsetAt(corr, up.cum[i * LID_SUBS] / up.total, _corr); else _corr[0] = _corr[1] = 0;
+      return [p[0] + Y[0] * lift + _corr[0], p[1] + Y[1] * lift + _corr[1]];
+    });
     // two halves from the thickest point (outer third) so both ends taper
     const m = 3, aL = 0.66 * alphaU * ss(0.25, 0.7, open), rw = eyeW * 0.011 * thick;
     const bo = fitBezier(q.slice(0, m + 1).reverse());
@@ -484,7 +493,7 @@ function buildEye(lm, W, H, hf, side, eyeW, open, A, hasEyeliner) {
   for (const g of G.fill) {
     const ic = innerCut(g.s);
     const L = eyeW * g.len * lenMul * (1 - 0.5 * ss(0.6, 1, g.s)) * (1 - 0.6 * ic);
-    strandCPs(lidAt(up, g.s, Y, liftU, _root), L, g.a0 - lidRot - 25 * D2R * ic, 20 * D2R, betaProf(g.s) * 0.6 + g.beta, fr, S, 0);
+    strandCPs(lidAt(up, g.s, Y, liftU, _root, corr), L, g.a0 - lidRot - 25 * D2R * ic, 20 * D2R, betaProf(g.s) * 0.6 + g.beta, fr, S, 0);
     pushStrand(S, 0, null, 0, 0, 0, 0, hw0 * 1.15 * g.w * (1 - 0.3 * ic), hw0 * 0.45, g.alpha * alphaU * (1 - 0.6 * ss(0.75, 1, g.s)) * (1 - far * ss(0.5, 0.88, g.s)), 0.2, 0.55);
   }
 
@@ -494,10 +503,10 @@ function buildEye(lm, W, H, hf, side, eyeW, open, A, hasEyeliner) {
   const upA0 = (s) => a0Prof(s) - lidRot - 30 * D2R * innerCut(s);
   const upCurl = (s) => curlProf(s) * curlMul * (1 - 0.55 * innerCut(s));
   const upBeta = (s) => betaProf(s) * (1 - innerCut(s));
-  G.upperClumps.forEach((c, ci) => strandCPs(lidAt(up, c.s, Y, liftU, _root), upLen(c.s) * c.len,
+  G.upperClumps.forEach((c, ci) => strandCPs(lidAt(up, c.s, Y, liftU, _root, corr), upLen(c.s) * c.len,
     upA0(c.s) + c.a0, upCurl(c.s) * c.curl, upBeta(c.s) + c.beta, fr, CB, 12 * ci));
   for (const g of G.upper) {
-    strandCPs(lidAt(up, g.s, Y, liftU, _root), upLen(g.s) * g.len, upA0(g.s) + g.a0,
+    strandCPs(lidAt(up, g.s, Y, liftU, _root, corr), upLen(g.s) * g.len, upA0(g.s) + g.a0,
       upCurl(g.s) * g.curl, upBeta(g.s) + g.beta, fr, S, 0);
     const w = G.upperClumps[g.clump].w * clumpK * (g.cross ? 0.2 : 1);
     const edge = ss(0, 0.04, g.s) * 0.4 + 0.6;
@@ -532,8 +541,20 @@ export function renderLashes3D(gl, w, h, landmarks, opts = {}) {
 
   _n = 0;
   const hasEyeliner = !!opts.hasEyeliner;
-  buildEye(landmarks, w, h, hf, 'R', eyeW, eyeOpenness(landmarks, w, h, EAR_R), intensity, hasEyeliner);
-  buildEye(landmarks, w, h, hf, 'L', eyeW, eyeOpenness(landmarks, w, h, EAR_L), intensity, hasEyeliner);
+  const openR = eyeOpenness(landmarks, w, h, EAR_R), openL = eyeOpenness(landmarks, w, h, EAR_L);
+  // helper: find the real lash line in the camera frame and nudge the roots onto it
+  let corr = null;
+  if (opts.frame) {
+    const up2 = [hf.Y[0], hf.Y[1]], ul = Math.hypot(up2[0], up2[1]) || 1;
+    up2[0] /= ul; up2[1] /= ul;
+    const lid = (ids) => ids.map((i) => [landmarks[i].x * w, landmarks[i].y * h]);
+    corr = updateLashLine(opts.frame, w, h, {
+      R: { lid: lid(EYE_R_LASH), up: up2, eyeW, open: openR },
+      L: { lid: lid(EYE_L_LASH), up: up2, eyeW, open: openL },
+    });
+  }
+  buildEye(landmarks, w, h, hf, 'R', eyeW, openR, intensity, hasEyeliner, corr && corr.R);
+  buildEye(landmarks, w, h, hf, 'L', eyeW, openL, intensity, hasEyeliner, corr && corr.L);
   if (_n === 0) return false;
 
   gl.useProgram(lashProg);

@@ -1120,6 +1120,7 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
       blinkR: opts.blinkR,
       motion: opts.motion,
       hasEyeliner: !!eyeliner,
+      frame: source,       // lash-line detector samples the raw frame
     });
     // Restore main program state for next frame
     gl.useProgram(prog);

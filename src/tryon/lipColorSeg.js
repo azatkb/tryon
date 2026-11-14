@@ -30,7 +30,7 @@ const SUB = 5;                       // samples per MP segment
 const K = LIPS_OUTER.length * SUB;   // dense contour points (100)
 const CORNER_L = 0, CORNER_R = 10 * SUB; // dense indices of landmarks 61 / 291
 
-let cropCv, priorCv;
+let cropCv, priorCv, farCv;
 let prevPts = null, prevBox = null, prevInner = null;
 let cutoutActive = false;
 let version = 0;
@@ -54,6 +54,7 @@ export function setLipSoftness(v) { edgeSoft = Math.max(0, Math.min(2, +v || 0))
 //   'pixel'   — experimental: opening searched in the pixels
 let openMode = 'mp';
 const OUTER_RULES = false;
+let CORNER_FREE = 0;   // >0 lets the colour fit move the mouth corners too (experimental)
 export function setLipOpenDetect(v) {
   openMode = v === true ? 'pixel' : v === 'predict' || v === 'pixel' ? v : 'mp';
   prevInner = null;
@@ -176,12 +177,14 @@ function roughen(outer, nOut, t, perim, persp, thick) {
 
 // Scratch buffers (allocated once)
 const Lc = new Float32Array(N), Ac = new Float32Array(N), Bc = new Float32Array(N);
+const CA = new Float32Array(N), CB = new Float32Array(N);   // shading-invariant chroma: a*/(L*+16), b*/(L*+16)
 const OUT = new Float32Array(N), INN = new Float32Array(N);
 const dIn = new Float32Array(N), dOut = new Float32Array(N), dMouth = new Float32Array(N);
 const seed = new Uint8Array(N);
 const P = new Float32Array(N), Pb = new Float32Array(N), Q = new Float32Array(N), Lb = new Float32Array(N);
 const lipSel = new Uint8Array(N), skinSel = new Uint8Array(N);
 const idxBuf = new Int32Array(N);
+const farA = new Float32Array(N), farB = new Float32Array(N);
 const rawOff = new Float32Array(K), wOff = new Float32Array(K), medOff = new Float32Array(K), smOff = new Float32Array(K);
 
 // sRGB -> linear LUT
@@ -214,6 +217,7 @@ function ensure() {
   if (cropCv) return;
   cropCv = canvas(GW, GH);
   priorCv = canvas(GW, GH);
+  farCv = canvas(GW, GH);
 }
 
 /** Same Bezier construction as lipRenderer's traceSmooth, sampled densely. */
@@ -296,6 +300,75 @@ function inv3(m) {
 }
 
 /** Mean + covariance of selected pixels, with one 2.5σ trimming pass. */
+/**
+ * Far side of a turned head: MediaPipe places the hidden half of the mouth
+ * (far corner included) out past the real lips — onto the shaded far cheek or
+ * into the background — and every outline built on it carries that error.
+ * This builds an ERASE map over the lip grid: on the far part of the mouth
+ * (weighted by how far that corner is turned away), whatever is clearly not
+ * lip-coloured — Pb, dilated by ~0.15 t so the seam / small highlights inside
+ * the lip survive — gets erased from the final lip mask. Returns null when
+ * nothing would be erased (frontal, or colour too unreliable).
+ */
+function buildFarErase(outerD, visOut, t, xf, box, gate) {
+  const fL = 1 - smooth01(0.2, 0.6, visOut[CORNER_L]), fR = 1 - smooth01(0.2, 0.6, visOut[CORNER_R]);
+  if (gate <= 0.02 || Math.max(fL, fR) <= 0.02) return null;
+  const [bx, by] = box, sx = xf[0], sy = xf[1];
+  // dilate Pb (separable max, radius in grid cells)
+  const rx = Math.max(1, Math.round(0.15 * t * sx)), ry = Math.max(1, Math.round(0.15 * t * sy));
+  for (let y = 0; y < GH; y++) {
+    const row = y * GW;
+    for (let x = 0; x < GW; x++) {
+      let m = 0;
+      for (let d = Math.max(0, x - rx), e = Math.min(GW - 1, x + rx); d <= e; d++) if (Pb[row + d] > m) m = Pb[row + d];
+      farA[row + x] = m;
+    }
+  }
+  for (let x = 0; x < GW; x++) for (let y = 0; y < GH; y++) {
+    let m = 0;
+    for (let d = Math.max(0, y - ry), e = Math.min(GH - 1, y + ry); d <= e; d++) if (farA[d * GW + x] > m) m = farA[d * GW + x];
+    farB[y * GW + x] = m;
+  }
+  const cL = outerD[CORNER_L], cR = outerD[CORNER_R];
+  const ax = cR[0] - cL[0], ay = cR[1] - cL[1], a2 = Math.max(1e-6, ax * ax + ay * ay);
+  const c = farCv._ctx, im = farCv._im || (farCv._im = c.createImageData(GW, GH)), d = im.data;
+  let any = 0;
+  for (let y = 0; y < GH; y++) for (let x = 0; x < GW; x++) {
+    const i = y * GW + x;
+    const px = bx + (x + 0.5) / sx, py = by + (y + 0.5) / sy;
+    const u = ((px - cL[0]) * ax + (py - cL[1]) * ay) / a2;
+    const far = fL * (1 - smooth01(0.3, 0.55, u)) + fR * smooth01(0.45, 0.7, u);
+    const er = gate * far * (1 - smooth01(0.2, 0.45, farB[i]));
+    const v = Math.max(0, Math.min(255, Math.round(255 * er)));
+    d[4 * i] = d[4 * i + 1] = d[4 * i + 2] = 0; d[4 * i + 3] = v;
+    if (v > 8) any++;
+  }
+  if (!any) return null;
+  c.putImageData(im, 0, 0);
+  return { cv: farCv, box: [bx, by, GW / sx, GH / sy] };
+}
+
+/** Mean / covariance of the shading-invariant chroma (CA, CB) over sel (2σ-trimmed). */
+function chromaStats(sel) {
+  let n = 0;
+  for (let i = 0; i < N; i++) if (sel[i]) idxBuf[n++] = i;
+  for (let pass = 0; pass < 2; pass++) {
+    if (n < 40) return null;
+    let mA = 0, mB = 0;
+    for (let k = 0; k < n; k++) { const i = idxBuf[k]; mA += CA[i]; mB += CB[i]; }
+    mA /= n; mB /= n;
+    let cAA = 0, cAB = 0, cBB = 0;
+    for (let k = 0; k < n; k++) { const i = idxBuf[k], x = CA[i] - mA, y = CB[i] - mB; cAA += x * x; cAB += x * y; cBB += y * y; }
+    const cov = [cAA / n, cAB / n, cBB / n];
+    if (pass === 1) return { n, mu: [mA, mB], cov };
+    const sA = 2.5 * Math.sqrt(cov[0]) + 1e-4, sB = 2.5 * Math.sqrt(cov[2]) + 1e-4;
+    let m = 0;
+    for (let k = 0; k < n; k++) { const i = idxBuf[k]; if (Math.abs(CA[i] - mA) < sA && Math.abs(CB[i] - mB) < sB) idxBuf[m++] = i; }
+    n = m;
+  }
+  return null;
+}
+
 function stats(sel) {
   let n = 0;
   for (let i = 0; i < N; i++) if (sel[i]) idxBuf[n++] = i;
@@ -326,11 +399,11 @@ function stats(sel) {
 const smooth01 = (e0, e1, x) => { const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0))); return t * t * (3 - 2 * t); };
 
 /** Bilinear sample of the blurred lip-probability grid at image coords. */
-function sampleP(x, y, xf) {
+function sampleP(x, y, xf, A = Q) {
   const gx = x * xf[0] + xf[2] - 0.5, gy = y * xf[1] + xf[3] - 0.5;
   if (gx < 0 || gy < 0 || gx >= GW - 1 || gy >= GH - 1) return 0;
   const x0 = gx | 0, y0 = gy | 0, fx = gx - x0, fy = gy - y0, i = y0 * GW + x0;
-  return (Q[i] * (1 - fx) + Q[i + 1] * fx) * (1 - fy) + (Q[i + GW] * (1 - fx) + Q[i + GW + 1] * fx) * fy;
+  return (A[i] * (1 - fx) + A[i + 1] * fx) * (1 - fy) + (A[i + GW] * (1 - fx) + A[i + GW + 1] * fx) * fy;
 }
 
 function sampleGrid(arr, x, y, xf) {
@@ -589,7 +662,7 @@ function growOverLip(pts, vis, thr, t, xf) {
   for (let k = 0; k < n; k++) {
     if (sw[k] <= 0.01) continue;
     const [x, y] = pts[k], [nx, ny] = nr[k];
-    const lip = (sv) => sampleP(x + nx * sv, y + ny * sv, xf) >= 0.5;
+    const lip = (sv) => sampleP(x + nx * sv, y + ny * sv, xf, Pb) >= 0.5;   // lip colour only (white cloth / teeth don't count)
     if (!lip(-1) && !lip(-2.5)) continue;          // no lip evidence here: unknown (weight 0), not "zero growth"
     let last = 0, gap = 0;
     for (let sv = step; sv <= maxOut; sv += step) {
@@ -1055,6 +1128,8 @@ export function segmentLipsColor(src, w, h, lms, opts = {}) {
     Lc[i] = 116 * fy - 16;
     Ac[i] = 500 * (fx - fy);
     Bc[i] = 200 * (fy - fz);
+    CA[i] = Ac[i] / (Lc[i] + 16);
+    CB[i] = Bc[i] / (Lc[i] + 16);
   }
   rasterPriors(xf, outerD, innerD);
   for (let i = 0; i < N; i++) seed[i] = OUT[i] < 0.5 ? 1 : 0;
@@ -1063,14 +1138,29 @@ export function segmentLipsColor(src, w, h, lms, opts = {}) {
   chamfer(dOut, ux, uy);
   for (let i = 0; i < N; i++) seed[i] = INN[i] >= 0.5 ? 1 : 0;
   chamfer(dMouth, ux, uy);
+  const visOut = contourVisibility(lms, w, h, LIPS_OUTER);
+  const visIn = contourVisibility(lms, w, h, LIPS_INNER);
   const coreD = 0.45 * t, skinLo = 0.42 * t, skinHi = 0.95 * t, mouthGuard = 0.25 * t;
+  // Turned head: MP's far end of the mouth is the least reliable part (it
+  // lands on the shaded far cheek or the background) — learn the lip colour
+  // from the near / middle part only, or shaded skin gets learnt as "lip".
+  const cLx = outerD[CORNER_L][0], cLy = outerD[CORNER_L][1];
+  const axX = outerD[CORNER_R][0] - cLx, axY = outerD[CORNER_R][1] - cLy, ax2 = Math.max(1e-6, axX * axX + axY * axY);
+  const FARCUT = 0.38;
+  const cutL = FARCUT * (1 - smooth01(0.25, 0.7, visOut[CORNER_L])), cutR = 1 - FARCUT * (1 - smooth01(0.25, 0.7, visOut[CORNER_R]));
   for (let i = 0; i < N; i++) {
     const L = Lc[i];
-    lipSel[i] = OUT[i] >= 0.5 && dIn[i] >= coreD && dMouth[i] >= mouthGuard && L > 8 && L < 92 ? 1 : 0;
+    let near = 1;
+    if (cutL > 0 || cutR < 1) {
+      const gx = i % GW, gy = (i / GW) | 0;
+      const u = (((gx + 0.5) * ux + bx - cLx) * axX + ((gy + 0.5) * uy + by - cLy) * axY) / ax2;
+      near = u >= cutL && u <= cutR ? 1 : 0;
+    }
+    lipSel[i] = near && OUT[i] >= 0.5 && dIn[i] >= coreD && dMouth[i] >= mouthGuard && L > 8 && L < 92 ? 1 : 0;
     skinSel[i] = OUT[i] < 0.5 && dOut[i] >= skinLo && dOut[i] <= skinHi && L > 12 && L < 97 ? 1 : 0;
   }
   const S = stats(skinSel), Lp = stats(lipSel);
-  let conf = 0, dprime = 0, gridOK = false;
+  let conf = 0, dprime = 0, dprimeC = 0, gridOK = false;
   if (S && Lp) {
     const sw = S.n + Lp.n;
     const cov = S.cov.map((v, k) => (v * S.n + Lp.cov[k] * Lp.n) / sw);
@@ -1093,9 +1183,41 @@ export function segmentLipsColor(src, w, h, lms, opts = {}) {
       const thr = 0.5 * (pL + pS);
       const scale = 2.4 / (0.5 * (sL + sS));
       conf = smooth01(1, 2.2, dprime);
+      // Second opinion from chroma alone (a*, b* over lightness): shading
+      // scales L*, a*, b* together, so this ratio barely moves in shadow. The
+      // L*a*b* model above also keys on "darker than skin" — shaded skin next
+      // to the lips (far cheek on a turned head, under the lower lip) reads as
+      // lip there, and a shaded lip end as skin. Where chroma separates lip
+      // from skin well, the two opinions are averaged (in log-odds).
+      const CS = chromaStats(skinSel), CL = chromaStats(lipSel);
+      let cw0 = 0, cw1 = 0, cthr = 0, cscale = 0, cmix = 0;
+      if (CS && CL) {
+        const c0 = (CS.cov[0] * CS.n + CL.cov[0] * CL.n) / sw + 4e-4, c1 = (CS.cov[1] * CS.n + CL.cov[1] * CL.n) / sw, c2 = (CS.cov[2] * CS.n + CL.cov[2] * CL.n) / sw + 4e-4;
+        const det = c0 * c2 - c1 * c1;
+        if (det > 1e-12) {
+          const e0 = CL.mu[0] - CS.mu[0], e1 = CL.mu[1] - CS.mu[1];
+          cw0 = (c2 * e0 - c1 * e1) / det; cw1 = (c0 * e1 - c1 * e0) / det;
+          const sd2 = (C) => Math.sqrt(Math.max(1e-9, cw0 * (C[0] * cw0 + C[1] * cw1) + cw1 * (C[1] * cw0 + C[2] * cw1)));
+          const qL = cw0 * CL.mu[0] + cw1 * CL.mu[1], qS = cw0 * CS.mu[0] + cw1 * CS.mu[1], tL = sd2(CL.cov), tS = sd2(CS.cov);
+          const dpc = (qL - qS) / Math.sqrt(0.5 * (tL * tL + tS * tS));
+          cthr = 0.5 * (qL + qS); cscale = 2.4 / (0.5 * (tL + tS));
+          cmix = smooth01(1.2, 2.2, dpc);
+          dprimeC = dpc;
+        }
+      }
       for (let i = 0; i < N; i++) {
         const s = w0 * Lc[i] + w1 * Ac[i] + w2 * Bc[i];
-        P[i] = 1 / (1 + Math.exp(-(s - thr) * scale));
+        let z = (s - thr) * scale;
+        if (cmix > 0) {
+          // only where it's darker than the skin: highlights / glare on the lip
+          // are desaturated (chroma says "skin") but they're not the problem
+          const m = cmix * (1 - smooth01(S.mu[0] - 12, S.mu[0] + 2, Lc[i]));
+          if (m > 0) {
+            const zc = (cw0 * CA[i] + cw1 * CB[i] - cthr) * cscale;
+            z += 0.5 * m * (Math.max(-6, Math.min(6, zc)) - z);
+          }
+        }
+        P[i] = 1 / (1 + Math.exp(-z));
       }
       for (let y = 0; y < GH; y++) {
         const ya = y > 0 ? -GW : 0, yb = y < GH - 1 ? GW : 0;
@@ -1139,12 +1261,19 @@ export function segmentLipsColor(src, w, h, lms, opts = {}) {
   const nrm = normals(outerD);
   // Facing / hidden parts of the contour (profile views): no colour fitting on
   // parts turned away from the camera.
-  const visOut = contourVisibility(lms, w, h, LIPS_OUTER);
-  const visIn = contourVisibility(lms, w, h, LIPS_INNER);
   const HIDDEN = 0.02;   // strictly turned away — near-grazing parts are still visible
   const rOut = 0.5 * t, rIn = 0.35 * t, step = 0.5;
   const rOutAt = new Float32Array(K);
-  for (let k = 0; k < K; k++) rOutAt[k] = rOut + 0.6 * t * (1 - smooth01(0.15, 0.6, visOut[k]));
+  // On a turned head MP is least reliable on the far side of the mouth: it
+  // pulls the near-silhouette points inward AND throws the hidden far half
+  // (corner included) out past the real lips — into the cheek or background.
+  // So the search reaches further both ways there.
+  const rInAt = new Float32Array(K);
+  for (let k = 0; k < K; k++) {
+    const far = 1 - smooth01(0.15, 0.7, visOut[k]);
+    rOutAt[k] = rOut + 0.6 * t * far;
+    rInAt[k] = rIn + 0.9 * t * far;
+  }
   const nSteps = Math.max(4, Math.ceil((rOut + rIn) / step));
   for (let k = 0; k < K; k++) {
     rawOff[k] = 0;
@@ -1154,10 +1283,13 @@ export function segmentLipsColor(src, w, h, lms, opts = {}) {
     // search further out there (the lip runs right up to the silhouette).
     const rOutK = rOutAt[k];
     const [bxk, byk] = outerD[k], [nx, ny] = nrm[k];
-    const at = (s) => sampleP(bxk + nx * s, byk + ny * s, xf);
+    // Outer edge: LIP COLOUR only (Pb). Q also counts white (to bridge
+    // highlights inside the lip) — next to a white collar / hoodie / wall the
+    // walk started "inside lip" on the cloth and the point kept MP's position.
+    const at = (s) => sampleP(bxk + nx * s, byk + ny * s, xf, Pb);
     if (at(rOutK) >= 0.5 || at(rOutK - step) >= 0.5) continue;
     let found = false;
-    const nStepsK = Math.max(4, Math.ceil((rOutK + rIn) / step));
+    const nStepsK = Math.max(4, Math.ceil((rOutK + rInAt[k]) / step));
     for (let j = 1; j <= nStepsK; j++) {
       const s = rOutK - j * step;
       if (at(s) >= 0.5 && at(s - step) >= 0.5 && at(s - 2 * step) >= 0.5) {
@@ -1175,23 +1307,32 @@ export function segmentLipsColor(src, w, h, lms, opts = {}) {
           else if (s2 - edge > 1.5) break;
         }
         rawOff[k] = Math.min(rOutK, e2);
-        const pin = (at(s - step) + at(s - 2 * step)) / 2, pout = (at(s + 2 * step) + at(s + 3 * step)) / 2;
+        // edge confidence, measured on the scale of the lip (a fixed 1-px probe
+        // reads a soft, low contrast on big / high-res faces → weak weights →
+        // the prior keeps MP's point even where the colour edge is clear)
+        const d1 = Math.max(step, 0.06 * t), d2 = Math.max(2 * step, 0.12 * t);
+        const pin = (at(edge - d1) + at(edge - d2)) / 2, pout = (at(edge + d1) + at(edge + d2)) / 2;
         wOff[k] = Math.max(0, Math.min(1, (pin - pout) * 1.6));
         found = true;
         break;
       }
     }
     if (!found) {
-      rawOff[k] = -rIn;
+      rawOff[k] = -rIn;            // no lip found: a weak pull, NOT the far reach
       wOff[k] = 0.15;
     }
   }
   const taper = (k) => {
     const d = Math.min(Math.abs(k - CORNER_L), K - Math.abs(k - CORNER_L), Math.abs(k - CORNER_R));
-    return smooth01(0, 2.5 * SUB, d);
+    // corners stay pinned to MP (moving them made loops at the profile front);
+    // MP's far corner thrown past the lips is handled by the far-side erase
+    return Math.max(CORNER_FREE, smooth01(0, 2.5 * SUB, d));
   };
-  regularise(rawOff, wOff, smOff, t, taper, -rIn, rOut + 0.6 * t, conf, supBuf);
-  for (let k = 0; k < K; k++) if (smOff[k] > rOutAt[k]) smOff[k] = rOutAt[k];   // the wider reach only at the silhouette
+  regularise(rawOff, wOff, smOff, t, taper, -(rIn + 0.9 * t), rOut + 0.6 * t, conf, supBuf);
+  for (let k = 0; k < K; k++) {   // the wider reach only where the side is turned away
+    if (smOff[k] > rOutAt[k]) smOff[k] = rOutAt[k];
+    if (smOff[k] < -rInAt[k]) smOff[k] = -rInAt[k];
+  }
   // Perspective visibility per contour point (liner width, edge texture and
   // the symmetric shape prior below).
   const { persp, mouth3D } = contourPerspective(lms, w, h);
@@ -1666,6 +1807,9 @@ export function segmentLipsColor(src, w, h, lms, opts = {}) {
     const shrink = innerRefined ? (openMode !== 'mp' ? 0.08 : 0.12) : 0.25;
     safe = outer.map(([x, y]) => [x + (ocx - x) * shrink, y + (ocy - y) * shrink]);
   }
+  const farErase = gridOK
+    ? buildFarErase(outerD, visOut, t, xf, box, conf * smooth01(1.5, 3, Math.max(dprime, dprimeC)))
+    : null;
 
   lastSeg = {
     outer: tangled ? untangle(edge.base) : edge.base,   // organic outline (overlays / fallback)
@@ -1674,10 +1818,12 @@ export function segmentLipsColor(src, w, h, lms, opts = {}) {
     layers: edgeSoft > 0 ? (tangled ? edge.layers.map(untangle) : edge.layers) : null,
     outerSmooth: outer,                    // the regularised fit, for overlays
     linerInner: untangle(linerInner), linerSteps,
-    inner: untangle(inner), safe, bbox: box, conf, dprime, version: ++version,
+    inner: untangle(inner), safe, bbox: box, conf, dprime, dprimeC, version: ++version,
+    farErase,                              // {cv, box}: erase map for the far side of a turned mouth (or null)
     // Mouth opening from pixels: open (cut active), gap / mouth width (median
     // over the middle of the mouth) and the share of columns that are open.
     open: cutoutActive, openRatio, openCols,
+    _vis: visOut,                          // debug: per-point visibility (outer)
     t,                                     // lip thickness (px) — shaders scale their edge band by it
     _w: w, _h: h,                          // frame size the curves are in
     // Mouth corners: lipstick fades out toward the corner point (references:
@@ -1698,3 +1844,5 @@ export function resetLipSeg() { prevPts = null; prevBox = null; prevInner = null
 
 /** Debug: the last frame's lip-probability grids (GW×GH over seg.bbox). */
 export function getLipGrids() { return { Q, Pb, Lb, GW, GH }; }
+
+export function _setCornerFree(v) { CORNER_FREE = v; }

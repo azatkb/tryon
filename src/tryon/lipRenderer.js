@@ -724,6 +724,14 @@ function drawLipSeg(cv, seg, w, h, liner = false, lms = null) {
     tc.lineJoin = 'round'; tc.lineWidth = 2 * e; tc.strokeStyle = '#000';
     traceSmooth(tc, outerMP); tc.stroke();
     tc.filter = 'none';
+    // never past the fitted outline: where MP itself is off (the far side of
+    // a turned head) the core must not paint outside the lips
+    if (seg.outerSmooth) {
+      tc.globalCompositeOperation = 'destination-in';
+      tc.fillStyle = '#fff';
+      path(tc, seg.outerSmooth); tc.fill();
+      tc.globalCompositeOperation = 'destination-out';
+    }
     if (seg.safe && seg.inner) { path(tc, seg.inner); tc.fill(); }
     if (mouthOpenRatio(lms, w, h) > 0.03) {
       const innerMP = LIPS_INNER.map(P);
@@ -733,6 +741,14 @@ function drawLipSeg(cv, seg, w, h, liner = false, lms = null) {
     tc.globalCompositeOperation = 'source-over';
     ctx.globalCompositeOperation = 'source-over';
     ctx.drawImage(lipSegTmpCv, 0, 0);
+  }
+  if (seg.farErase) {
+    // far side of a turned mouth: erase what the colour says isn't lip (see
+    // lipColorSeg buildFarErase) — lipstick, liner and core alike
+    const { cv: ec, box } = seg.farErase;
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(ec, box[0], box[1], box[2], box[3]);
   }
   ctx.globalCompositeOperation = 'source-over';
   return cv;
@@ -2303,16 +2319,8 @@ export function renderMakeup(ctx, w, h, landmarks, opts) {
     compositeDark(ctx, w, h, eyelinerMaskCv, opts.eyeliner.color || '#0a0a0a', (opts.eyeliner.intensity ?? 0.9) * blinkGate);
   }
   if (opts.lashes) {
-    // Lashes are thin strokes — even small landmark lag is visible as floating
-    // lashes during a sharp head jerk. Fade them out when motion is high;
-    // perspective tuck inside buildLashMask is untouched.
-    const lashMotion = opts.motion ?? 0;
-    const LASH_FADE_START = 0.003;  // begin fading
-    const LASH_FADE_END   = 0.008;  // fully hidden
-    const lashFade = lashMotion <= LASH_FADE_START ? 1
-      : lashMotion >= LASH_FADE_END ? 0
-      : 1 - (lashMotion - LASH_FADE_START) / (LASH_FADE_END - LASH_FADE_START);
-    const combinedFade = lashFade * blinkGate;
+    // no hiding on fast head turns (user request) — only the blink gate
+    const combinedFade = blinkGate;
     if (combinedFade > 0.01) {
       buildLashMask(w, h, landmarks);
       compositeDark(ctx, w, h, lashMaskCv, '#000000', (opts.lashes.intensity ?? 0.8) * combinedFade);

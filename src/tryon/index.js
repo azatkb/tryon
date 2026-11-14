@@ -53,6 +53,7 @@ export { useFaceLandmarker } from './useFaceLandmarker.js';
 // UV-space face masks (MediaPipe canonical UV). PNGs in /uv-masks/<key>.png.
 export {
   UV_PRODUCTS, loadUVMasks, reloadUVMasks, uvMaskCanvas, setUVMaskImage, getUVMaskImage, setUVMasksEnabled, uvMasksEnabled, uvHas,
+  setEyeShadowProcedural, eyeShadowProcedural, setEyeShadowShape, getEyeShadowShape,
 } from './uv/uvMasks.js';
 export { bakeUVMasks, uvTemplate, canvasToPngBlob, canonicalLandmarks } from './uv/bakeUV.js';
 export { UV as FACE_UV, TRI as FACE_TRI } from './uv/faceMeshUV.js';

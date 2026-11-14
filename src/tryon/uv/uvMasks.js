@@ -102,16 +102,19 @@ attribute vec3 aPos;
 attribute vec2 aUV;
 attribute vec3 aGeo;     // facing (n·view), light response, concavity response
 attribute vec3 aNrm;     // smoothed surface normal (image space, out of the face)
+attribute vec4 aEye;     // eye coords (eye widths): s 0 outer … 1 inner corner, h above the upper lash line, brow height, height over the LOWER lash line
 varying vec2 vT;
 varying vec3 vGeo;
 varying vec3 vNrm;
-void main() { vT = aUV; vGeo = aGeo; vNrm = aNrm; gl_Position = vec4(aPos, 1.0); }`;
+varying vec4 vEye;
+void main() { vT = aUV; vGeo = aGeo; vNrm = aNrm; vEye = aEye; gl_Position = vec4(aPos, 1.0); }`;
 
 const FS = `
 precision mediump float;
 varying vec2 vT;
 varying vec3 vGeo;
 varying vec3 vNrm;
+varying vec4 vEye;
 uniform vec3 uL;                   // key light direction (toward the light)
 uniform float uAmb;                // ambient share of the estimated lighting
 uniform sampler2D uT0, uT1, uT2;   // UV-space product masks (grayscale, .r)
@@ -124,6 +127,61 @@ uniform vec2 uSize;                // target size (px)
 uniform float uGraze;              // 0..1 fade toward the silhouette
 uniform vec2 uShade;               // x: R *= concavity response, y: G *= light response
 uniform float uW;                  // motion-blur sub-frame weight (1 = single draw)
+uniform vec4 uEyeShape;            // x top (eye widths), y max share of the brow height, z wing reach, w inner reach
+uniform float uEyeLower;           // smudge under the lower lashes at the outer corner (eye widths, 0 = off)
+
+// Eyeshadow, laid out in the eye's OWN measures (per face, per frame) instead
+// of a fixed UV picture: a fixed picture fills "lash line → brow", and on a
+// face with a high brow that is a tall grey block. Here:
+//   height  ≈ uEyeShape.x eye widths over the lash line (an arc, highest over
+//           the outer half), never more than uEyeShape.y of the way to the brow
+//   width   wing past the outer corner (uEyeShape.z), runs out past the inner
+//           corner (uEyeShape.w) — soft at both ends, no vertical edge
+//   density dense lid at the lash line → crease (~0.45) → fades to nothing at
+//           the top. The level also selects the host shader's zone colour.
+float eyeShadow(vec4 E) {
+  float s = E.x, h = E.y, hb = max(E.z, 0.08), hl = E.w;
+  float wing = max(uEyeShape.z, 0.05);
+  float e = max(0.0, -s);                                   // past the outer corner (eye widths)
+  float ei = max(0.0, s - 1.0);                             // past the inner corner
+  // ── upper part: lid + crease ──
+  float arc = uEyeShape.x * (1.0 - 0.40 * smoothstep(0.35, 1.10, s));   // highest over the outer half
+  float top = min(arc, uEyeShape.y * hb);
+  top *= 1.0 - 0.2 * e / wing;
+  float lo = (0.10 + 0.22 * e) * e;                          // the wing runs OUT (barely rising), long and low
+  float band = max(top - lo, 0.0);
+  float hn = (h - lo) / max(band, 1e-3);
+  // edges in absolute measures (eye widths): crisp only along the lashes,
+  // soft everywhere else — the wing's lower edge, past the inner corner, the top
+  float softLo = 0.012 + 0.5 * e + 0.4 * ei;
+  float a = smoothstep(lo - softLo, lo + 0.004, h);
+  float fw = max(0.35 * band, 0.06 + 0.12 * smoothstep(0.0, wing, e));
+  a *= 1.0 - smoothstep(top - fw, top + 0.15 * fw, h);      // gradient to nothing over the top third
+  // side ends: long, eased fades (no visible end line)
+  float fo = smoothstep(0.1 * wing, wing, e);
+  a *= 1.0 - fo * fo * (3.0 - 2.0 * fo);
+  float fi = smoothstep(0.62, uEyeShape.w, s);
+  a *= 1.0 - fi * fi * (3.0 - 2.0 * fi);
+  // the whole lid is dense, crease tone above it, then the fade
+  float lvl = mix(1.0, 0.6, smoothstep(0.42, 0.78, hn));
+  lvl *= 1.0 - 0.25 * smoothstep(0.0, 0.8 * wing, e);
+  lvl *= 1.0 - 0.25 * smoothstep(0.55, 1.0, s);
+  float up = clamp(a, 0.0, 1.0) * lvl;
+  // ── lower part: smudge under the lower lashes, from the outer corner in ──
+  // (wraps the wing round the corner — the shadow "goes down" there)
+  // it FADES toward both ends (fading only its thickness drew a hairline)
+  float fl = (1.0 - smoothstep(0.0, 0.6, s)) * (1.0 - smoothstep(0.15 * wing, 0.9 * wing, e));
+  float tl = uEyeLower * (0.55 + 0.45 * fl);
+  float low = 0.0;
+  if (uEyeLower > 0.002 && fl > 0.001) {
+    float d = -hl;                                           // depth below the lower lash line
+    float g = smoothstep(-0.006, 0.004 + 0.2 * e, d);        // crisp at the lashes (not on the eye), softer outside
+    g *= 1.0 - smoothstep(0.2 * tl, tl, d);                  // soft downward
+    low = g * 0.7 * fl * fl * (3.0 - 2.0 * fl);
+  }
+  return max(up, low);
+}
+
 void main() {
   float cut = 0.0;
   if (uCutMode > 1.5) cut = texture2D(uCutUV, vT).r;
@@ -135,6 +193,10 @@ void main() {
   // noisy mesh flips single triangles): nothing is drawn there. E.g. the far
   // eye of a head in profile: its liner/shadow must not land on the nose.
   keep *= smoothstep(-0.08, 0.0, vGeo.x);   // only CLEARLY turned-away surface is dropped
+  if (uMode > 2.5) {
+    gl_FragColor = vec4(vec3(uW), eyeShadow(vEye) * keep * uW);
+    return;
+  }
   if (uMode > 1.5) {
     // Scene light, per pixel from the interpolated normal: R diffuse (Lambert
     // + ambient), G specular (Blinn, view = camera), B facing. Host shaders
@@ -260,6 +322,69 @@ function computeGeo(landmarks, W, H, L, out, nrm) {
   return out;
 }
 
+// ── Eye coordinates per vertex (procedural eyeshadow) ──
+// For each eye, in MediaPipe's 3D (pixel-isotropic) space: x along outer →
+// inner corner, y "up the face" (forehead − chin, made perpendicular to x),
+// both in eye widths — so the shape is the same on every face and every head
+// pose, and only the brow height (z) is the person's own.
+const EYE_DEF = [
+  { lash: [33, 246, 161, 160, 159, 158, 157, 173, 133], brow: [46, 53, 52, 65, 55], low: [33, 7, 163, 144, 145, 153, 154, 155, 133] },
+  { lash: [263, 466, 388, 387, 386, 385, 384, 398, 362], brow: [276, 283, 282, 295, 285], low: [263, 249, 390, 373, 374, 380, 381, 382, 362] },
+];
+const EYE_OF = (() => {
+  const a = UV[2 * 33], b = UV[2 * 263];
+  const m = new Uint8Array(UV_COUNT);
+  for (let i = 0; i < UV_COUNT; i++) m[i] = Math.abs(UV[2 * i] - a) <= Math.abs(UV[2 * i] - b) ? 0 : 1;
+  return m;
+})();
+let eyeShape = { top: 0.55, browShare: 0.9, wing: 0.75, inner: 1.25, lower: 0.1 };
+let eyeProcedural = true;
+/** Procedural (per-face adaptive) eyeshadow instead of the eyes.png UV mask. */
+export function setEyeShadowProcedural(v) { eyeProcedural = !!v; }
+export function eyeShadowProcedural() { return eyeProcedural; }
+/** Shape of the procedural eyeshadow (eye widths): { top, browShare, wing, inner, lower }. */
+export function setEyeShadowShape(o) { eyeShape = { ...eyeShape, ...o }; }
+export function getEyeShadowShape() { return { ...eyeShape }; }
+
+export function computeEyeCoords(landmarks, W, H, out = new Float32Array(UV_COUNT * 4)) {
+  const P = (i) => [landmarks[i].x * W, landmarks[i].y * H, (landmarks[i].z || 0) * W];
+  const top = P(10), chin = P(152);
+  const frames = EYE_DEF.map(({ lash, brow, low }) => {
+    const O = P(lash[0]), I = P(lash[lash.length - 1]);
+    let ex = [I[0] - O[0], I[1] - O[1], I[2] - O[2]];
+    const ew = Math.hypot(ex[0], ex[1], ex[2]) || 1;
+    ex = ex.map((c) => c / ew);
+    let up = [top[0] - chin[0], top[1] - chin[1], top[2] - chin[2]];
+    const d = up[0] * ex[0] + up[1] * ex[1] + up[2] * ex[2];
+    up = [up[0] - d * ex[0], up[1] - d * ex[1], up[2] - d * ex[2]];
+    const ul = Math.hypot(up[0], up[1], up[2]) || 1;
+    up = up.map((c) => c / ul);
+    const proj = (q) => {
+      const r = [q[0] - O[0], q[1] - O[1], q[2] - O[2]];
+      return [(r[0] * ex[0] + r[1] * ex[1] + r[2] * ex[2]) / ew, (r[0] * up[0] + r[1] * up[1] + r[2] * up[2]) / ew];
+    };
+    const curve = (idx) => idx.map((i) => proj(P(i))).sort((a, b) => a[0] - b[0]);
+    return { O, ex, up, ew, proj, L: curve(lash), B: curve(brow), D: curve(low) };
+  });
+  // piecewise-linear y(s); lash: flat past its ends, brow: extrapolated
+  const at = (c, x, extrap) => {
+    const n = c.length;
+    if (x <= c[0][0]) return extrap && n > 1 ? c[0][1] + (x - c[0][0]) * (c[1][1] - c[0][1]) / ((c[1][0] - c[0][0]) || 1e-6) : c[0][1];
+    for (let k = 1; k < n; k++) if (x <= c[k][0]) { const t = (x - c[k - 1][0]) / ((c[k][0] - c[k - 1][0]) || 1e-6); return c[k - 1][1] + t * (c[k][1] - c[k - 1][1]); }
+    return extrap && n > 1 ? c[n - 1][1] + (x - c[n - 1][0]) * (c[n - 1][1] - c[n - 2][1]) / ((c[n - 1][0] - c[n - 2][0]) || 1e-6) : c[n - 1][1];
+  };
+  for (let i = 0; i < UV_COUNT; i++) {
+    const f = frames[EYE_OF[i]];
+    const [s, y] = f.proj(P(i));
+    const ly = at(f.L, s, false);
+    out[4 * i] = s;
+    out[4 * i + 1] = y - ly;
+    out[4 * i + 2] = at(f.B, s, true) - ly;
+    out[4 * i + 3] = y - at(f.D, s, false);
+  }
+  return out;
+}
+
 // ── Skirt: the mesh ends at MediaPipe's face oval, which sits INSIDE the real
 // face edge (jaw, cheek silhouette on a turn, hairline). Base makeup must
 // reach the real edge, so a ring is extruded outward from the oval in screen
@@ -328,8 +453,8 @@ function createRenderer(gl) {
   gl.linkProgram(prog);
   if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error('uvMasks link: ' + gl.getProgramInfoLog(prog));
   const loc = {};
-  for (const n of ['uT0', 'uT1', 'uT2', 'uCutScr', 'uCutUV', 'uMode', 'uEn', 'uCutMode', 'uSize', 'uGraze', 'uShade', 'uW', 'uL', 'uAmb']) loc[n] = gl.getUniformLocation(prog, n);
-  const aPos = gl.getAttribLocation(prog, 'aPos'), aUV = gl.getAttribLocation(prog, 'aUV'), aGeo = gl.getAttribLocation(prog, 'aGeo'), aNrm = gl.getAttribLocation(prog, 'aNrm');
+  for (const n of ['uT0', 'uT1', 'uT2', 'uCutScr', 'uCutUV', 'uMode', 'uEn', 'uCutMode', 'uSize', 'uGraze', 'uShade', 'uW', 'uL', 'uAmb', 'uEyeShape', 'uEyeLower']) loc[n] = gl.getUniformLocation(prog, n);
+  const aPos = gl.getAttribLocation(prog, 'aPos'), aUV = gl.getAttribLocation(prog, 'aUV'), aGeo = gl.getAttribLocation(prog, 'aGeo'), aNrm = gl.getAttribLocation(prog, 'aNrm'), aEye = gl.getAttribLocation(prog, 'aEye');
   const sprog = gl.createProgram();
   gl.attachShader(sprog, sh(gl.VERTEX_SHADER, SKIRT_VS));
   gl.attachShader(sprog, sh(gl.FRAGMENT_SHADER, SKIRT_FS));
@@ -358,6 +483,7 @@ function createRenderer(gl) {
   let prevT = -1;
   const geoBuf = gl.createBuffer(), nrmBuf = gl.createBuffer();
   const geo = new Float32Array(UV_COUNT * 3), nrm = new Float32Array(UV_COUNT * 3);
+  const eyeBuf = gl.createBuffer(), eyeC = new Float32Array(UV_COUNT * 4);
   const state = { blurred: false };
   const idxBuf = gl.createBuffer();
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
@@ -467,6 +593,7 @@ function createRenderer(gl) {
     gl.bindBuffer(gl.ARRAY_BUFFER, uvBuf); gl.enableVertexAttribArray(aUV); gl.vertexAttribPointer(aUV, 2, gl.FLOAT, false, 0, 0);
     gl.bindBuffer(gl.ARRAY_BUFFER, geoBuf); gl.enableVertexAttribArray(aGeo); gl.vertexAttribPointer(aGeo, 3, gl.FLOAT, false, 0, 0);
     gl.bindBuffer(gl.ARRAY_BUFFER, nrmBuf); gl.enableVertexAttribArray(aNrm); gl.vertexAttribPointer(aNrm, 3, gl.FLOAT, false, 0, 0);
+    if (aEye >= 0) { gl.bindBuffer(gl.ARRAY_BUFFER, eyeBuf); gl.enableVertexAttribArray(aEye); gl.vertexAttribPointer(aEye, 4, gl.FLOAT, false, 0, 0); }
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
     if (blendK > 1) { gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE); } else gl.disable(gl.BLEND);
   }
@@ -486,6 +613,11 @@ function createRenderer(gl) {
     gl.bufferData(gl.ARRAY_BUFFER, geo, gl.DYNAMIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, nrmBuf);
     gl.bufferData(gl.ARRAY_BUFFER, nrm, gl.DYNAMIC_DRAW);
+    if (aEye >= 0) {
+      if (jobs.some((j) => j.mode === 'eyeProc')) computeEyeCoords(landmarks, W, H, eyeC);
+      gl.bindBuffer(gl.ARRAY_BUFFER, eyeBuf);
+      gl.bufferData(gl.ARRAY_BUFFER, eyeC, gl.DYNAMIC_DRAW);
+    }
 
     // Motion blur: the camera smears a moving face over its exposure; a mask
     // drawn at one instant stays razor sharp and floats on top. Draw the mesh
@@ -530,6 +662,13 @@ function createRenderer(gl) {
     gl.bindBuffer(gl.ARRAY_BUFFER, nrmBuf);
     gl.enableVertexAttribArray(aNrm);
     gl.vertexAttribPointer(aNrm, 3, gl.FLOAT, false, 0, 0);
+    if (aEye >= 0) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, eyeBuf);
+      gl.enableVertexAttribArray(aEye);
+      gl.vertexAttribPointer(aEye, 4, gl.FLOAT, false, 0, 0);
+    }
+    gl.uniform4f(loc.uEyeShape, eyeShape.top, eyeShape.browShare, eyeShape.wing, eyeShape.inner);
+    gl.uniform1f(loc.uEyeLower, eyeShape.lower);
     gl.uniform3f(loc.uL, L[0], L[1], L[2]);
     gl.uniform1f(loc.uAmb, Math.min(0.9, Math.max(0.2, opt.light?.ambientShare ?? 0.5)));
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
@@ -547,7 +686,7 @@ function createRenderer(gl) {
     const lipsUV = uvTexture('lipsCut');
     for (const job of jobs) {
       const srcs = job.keys.map((k) => (k ? uvTexture(k) : null));
-      if (job.mode !== 'light' && !srcs[0] && !srcs[1] && !srcs[2]) continue;
+      if (job.mode !== 'light' && job.mode !== 'eyeProc' && !srcs[0] && !srcs[1] && !srcs[2]) continue;
       const tex = target(job.name, W, H);
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
       if (job.mode === 'rgb') gl.clearColor(0, 0, 0, 1); else if (job.mode === 'light') gl.clearColor(0.6, 0, 1, 1); else gl.clearColor(0, 0, 0, 0);
@@ -560,7 +699,7 @@ function createRenderer(gl) {
       gl.uniform1i(loc.uT0, SCRATCH); gl.uniform1i(loc.uT1, SCRATCH + 1); gl.uniform1i(loc.uT2, SCRATCH + 2);
       const en = job.en || [1, 1, 1];
       gl.uniform3f(loc.uEn, srcs[0] ? en[0] : 0, srcs[1] ? en[1] : 0, srcs[2] ? en[2] : 0);
-      gl.uniform1f(loc.uMode, job.mode === 'light' ? 2 : job.mode === 'rgb' ? 1 : 0);
+      gl.uniform1f(loc.uMode, job.mode === 'eyeProc' ? 3 : job.mode === 'light' ? 2 : job.mode === 'rgb' ? 1 : 0);
       // Units 4/5 may still hold one of OUR targets from the host's last frame
       // (sampling the texture being rendered = feedback loop) — park a dummy.
       gl.activeTexture(gl.TEXTURE0 + SCRATCH + 3); gl.bindTexture(gl.TEXTURE_2D, dummy);
@@ -617,7 +756,7 @@ function createRenderer(gl) {
       tex: [], attr: [],
     };
     for (const u of UNITS) { gl.activeTexture(gl.TEXTURE0 + u); st.tex.push(gl.getParameter(gl.TEXTURE_BINDING_2D)); }
-    for (const a of [aPos, aUV, aGeo, aNrm, sPos, sUV, sS]) {
+    for (const a of [aPos, aUV, aGeo, aNrm, aEye, sPos, sUV, sS]) {
       if (a < 0) { st.attr.push(null); continue; }
       st.attr.push({
         a, on: gl.getVertexAttrib(a, gl.VERTEX_ATTRIB_ARRAY_ENABLED),
@@ -672,7 +811,8 @@ export function uvJobs(o) {
   const A = (name, on, key, cut, graze) => { if (on && images[key]) jobs.push({ name, mode: 'alpha', keys: [key], cut, graze, skirt: key === 'foundation' }); };
   A('fnd', o.foundation, 'foundation', true, 0);   // base covers the whole face, up to its real edge
   A('blush', o.blush, 'blush', true, 0.8);
-  A('eye', o.eyes, 'eyes', false, 0.5);
+  if (o.eyes && eyeProcedural) jobs.push({ name: 'eye', mode: 'eyeProc', keys: [], cut: false, graze: 0.5 });
+  else A('eye', o.eyes, 'eyes', false, 0.5);
   A('eyeliner', o.eyeliner, 'eyeliner', false, 0.2);
   A('brows', o.brows, 'brows', false, 0.2);
   const P = (name, flags, keys, graze, shade) => {
@@ -693,7 +833,7 @@ export function uvJobs(o) {
 
 /** Signature of a job list + loaded images — re-render when it changes. */
 export function uvJobsSig(jobs) {
-  return jobs.map((j) => j.name + (j.en ? j.en.join('') : '')).join(',') + '|' + imgVersion;
+  return jobs.map((j) => j.name + (j.en ? j.en.join('') : '') + (j.mode === 'eyeProc' ? 'P' : '')).join(',') + '|' + imgVersion;
 }
 
 /** Mask render size for a w×h frame (masks are soft; ≤1280 px is plenty). */

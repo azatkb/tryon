@@ -506,12 +506,8 @@ export function renderLashes3D(gl, w, h, landmarks, opts = {}) {
   const intensity = opts.intensity ?? 0.8;
   if (intensity < 0.01) return false;
 
-  // Motion fade — with per-frame rebuild, lashes track well during moderate
-  // movement. Only fade on very fast motion where even synced geometry looks off.
-  const motion = opts.motion ?? 0;
-  const motionFade = motion <= 0.005 ? 1 : motion >= 0.012 ? 0
-    : 1 - (motion - 0.005) / (0.012 - 0.005);
-  if (motionFade < 0.01) return false;
+  // No motion fade: lashes stay on during fast head turns (rebuilt per frame).
+  const motionFade = 1;
 
   // Per-eye blink: compute directly from landmarks, no EMA smoothing.
   // This gives instant response — lashes fold the same frame the eye closes.

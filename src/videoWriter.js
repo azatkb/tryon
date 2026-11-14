@@ -57,10 +57,33 @@ export async function createMp4Writer({ width, height, fps = 30, mirror = false,
     firstTimestampBehavior: 'offset',
   });
 
-  let failure = null;
+  // Every chunk is handed to the muxer with an explicit duration. Some encoders
+  // (hardware H.264 on Windows) give chunks without one; mp4-muxer then throws
+  // inside this callback — silently, the encoder keeps going — the first
+  // chunk's codec config never reaches the muxer, and finalize() crashed with
+  // "Cannot read properties of null (reading 'colorSpace')".
+  const frameDur = Math.max(1, Math.round(1e6 / fps));
+  let failure = null, chunks = 0, gotConfig = false;
   const encoder = new VideoEncoder({
-    output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
-    error: (e) => { failure = e; },
+    output: (chunk, meta) => {
+      try {
+        const data = new Uint8Array(chunk.byteLength);
+        chunk.copyTo(data);
+        const dur = Number.isFinite(chunk.duration) && chunk.duration > 0 ? chunk.duration : frameDur;
+        let m = meta && typeof meta === 'object' ? meta : undefined;
+        const dc = m?.decoderConfig;
+        if (dc && dc.colorSpace && (dc.colorSpace.primaries == null || dc.colorSpace.transfer == null || dc.colorSpace.matrix == null)) {
+          // partial colour info → the 'colr' box would be written with garbage
+          m = { ...m, decoderConfig: { ...dc, colorSpace: { primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', fullRange: false, ...Object.fromEntries(Object.entries(dc.colorSpace).filter(([, v]) => v != null)) } } };
+        } else if (dc && !dc.colorSpace && chosen.mux === 'vp9') {
+          m = { ...m, decoderConfig: { ...dc, colorSpace: { primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', fullRange: false } } };
+        }
+        muxer.addVideoChunkRaw(data, chunk.type, chunk.timestamp, dur, m);
+        if (m?.decoderConfig) gotConfig = true;
+        chunks++;
+      } catch (e) { if (!failure) failure = e; }
+    },
+    error: (e) => { if (!failure) failure = e; },
   });
   encoder.configure(chosen.cfg);
 
@@ -79,7 +102,7 @@ export async function createMp4Writer({ width, height, fps = 30, mirror = false,
     // Timestamps must strictly increase.
     const ts = Math.max(Math.round(timestampUs), lastTs + 1);
     lastTs = ts;
-    const frame = new VideoFrame(stage, { timestamp: ts });
+    const frame = new VideoFrame(stage, { timestamp: ts, duration: frameDur });
     encoder.encode(frame, { keyFrame: count % keyEvery === 0 });
     frame.close();
     count++;
@@ -95,16 +118,20 @@ export async function createMp4Writer({ width, height, fps = 30, mirror = false,
       }
       encode(src, timestampUs);
     },
-    /** Real-time: returns false (frame skipped) only if the encoder is far behind. */
+    /** Real-time: returns false (frame skipped) if the encoder is far behind or
+     *  has failed — never throws (it's called from the render loop); finish()
+     *  reports the failure. */
     addFrameNow(src, timestampUs) {
-      if (encoder.encodeQueueSize > 12) return false;
-      encode(src, timestampUs);
+      if (failure || encoder.state !== 'configured' || encoder.encodeQueueSize > 12) return false;
+      try { encode(src, timestampUs); } catch (e) { if (!failure) failure = e; return false; }
       return true;
     },
     async finish() {
-      await encoder.flush();
-      if (failure) throw failure;
-      encoder.close();
+      try { await encoder.flush(); } catch (e) { if (!failure) failure = e; }
+      try { encoder.close(); } catch (_) { /* already closed */ }
+      if (failure) throw new Error(`Video encoder (${chosen.codec}) failed: ${failure.message || failure}`);
+      if (!chunks) throw new Error(`Video encoder (${chosen.codec}) produced no frames`);
+      if (!gotConfig) throw new Error(`Video encoder (${chosen.codec}) gave no codec config — can't write the MP4`);
       muxer.finalize();
       return new Blob([muxer.target.buffer], { type: 'video/mp4' });
     },

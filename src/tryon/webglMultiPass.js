@@ -803,9 +803,8 @@ export function renderMakeupMultiPass(source, w, h, landmarks, opts) {
     upload(5, texPool.eye, eyes && !uvOn.has('eye') ? buildEyeMask(w, h, landmarks) : blank());
     upload(6, texPool.eyeliner, eyeliner && !uvOn.has('eyeliner') ? buildEyelinerMask(w, h, landmarks) : blank());
     upload(7, texPool.brows, brows && !uvOn.has('brows') ? buildBrowMask(w, h, landmarks) : blank());
-    const lashMot = opts.motion ?? 0;
     const use3dLash = lashes && lash3dAvailable();
-    upload(8, texPool.lash, (lashes && !use3dLash && lashMot < 0.008) ? buildLashMask(w, h, landmarks) : blank());
+    upload(8, texPool.lash, (lashes && !use3dLash) ? buildLashMask(w, h, landmarks) : blank());
     upload(9, texPool.lipLiner, lipLiner ? buildLipLinerMask(w, h, landmarks, { refinedOuter, lipSeg }) : blank());
     // Lip mask (3D mesh or 2D)
     // Colour segmentation wins over the 3D mesh — liner and lipstick must
@@ -856,9 +855,7 @@ export function renderMakeupMultiPass(source, w, h, landmarks, opts) {
   lastUVSig = uvSig;
 
   const blinkGate = Math.min(opts.blinkL ?? 1, opts.blinkR ?? 1);
-  const lashMotion = opts.motion ?? 0;
-  const lashFade = lashMotion <= 0.003 ? 1 : lashMotion >= 0.008 ? 0
-    : 1 - (lashMotion - 0.003) / (0.008 - 0.003);
+  const lashFade = 1;   // no hiding on fast head turns (user request)
   const use3dLash = lashes && lash3dAvailable();
 
   // ════════════════════════════════════════════════════════════════════════

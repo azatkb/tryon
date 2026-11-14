@@ -6,6 +6,7 @@ import {
   buildContourMask, buildHighlightMask, buildUnderEyeMask, buildLipMask,
   buildLipLinerMask, buildEyelinerMask, buildBrowMask, getLastLipSeg, resetLipSeg, setLipRoughness, setLipSymmetry, setLipSoftness, setLipOpenDetect, getLipModel, setLipCore,
   UV_PRODUCTS, loadUVMasks, reloadUVMasks, uvMaskCanvas, setUVMaskImage, getUVMaskImage, setUVMasksEnabled, bakeUVMasks, uvTemplate, canvasToPngBlob,
+  setEyeShadowProcedural, setEyeShadowShape, getEyeShadowShape,
 } from './tryon/index.js';
 import { createMp4Writer, downloadBlob, mp4WriterSupported } from './videoWriter.js';
 import { refineLipContour, drawRefinedContour } from './tryon/lipContourRefine.js';
@@ -133,7 +134,7 @@ export default function DebugApp() {
   const [borders, setBorders] = useState(false);
   const [showPoints, setShowPoints] = useState(false);
   const [showLight, setShowLight] = useState(true);
-  const [motionFade, setMotionFade] = useState(true);
+  const [motionFade, setMotionFade] = useState(false);
   const [fadeSens, setFadeSens] = useState(1);
   const fadeInfoRef = useRef(null);
   const [protect, setProtect] = useState(true);
@@ -198,6 +199,11 @@ export default function DebugApp() {
   const [uvLoaded, setUvLoaded] = useState(0);
   const uvCount = () => setUvLoaded(UV_PRODUCTS.filter((k) => getUVMaskImage(k)).length);
   useEffect(() => { setUVMasksEnabled(uvOn); }, [uvOn]);
+  // Eyeshadow: adaptive (laid out per face in eye widths) vs the eyes.png UV mask
+  const [eyeAdaptive, setEyeAdaptive] = useState(true);
+  const [eyeShape, setEyeShape] = useState(() => getEyeShadowShape());
+  useEffect(() => { setEyeShadowProcedural(eyeAdaptive); }, [eyeAdaptive]);
+  useEffect(() => { setEyeShadowShape(eyeShape); }, [eyeShape]);
   useEffect(() => { loadUVMasks().then(uvCount); }, []);
   const uvBake = async (download) => {
     const maps = bakeUVMasks({ size: 512 });
@@ -413,7 +419,7 @@ export default function DebugApp() {
     if (photoMode && imgRef.current && ready) {
       redrawStill(imgRef.current);
     }
-  }, [photoMode, layers, ready, redrawStill, colorSeg, lipRough, lipSym, lipSoft]);
+  }, [photoMode, layers, ready, redrawStill, colorSeg, lipRough, lipSym, lipSoft, eyeAdaptive, eyeShape]);
 
   // Back to camera
   const exitPhoto = useCallback(() => {
@@ -780,6 +786,15 @@ export default function DebugApp() {
             Cinema <input type="range" min="0" max="1" step="0.01" value={cinema} onChange={(e) => setCinema(+e.target.value)} style={{width:90,verticalAlign:'middle'}} /> {cinema.toFixed(2)}
           </label>
           <label className="dbg-row"><input type="checkbox" checked={uvOn} onChange={(e) => setUvOn(e.target.checked)} /> UV masks ({uvLoaded}/{UV_PRODUCTS.length})</label>
+          <label className="dbg-row" style={{ paddingLeft: 18 }} title="Eyeshadow shaped per face in eye widths (doesn't stretch up to a high brow). Off = eyes.png UV mask.">
+            <input type="checkbox" checked={eyeAdaptive} onChange={(e) => setEyeAdaptive(e.target.checked)} /> Eyeshadow adaptive
+          </label>
+          {eyeAdaptive && [['top', 'Height', 0.25, 0.8], ['browShare', 'Max to brow', 0.4, 1], ['wing', 'Wing', 0.2, 1.2], ['inner', 'Inner', 0.95, 1.5], ['lower', 'Under lashes', 0, 0.2]].map(([k, label, lo, hi]) => (
+            <label key={k} className="dbg-row" style={{ paddingLeft: 36, fontSize: '.72rem' }}>
+              {label} <input type="range" min={lo} max={hi} step="0.01" value={eyeShape[k]}
+                onChange={(e) => setEyeShape((s) => ({ ...s, [k]: +e.target.value }))} style={{ width: 90, verticalAlign: 'middle' }} /> {eyeShape[k].toFixed(2)}
+            </label>
+          ))}
           <div className="dbg-row" style={{ gap: 6, flexWrap: 'wrap', paddingLeft: 18 }}>
             <button style={{ fontSize: '.68rem', padding: '0 6px' }} onClick={() => reloadUVMasks().then(uvCount)} title="Re-read public/uv-masks/*.png (after replacing files)">Reload</button>
             <button style={{ fontSize: '.68rem', padding: '0 6px' }} onClick={() => uvBake(false)} title="Bake today's procedural masks into UV and use them">Bake</button>

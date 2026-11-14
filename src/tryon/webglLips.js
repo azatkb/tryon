@@ -923,11 +923,10 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
     upload(2, tex.blush, blush && !uvOn.has('blush') ? buildBlushMask(w, h, landmarks) : blank());
     upload(3, tex.hair, (hair && hair.mask) ? hair.mask : blank());
     upload(4, tex.eye, eyes && !uvOn.has('eye') ? buildEyeMask(w, h, landmarks) : blank());
-    const lashMot = opts.motion ?? 0;
     const use3dLash = lashes && lash3dAvailable();
     // When 3D lash renderer is available, skip the texture-based mask —
     // lashes are rendered as instanced geometry after the main composite pass.
-    upload(5, tex.lash, (lashes && !use3dLash && lashMot < 0.008) ? buildLashMask(w, h, landmarks) : blank());
+    upload(5, tex.lash, (lashes && !use3dLash) ? buildLashMask(w, h, landmarks) : blank());
     // 3D lip mesh: render directly into a GL texture via FBO — z-depth gives
     // correct foreshortening on head turns.  Falls back to 2D canvas mask.
     // When refinedOuter is available, skip 3D mesh — it doesn't support the
@@ -1044,9 +1043,7 @@ export function renderMakeupGL(source, w, h, landmarks, opts) {
   const blinkGate = Math.min(opts.blinkL ?? 1, opts.blinkR ?? 1);
   gl.uniform1f(loc.uEyeInt, eyes ? (eyes.intensity ?? 0.5) * blinkGate : 0);
   // Fade out lashes during fast head movement — thin strokes lag visibly
-  const lashMotion = opts.motion ?? 0;
-  const lashFade = lashMotion <= 0.003 ? 1 : lashMotion >= 0.008 ? 0
-    : 1 - (lashMotion - 0.003) / (0.008 - 0.003);
+  const lashFade = 1;   // no hiding on fast head turns (user request)
   // When 3D lash renderer is active, set texture lash intensity to 0 —
   // lashes are drawn as instanced geometry after the composite pass.
   const use3dLash = lashes && lash3dAvailable();

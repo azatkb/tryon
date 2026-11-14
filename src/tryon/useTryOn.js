@@ -52,7 +52,7 @@ export function useTryOn(options = {}) {
     syncToDetection = true,   // show the frame detection actually ran on (no mask drift)
     contourRefine = true,     // enable/disable lip contour refinement (luminance, legacy)
     lipColorSeg = true,       // per-pixel colour segmentation of the lips (overrides contourRefine)
-    motionFade = true,        // hide makeup during jumps / whip turns (true | false | { lo, hi, recover })
+    motionFade = false,       // hide makeup during jumps / whip turns (false = never; true | { lo, hi, recover } to enable)
     active = true,
     onFrame,
     onError,

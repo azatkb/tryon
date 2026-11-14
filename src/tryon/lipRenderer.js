@@ -684,7 +684,16 @@ function drawLipSeg(cv, seg, w, h, liner = false, lms = null) {
     }
     ctx.globalCompositeOperation = 'source-over';
   }
-  if (seg.safe) {
+  const om = seg.openMask;
+  const cutOpen = (c) => {   // mouth opening from pixels (teeth / cavity), soft-edged
+    c.globalCompositeOperation = 'destination-out';
+    c.imageSmoothingEnabled = true;
+    c.drawImage(om.cv, om.box[0], om.box[1], om.box[2], om.box[3]);
+  };
+  if (om) {
+    cutOpen(ctx);
+    ctx.globalCompositeOperation = 'source-over';
+  } else if (seg.safe) {
     // Mouth open: cut (inner opening ∩ safety clamp), same rule as buildLipMask.
     const tc = lipSegTmpCv.getContext('2d');
     tc.setTransform(1, 0, 0, 1, 0, 0);
@@ -732,11 +741,15 @@ function drawLipSeg(cv, seg, w, h, liner = false, lms = null) {
       path(tc, seg.outerSmooth); tc.fill();
       tc.globalCompositeOperation = 'destination-out';
     }
-    if (seg.safe && seg.inner) { path(tc, seg.inner); tc.fill(); }
-    if (mouthOpenRatio(lms, w, h) > 0.03) {
-      const innerMP = LIPS_INNER.map(P);
-      traceSmooth(tc, innerMP); tc.fill();
-      tc.lineWidth = e; traceSmooth(tc, innerMP); tc.stroke();
+    if (om) {
+      cutOpen(tc);   // same pixel opening as the lipstick
+    } else {
+      if (seg.safe && seg.inner) { path(tc, seg.inner); tc.fill(); }
+      if (mouthOpenRatio(lms, w, h) > 0.03) {
+        const innerMP = LIPS_INNER.map(P);
+        traceSmooth(tc, innerMP); tc.fill();
+        tc.lineWidth = e; traceSmooth(tc, innerMP); tc.stroke();
+      }
     }
     tc.globalCompositeOperation = 'source-over';
     ctx.globalCompositeOperation = 'source-over';

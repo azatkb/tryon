@@ -4,7 +4,7 @@ import {
   drawLandmarks, setFeatureProtect, setRegionEdge,
   buildFaceMask, buildBlushMask, buildEyeMask, buildLashMask,
   buildContourMask, buildHighlightMask, buildUnderEyeMask, buildLipMask,
-  buildLipLinerMask, buildEyelinerMask, buildBrowMask, getLastLipSeg, resetLipSeg, setLipRoughness, setLipSymmetry, setLipSoftness, setLipOpenDetect, getLipModel, setLipCore,
+  buildLipLinerMask, buildEyelinerMask, buildBrowMask, getLastLipSeg, resetLipSeg, setLipRoughness, setLipSymmetry, setLipSoftness, setLipOpenDetect, getLipModel, setLipCore, setLipPixelCut,
   UV_PRODUCTS, loadUVMasks, reloadUVMasks, uvMaskCanvas, setUVMaskImage, getUVMaskImage, setUVMasksEnabled, bakeUVMasks, uvTemplate, canvasToPngBlob,
   setEyeShadowProcedural, setEyeShadowShape, getEyeShadowShape,
 } from './tryon/index.js';
@@ -130,6 +130,7 @@ export default function DebugApp() {
   const origCanvasRef = useRef(null);  // original photo for side-by-side
   const imgRef = useRef(null);
   const videoElRef = useRef(null);     // <video> for video file playback
+  const intentPauseRef = useRef(false); // true while WE paused it (vs. the browser)
   const [useGL, setUseGL] = useState(glAvailable());
   const [borders, setBorders] = useState(false);
   const [showPoints, setShowPoints] = useState(false);
@@ -190,6 +191,8 @@ export default function DebugApp() {
   const [openDet, setOpenDet] = useState('mp');
   const openDetRef = useRef('mp'); openDetRef.current = openDet;
   const [lipCore, setLipCoreS] = useState(true);
+  const [pixCut, setPixCut] = useState(true);
+  useEffect(() => { setLipPixelCut(pixCut); }, [pixCut]);
   useEffect(() => { setLipCore(lipCore); }, [lipCore]);
   useEffect(() => { setLipOpenDetect(openDet); }, [openDet]);
 
@@ -389,7 +392,7 @@ export default function DebugApp() {
     const file = e.target.files?.[0];
     if (!file) return;
     // Exit video mode if active
-    if (videoElRef.current) { videoElRef.current.pause(); }
+    if (videoElRef.current) { intentPauseRef.current = true; videoElRef.current.pause(); }
     setVideoMode(false);
     setVideoUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return null; });
     const url = URL.createObjectURL(file);
@@ -419,7 +422,7 @@ export default function DebugApp() {
     if (photoMode && imgRef.current && ready) {
       redrawStill(imgRef.current);
     }
-  }, [photoMode, layers, ready, redrawStill, colorSeg, lipRough, lipSym, lipSoft, eyeAdaptive, eyeShape]);
+  }, [photoMode, layers, ready, redrawStill, colorSeg, lipRough, lipSym, lipSoft, eyeAdaptive, eyeShape, pixCut]);
 
   // Back to camera
   const exitPhoto = useCallback(() => {
@@ -441,8 +444,31 @@ export default function DebugApp() {
   // When video element is ready, start playback
   const handleVideoLoaded = useCallback(() => {
     const v = videoElRef.current;
-    if (v) { v.play().catch(() => {}); setVideoPaused(false); }
+    if (v) { intentPauseRef.current = false; v.play().catch(() => {}); setVideoPaused(false); detectVideoColor(v); }
   }, []);
+  // The browser paused it (Safari power saving), not the user: play on.
+  const handleVideoPausedByBrowser = useCallback(() => {
+    const v = videoElRef.current;
+    if (!v || v.ended || !videoModeRef.current || intentPauseRef.current) return;
+    setTimeout(() => { if (!intentPauseRef.current && v.paused) v.play().catch(() => {}); }, 0);
+  }, []);
+  // What the browser decodes: an HDR video (iPhone: HLG / Dolby Vision) is
+  // drawn into a canvas WITHOUT tone mapping by some Safari versions — the
+  // whole frame comes out blown out. Shown in the panel.
+  const [videoColor, setVideoColor] = useState('');
+  const detectVideoColor = (v) => {
+    let info = `${v.videoWidth}×${v.videoHeight}`;
+    try {
+      if (typeof VideoFrame !== 'undefined') {
+        const vf = new VideoFrame(v);
+        const cs = vf.colorSpace || {};
+        info += ` · ${cs.transfer || '?'} / ${cs.primaries || '?'}${cs.fullRange ? ' full' : ''}`;
+        if (cs.transfer === 'hlg' || cs.transfer === 'pq') info += ' · HDR!';
+        vf.close();
+      }
+    } catch (_) { /* not readable yet / unsupported */ }
+    setVideoColor(info);
+  };
 
   const toggleVideoPause = useCallback(() => {
     const v = videoElRef.current;
@@ -450,16 +476,18 @@ export default function DebugApp() {
     if (v.paused) {
       // Resume: shift the recording clock so the pause leaves no frozen gap.
       if (pauseStartRef.current) { liveT0Ref.current += performance.now() - pauseStartRef.current; pauseStartRef.current = 0; }
+      intentPauseRef.current = false;
       v.play().catch(() => {}); setVideoPaused(false);
     } else {
       pauseStartRef.current = performance.now();
+      intentPauseRef.current = true;
       v.pause(); setVideoPaused(true);
     }
   }, []);
 
   const exitVideo = useCallback(() => {
     const v = videoElRef.current;
-    if (v) { v.pause(); v.removeAttribute('src'); v.load(); }
+    if (v) { intentPauseRef.current = true; v.pause(); v.removeAttribute('src'); v.load(); }
     setVideoMode(false);
     setVideoUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return null; });
     setVideoPaused(false);
@@ -558,10 +586,14 @@ export default function DebugApp() {
       {photoUrl && <img ref={imgRef} src={photoUrl} onLoad={handleImgLoad}
         style={{ position: 'absolute', width: 0, height: 0, opacity: 0, pointerEvents: 'none' }}
         crossOrigin="anonymous" />}
-      {/* Hidden video for video mode — sourceEl for useTryOn video loop */}
+      {/* Video for video mode — sourceEl for useTryOn video loop.
+          NOT 0×0 / off-screen: Safari pauses a muted video it considers
+          invisible and keeps handing drawImage the first frame. 2×2 px in
+          the corner at 1 % opacity is "visible" to it and to nobody else. */}
       <video ref={videoElRef} src={videoUrl || undefined} onLoadedData={handleVideoLoaded}
-        playsInline muted loop
-        style={{ position: 'absolute', width: 0, height: 0, opacity: 0, pointerEvents: 'none' }} />
+        onPause={handleVideoPausedByBrowser}
+        playsInline muted loop preload="auto"
+        style={{ position: 'fixed', left: 0, top: 0, width: 2, height: 2, opacity: 0.01, pointerEvents: 'none', zIndex: 0 }} />
 
       <div className="dbg-stage">
         {photoMode && photoUrl ? (
@@ -710,6 +742,10 @@ export default function DebugApp() {
                 {videoPaused ? '▶ Play' : '⏸ Pause'}
               </button>
             )}
+            {videoMode && videoUrl && videoColor && (
+              <span title="Decoded video: size · transfer / primaries. HDR (hlg / pq) is drawn blown-out by some Safari versions."
+                style={{ fontSize: '.68rem', color: /HDR/.test(videoColor) ? '#ff9800' : '#888' }}>{videoColor}</span>
+            )}
             {photoMode && photoUrl && (
               <button onClick={downloadCombined} style={{ fontSize: '.72rem', padding: '3px 10px', borderRadius: 12,
                 border: '1px solid #4caf50', background: '#4caf50', color: '#fff', cursor: 'pointer', fontWeight: 600 }}>
@@ -772,6 +808,7 @@ export default function DebugApp() {
             </label>
           )}
           <label className="dbg-row" style={{ paddingLeft: 18 }}><input type="checkbox" checked={lipCore} onChange={(e) => setLipCoreS(e.target.checked)} /> Lip core (MP mesh, always painted)</label>
+          <label className="dbg-row" style={{ paddingLeft: 18 }} title="Open mouth: cut teeth / mouth cavity by pixels (off = inner contour polygon)"><input type="checkbox" checked={pixCut} onChange={(e) => setPixCut(e.target.checked)} /> Mouth cut by pixels (teeth / cavity)</label>
           <label className="dbg-row" style={{ paddingLeft: 18 }}>
             Inner lip <select value={openDet} onChange={(e) => setOpenDet(e.target.value)} style={{ fontSize: '.68rem' }}>
               <option value="mp">MediaPipe</option>

@@ -30,7 +30,7 @@ const SUB = 5;                       // samples per MP segment
 const K = LIPS_OUTER.length * SUB;   // dense contour points (100)
 const CORNER_L = 0, CORNER_R = 10 * SUB; // dense indices of landmarks 61 / 291
 
-let cropCv, priorCv, farCv;
+let cropCv, priorCv, farCv, openCv;
 let prevPts = null, prevBox = null, prevInner = null;
 let cutoutActive = false;
 let version = 0;
@@ -185,6 +185,15 @@ const P = new Float32Array(N), Pb = new Float32Array(N), Q = new Float32Array(N)
 const lipSel = new Uint8Array(N), skinSel = new Uint8Array(N);
 const idxBuf = new Int32Array(N);
 const farA = new Float32Array(N), farB = new Float32Array(N);
+const dInM = new Float32Array(N), openO = new Float32Array(N), openPrev = new Float32Array(N), openQ = new Int32Array(N);
+const openNon = new Uint8Array(N);
+let openPrevOK = false, openPrevBox = null;
+const openPrevC = [0, 0];
+const openTmp = new Float32Array(N);
+let PIXEL_CUT = true;
+/** Mouth opening cut from pixels (teeth / mouth cavity) instead of the inner contour polygon. */
+export function setLipPixelCut(v) { PIXEL_CUT = !!v; openPrevOK = false; }
+export function getLipPixelCut() { return PIXEL_CUT; }
 const rawOff = new Float32Array(K), wOff = new Float32Array(K), medOff = new Float32Array(K), smOff = new Float32Array(K);
 
 // sRGB -> linear LUT
@@ -218,6 +227,7 @@ function ensure() {
   cropCv = canvas(GW, GH);
   priorCv = canvas(GW, GH);
   farCv = canvas(GW, GH);
+  openCv = canvas(GW, GH);
 }
 
 /** Same Bezier construction as lipRenderer's traceSmooth, sampled densely. */
@@ -346,6 +356,178 @@ function buildFarErase(outerD, visOut, t, xf, box, gate) {
   if (!any) return null;
   c.putImageData(im, 0, 0);
   return { cv: farCv, box: [bx, by, GW / sx, GH / sy] };
+}
+
+/**
+ * Mouth opening as a per-pixel mask (open mouth only). The inner lip edge as a
+ * CONTOUR is fragile: a dark wet inner lip, a shadow under the upper lip or a
+ * gloss highlight pulls single points, and the cut either eats real lip (a
+ * strip of bare lip between lipstick and teeth) or jumps frame to frame.
+ * Here the opening is what is visibly NOT lip next to MediaPipe's opening:
+ *   teeth  — brighter than the lip and nearly colourless
+ *   cavity — much darker than the lip
+ * grown from MP's opening (flood fill, so a highlight ON the lip that isn't
+ * connected to the mouth is never cut), limited to a band around MP's inner
+ * contour and kept off the outer lip edge. Lip-coloured pixels just inside
+ * MP's opening (the inner lip MP missed) stay lip; deeper inside MP's opening
+ * everything is cut (tongue / gums never get lipstick).
+ * Returns {cv, box} (alpha = opening) or null (polygon cut is used then).
+ */
+function buildOpenMask(t, box, xf, Lp, fresh, moving) {
+  const ux = 1 / xf[0], uy = 1 / xf[1];
+  let innA = 0;
+  for (let i = 0; i < N; i++) { seed[i] = INN[i] < 0.5 ? 1 : 0; if (INN[i] >= 0.5) innA++; }
+  if (innA < 6) { openPrevOK = false; return null; }
+  chamfer(dInM, ux, uy);                                   // depth inside MP's opening
+  const lipL = Lp.mu[0], sdL = Math.sqrt(Math.max(1, Lp.cov[0])), lipC = Math.hypot(Lp.mu[1], Lp.mu[2]);
+  // What the inside of THIS mouth looks like: darkest / brightest tenth of
+  // MP's opening. Class thresholds sit halfway between that and the lip, so a
+  // soft (anti-aliased, blurred) edge splits where the colour does.
+  const Ls = [];
+  for (let i = 0; i < N; i++) if (INN[i] >= 0.5) Ls.push(Lc[i]);
+  Ls.sort((a, b) => a - b);
+  const cavL = Ls[Math.floor(0.05 * (Ls.length - 1))], toothL = Ls[Math.floor(0.97 * (Ls.length - 1))];
+  // the cavity is MUCH darker than any lip — a shadowed / wet inner lip is
+  // only somewhat darker and must stay lip (that strip is what showed bare).
+  // Without a clearly dark / bright inside, fixed fallbacks (never "off").
+  const darkL = cavL < lipL - 15 ? Math.min(lipL - Math.max(10, 1.5 * sdL), 0.5 * (lipL + cavL)) : Math.min(lipL - Math.max(18, 2.5 * sdL), 0.55 * lipL);
+  const teethL = toothL > lipL + 8 ? Math.max(lipL + Math.max(5, 0.8 * sdL), 0.5 * (lipL + toothL)) : lipL + Math.max(15, 2 * sdL);
+  const lipMaxL = lipL + Math.max(20, 3 * sdL);              // much brighter than the lip is never "lip" here (a lighter lower lip still is)
+  const lipCr = Math.hypot(Lp.mu[1], Lp.mu[2]) / (lipL + 16); // lip chroma, shading-invariant (≈ CA/CB of the lip)
+  const keepIn = 0.45 * t, bandOut = 0.3 * t, rimIn = 0.12 * t;
+  for (let i = 0; i < N; i++) {
+    const L = Lc[i];
+    const teeth = L > teethL && Math.hypot(Ac[i], Bc[i]) < 0.75 * lipC && Pb[i] < 0.6;
+    const cavity = L < darkL;
+    // teeth may extend a little past MP's opening, cavity a bit more (a gloss
+    // highlight in the middle of the lower lip looks like a tooth)
+    openNon[i] = (cavity && dMouth[i] <= bandOut) || (teeth && dMouth[i] <= 0.6 * bandOut) ? 1 : 0;
+    openO[i] = 0;
+  }
+  // 1) LIP grows into MP's opening from the lip body, through lip-coloured
+  //    pixels, at most keepIn deep: the inner lip MP missed stays lip.
+  let qh = 0, qt = 0;
+  for (let i = 0; i < N; i++) {
+    if (INN[i] < 0.5 && OUT[i] >= 0.5 && dMouth[i] <= bandOut && !openNon[i] && Pb[i] >= 0.35 && Lc[i] <= lipMaxL) { openO[i] = 2; openQ[qt++] = i; }
+  }
+  while (qh < qt) {
+    const i = openQ[qh++], x = i % GW;
+    for (const j of [x > 0 ? i - 1 : -1, x < GW - 1 ? i + 1 : -1, i - GW, i + GW]) {
+      // inside MP's opening only clearly lip-coloured pixels (the grey blend
+      // between teeth and cavity must not become a "lip" line splitting them)
+      if (j < 0 || j >= N || openO[j] || INN[j] < 0.5 || openNon[j] || Pb[j] < 0.4 || Lc[j] > lipMaxL || dInM[j] > keepIn
+        || Math.hypot(CA[j], CB[j]) < 0.6 * lipCr) continue;
+      openO[j] = 2; openQ[qt++] = j;
+    }
+  }
+  // 2) the rest of MP's opening is mouth (tongue / gums deeper in never get
+  //    lipstick); it grows OUT over teeth / cavity pixels MP put under the lip
+  qh = 0; qt = 0;
+  for (let i = 0; i < N; i++) if (INN[i] >= 0.5 && openO[i] !== 2) { openO[i] = 1; openQ[qt++] = i; }
+  while (qh < qt) {
+    const i = openQ[qh++], x = i % GW;
+    for (const j of [x > 0 ? i - 1 : -1, x < GW - 1 ? i + 1 : -1, i - GW, i + GW]) {
+      if (j < 0 || j >= N || openO[j] === 1 || !openNon[j] || dIn[j] < rimIn) continue;
+      openO[j] = 1; openQ[qt++] = j;
+    }
+  }
+  // 3) keep the mouth itself: erode one cell (breaks hair-thin bridges), keep
+  //    only components big next to the largest, grow back one cell inside
+  //    the original. A gloss highlight on the lip joined to the mouth by a
+  //    thin line would otherwise be cut out as a hole.
+  for (let i = 0; i < N; i++) openO[i] = openO[i] === 1 ? 1 : 0;
+  for (let i = 0; i < N; i++) {
+    const x = i % GW;
+    openNon[i] = openO[i] && x > 0 && x < GW - 1 && i >= GW && i < N - GW && openO[i - 1] && openO[i + 1] && openO[i - GW] && openO[i + GW] ? 1 : 0;   // eroded (openNon reused)
+    dInM[i] = 0;                                           // dInM reused as labels
+  }
+  let lab = 0, best = 0;
+  const sizes = [0], inMP = [0];
+  for (let i0 = 0; i0 < N; i0++) {
+    if (!openNon[i0] || dInM[i0]) continue;
+    lab++; qh = 0; qt = 0; openQ[qt++] = i0; dInM[i0] = lab;
+    let inn = 0;
+    while (qh < qt) {
+      const i = openQ[qh++], x = i % GW;
+      if (INN[i] >= 0.5) inn++;
+      for (const j of [x > 0 ? i - 1 : -1, x < GW - 1 ? i + 1 : -1, i - GW, i + GW]) {
+        if (j < 0 || j >= N || !openNon[j] || dInM[j]) continue;
+        dInM[j] = lab; openQ[qt++] = j;
+      }
+    }
+    sizes.push(qt); inMP.push(inn / qt);
+    if (qt > best) best = qt;
+  }
+  if (!best) { openPrevOK = false; return null; }
+  // kept: big parts, and anything mostly inside MP's own opening
+  for (let i = 0; i < N; i++) openNon[i] = openNon[i] && (sizes[dInM[i]] >= 0.3 * best || inMP[dInM[i]] >= 0.5) ? 1 : 0;
+  let area = 0;
+  for (let i = 0; i < N; i++) {
+    if (openO[i] && !openNon[i]) {                          // boundary cell: back only if it touches the kept core (8-nbhd)
+      const x = i % GW, y = (i / GW) | 0;
+      let near = 0;
+      for (let dy = -1; dy <= 1 && !near; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const xx = x + dx, yy = y + dy;
+        if (xx >= 0 && xx < GW && yy >= 0 && yy < GH && openNon[yy * GW + xx]) { near = 1; break; }
+      }
+      if (!near) openO[i] = 0;
+    }
+    area += openO[i];
+  }
+  // sanity: the pixel opening must look like MP's (not empty, not exploded)
+  if (area < 0.3 * innA || area > 3 * innA + 50) { openPrevOK = false; return null; }
+  // Temporal smoothing in IMAGE coordinates. The lip box follows MediaPipe
+  // and jitters with it, so last frame's mask is resampled into this frame's
+  // box, moved by how far the opening itself moved (centroid of this frame's
+  // pixel opening vs last frame's — pixels, not MP, so no MP jitter gets in),
+  // then blended. Strong damping while the opening keeps its shape; a real
+  // change of shape (talking, opening wider) is followed at once.
+  let cx = 0, cy = 0, cn = 0;
+  for (let i = 0; i < N; i++) if (openO[i]) { cx += i % GW; cy += (i / GW) | 0; cn++; }
+  cx = box[0] + (cx / cn + 0.5) * box[2] / GW; cy = box[1] + (cy / cn + 0.5) * box[3] / GH;
+  if (!fresh && openPrevOK && openPrevBox && !moving) {
+    const [pbx, pby, pbw, pbh] = openPrevBox;
+    const sx = GW / pbw, sy = GH / pbh;
+    // follow a real move of the opening (> ~1.5 cells); ignore sub-cell noise
+    const cell = Math.hypot(box[2] / GW, box[3] / GH);
+    let dx = cx - openPrevC[0], dy = cy - openPrevC[1];
+    const dm = Math.hypot(dx, dy), keepMove = smooth01(0.8 * cell, 2 * cell, dm);
+    dx *= keepMove; dy *= keepMove;
+    let aNow = 0, aPrev = 0;
+    for (let y = 0; y < GH; y++) {
+      const py = (box[1] + (y + 0.5) * box[3] / GH - dy - pby) * sy - 0.5;
+      const y0 = Math.floor(py), fy = py - y0;
+      for (let x = 0; x < GW; x++) {
+        const px = (box[0] + (x + 0.5) * box[2] / GW - dx - pbx) * sx - 0.5;
+        const x0 = Math.floor(px), fx = px - x0;
+        const g = (xx, yy) => (xx < 0 || yy < 0 || xx >= GW || yy >= GH ? 0 : openPrev[yy * GW + xx]);
+        const pv = (g(x0, y0) * (1 - fx) + g(x0 + 1, y0) * fx) * (1 - fy) + (g(x0, y0 + 1) * (1 - fx) + g(x0 + 1, y0 + 1) * fx) * fy;
+        const i = y * GW + x;
+        openTmp[i] = pv;
+        aPrev += pv; aNow += openO[i];
+      }
+    }
+    // the opening changing SIZE (talking, opening wider) is followed at once;
+    // edge noise of ±1 cell hardly changes the area
+    const dA = Math.abs(aNow - aPrev) / Math.max(1, aPrev);
+    const k = 0.2 + 0.8 * smooth01(0.06, 0.2, dA);
+    for (let i = 0; i < N; i++) openPrev[i] = openTmp[i] + (openO[i] - openTmp[i]) * k;
+  } else openPrev.set(openO);
+  openPrevOK = true;
+  openPrevBox = [box[0], box[1], box[2], box[3]];
+  openPrevC[0] = cx; openPrevC[1] = cy;
+  // soft edge (3×3 box), then to the canvas
+  const c = openCv._ctx, im = openCv._im || (openCv._im = c.createImageData(GW, GH)), d = im.data;
+  for (let y = 0; y < GH; y++) {
+    const ya = y > 0 ? -GW : 0, yb = y < GH - 1 ? GW : 0;
+    for (let x = 0; x < GW; x++) {
+      const i = y * GW + x, xa = x > 0 ? -1 : 0, xb = x < GW - 1 ? 1 : 0;
+      const v = (openPrev[i + ya + xa] + openPrev[i + ya] + openPrev[i + ya + xb] + openPrev[i + xa] + openPrev[i] + openPrev[i + xb] + openPrev[i + yb + xa] + openPrev[i + yb] + openPrev[i + yb + xb]) / 9;
+      d[4 * i] = d[4 * i + 1] = d[4 * i + 2] = 0; d[4 * i + 3] = Math.round(255 * Math.min(1, v * 1.15));
+    }
+  }
+  c.putImageData(im, 0, 0);
+  return { cv: openCv, box: [box[0], box[1], box[2], box[3]] };
 }
 
 /** Mean / covariance of the shading-invariant chroma (CA, CB) over sel (2σ-trimmed). */
@@ -1810,6 +1992,10 @@ export function segmentLipsColor(src, w, h, lms, opts = {}) {
   const farErase = gridOK
     ? buildFarErase(outerD, visOut, t, xf, box, conf * smooth01(1.5, 3, Math.max(dprime, dprimeC)))
     : null;
+  const openMask = PIXEL_CUT && cutoutActive && gridOK && Lp && conf > 0.3
+    ? buildOpenMask(t, box, xf, Lp, fresh, !!opts.moving)
+    : null;
+  if (!openMask) openPrevOK = false;
 
   lastSeg = {
     outer: tangled ? untangle(edge.base) : edge.base,   // organic outline (overlays / fallback)
@@ -1820,6 +2006,7 @@ export function segmentLipsColor(src, w, h, lms, opts = {}) {
     linerInner: untangle(linerInner), linerSteps,
     inner: untangle(inner), safe, bbox: box, conf, dprime, dprimeC, version: ++version,
     farErase,                              // {cv, box}: erase map for the far side of a turned mouth (or null)
+    openMask,                              // {cv, box}: mouth opening from pixels (open mouth) — cut instead of inner∩safe
     // Mouth opening from pixels: open (cut active), gap / mouth width (median
     // over the middle of the mouth) and the share of columns that are open.
     open: cutoutActive, openRatio, openCols,
@@ -1840,7 +2027,7 @@ export function segmentLipsColor(src, w, h, lms, opts = {}) {
 export function getLastLipSeg() { return lastSeg; }
 
 /** Forget temporal state (call on source change). */
-export function resetLipSeg() { prevPts = null; prevBox = null; prevInner = null; lastSeg = null; cutoutActive = false; lipModel = null; }
+export function resetLipSeg() { prevPts = null; prevBox = null; prevInner = null; lastSeg = null; cutoutActive = false; lipModel = null; openPrevOK = false; }
 
 /** Debug: the last frame's lip-probability grids (GW×GH over seg.bbox). */
 export function getLipGrids() { return { Q, Pb, Lb, GW, GH }; }

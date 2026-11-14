@@ -441,6 +441,7 @@ export function useTryOn(options = {}) {
     let stopped = false;
     let lastTime = -1;
     let draining = false;
+    let cancelVfc = () => {};
 
     (async () => {
       try {
@@ -462,9 +463,7 @@ export function useTryOn(options = {}) {
           if (queued) queueMicrotask(drain);
         };
 
-        const tick = () => {
-          if (stopped) return;
-          rafRef.current = requestAnimationFrame(tick);
+        const capture = () => {
           if (!v.videoWidth || v.paused || v.ended) return;
           const isFresh = v.currentTime !== lastTime;
           if (!isFresh) return;
@@ -478,6 +477,22 @@ export function useTryOn(options = {}) {
           queued = { src: snap, w, h };
           if (!draining) drain();
         };
+        const tick = () => {
+          if (stopped) return;
+          rafRef.current = requestAnimationFrame(tick);
+          capture();
+        };
+        // Every frame the video PRESENTS (Safari 15.4+, Chrome): fires exactly
+        // when a new frame is ready to draw. rAF stays as the fallback.
+        const hasVFC = typeof v.requestVideoFrameCallback === 'function';
+        let vfcId = 0;
+        const onVideoFrame = () => {
+          if (stopped) return;
+          vfcId = v.requestVideoFrameCallback(onVideoFrame);
+          capture();
+        };
+        if (hasVFC) vfcId = v.requestVideoFrameCallback(onVideoFrame);
+        cancelVfc = () => { if (hasVFC && vfcId) try { v.cancelVideoFrameCallback(vfcId); } catch (_) { /* gone */ } };
         cancelAnimationFrame(rafRef.current);
         tick();
       } catch (e) {
@@ -489,6 +504,7 @@ export function useTryOn(options = {}) {
     return () => {
       stopped = true;
       cancelAnimationFrame(rafRef.current);
+      cancelVfc();
     };
   }, [ready, active, source, sourceEl,
       landmarkerRef, trackFrame, processFrame, onError]);

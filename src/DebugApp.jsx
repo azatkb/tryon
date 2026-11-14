@@ -140,7 +140,7 @@ export default function DebugApp() {
   const fadeInfoRef = useRef(null);
   const [protect, setProtect] = useState(true);
   const [tune, setTune] = useState(() => JSON.parse(JSON.stringify(TUNE_DEFAULT)));
-  const [panelOpen, setPanelOpen] = useState(true);
+  const [panelOpen, setPanelOpen] = useState(false);   // collapsed by default — click "▸ Debug" to open
   const [cinema, setCinema] = useState(0);
   const [eyeFinish, setEyeFinish] = useState('satin');
   const [fndFinish, setFndFinish] = useState('natural');
